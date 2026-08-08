@@ -645,7 +645,11 @@ func exchangeExternalIdpCode(client *http.Client, tokenEndpoint, clientID, code,
 	if strings.TrimSpace(scopes) != "" {
 		form.Set("scope", scopes)
 	}
-	return postExternalIdpToken(client, tokenEndpoint, form)
+    token, err := postExternalIdpToken(client, tokenEndpoint, "", form)
+    if err != nil {
+        return "", "", 0, err
+    }
+    return token.AccessToken, token.RefreshToken, token.ExpiresIn, nil
 }
 
 // exchangeSocialCode exchanges a Cognito authorization code (with its PKCE

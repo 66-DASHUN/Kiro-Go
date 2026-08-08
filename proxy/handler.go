@@ -2423,7 +2423,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"banReason":         a.BanReason,
 			"banTime":           a.BanTime,
 			"expiresAt":         a.ExpiresAt,
-			"hasToken":          a.AccessToken != "",
+			"hasToken":          accountBearerToken(&a) != "",
 			"machineId":         a.MachineId,
 			"weight":            a.Weight,
 			"overageStatus":     a.OverageStatus,
@@ -3180,6 +3180,8 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		AccessToken       string `json:"accessToken"`
 		RefreshToken      string `json:"refreshToken"`
+		KiroApiKey        string `json:"kiroApiKey"`
+		Nickname          string `json:"nickname"`
 		ClientID          string `json:"clientId"`
 		ClientSecret      string `json:"clientSecret"`
 		AuthMethod        string `json:"authMethod"`
@@ -3194,6 +3196,46 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// API Key credentials are long-lived headless credentials and do not need OAuth refresh.
+	rawApiKey := strings.TrimSpace(req.KiroApiKey)
+	if rawApiKey == "" && strings.EqualFold(strings.TrimSpace(req.AuthMethod), "api_key") {
+		rawApiKey = strings.TrimSpace(req.AccessToken)
+	}
+	if rawApiKey != "" {
+		account := config.Account{
+			ID:         auth.GenerateAccountID(),
+			Nickname:   strings.TrimSpace(req.Nickname),
+			KiroApiKey: rawApiKey,
+			AuthMethod: "api_key",
+			Provider:   strings.TrimSpace(req.Provider),
+			Region:     strings.TrimSpace(req.Region),
+			Enabled:    true,
+		}
+		if err := config.NormalizeAPIKeyAccount(&account); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if config.AccountAPIKeyExists(account.KiroApiKey) {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{"error": config.ErrDuplicateAPIKey.Error()})
+			return
+		}
+		if err := config.AddAccount(account); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		h.pool.Reload()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"account": map[string]interface{}{
+				"id":    account.ID,
+				"email": account.Email,
+			},
+		})
+		return
+	}
 	if req.RefreshToken == "" {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "refreshToken is required"})

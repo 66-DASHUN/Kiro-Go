@@ -256,6 +256,35 @@ func TestSetPayloadProfileArnForAccountPreservesExplicitPayloadArn(t *testing.T)
 	}
 }
 
+func TestSetPayloadProfileArnForAccountClearsAPIKeyProfile(t *testing.T) {
+	payload := &KiroPayload{ProfileArn: "arn:aws:codewhisperer:us-east-1:123:profile/stale"}
+	account := &config.Account{
+		AuthMethod: "api_key",
+		KiroApiKey: "ksk_test",
+		ProfileArn: "arn:aws:codewhisperer:us-east-1:123:profile/stale",
+	}
+
+	setPayloadProfileArnForAccount(payload, account)
+	if payload.ProfileArn != "" {
+		t.Fatalf("expected empty profile ARN for API key account, got %q", payload.ProfileArn)
+	}
+}
+
+func TestEndpointsForAccountUsesRegionalCLIForAPIKey(t *testing.T) {
+	account := &config.Account{
+		AuthMethod: "api_key",
+		KiroApiKey: "ksk_test",
+		Region:     "eu-central-1",
+	}
+
+	endpoints := endpointsForAccount(account)
+	if len(endpoints) != 1 || endpoints[0].Name != "Kiro CLI" || endpoints[0].Origin != "KIRO_CLI" {
+		t.Fatalf("expected a single Kiro CLI endpoint, got %+v", endpoints)
+	}
+	if got := cliRuntimeURL(account); got != "https://runtime.eu-central-1.kiro.dev/" {
+		t.Fatalf("unexpected CLI runtime URL: %q", got)
+	}
+}
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	parsed, err := url.Parse(raw)
