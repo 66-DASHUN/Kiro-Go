@@ -227,6 +227,9 @@ func TestGetNextForModelForAPIKeyExcludingHonorsRetryExclusions(t *testing.T) {
 		config.Account{ID: "key-a-2", ApiKeyID: "key-a"},
 		config.Account{ID: "key-b", ApiKeyID: "key-b"},
 	)
+	// The selector increments before reading; start at max so the first
+	// candidate is index 0 (key-a-1), which is explicitly excluded below.
+	p.currentIndex = ^uint64(0)
 
 	acc := p.GetNextForModelForAPIKeyExcluding("key-a", "model", map[string]bool{"key-a-1": true})
 	if acc == nil || acc.ID != "key-a-2" {
