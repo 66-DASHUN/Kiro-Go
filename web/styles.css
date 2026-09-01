@@ -637,6 +637,57 @@ select.custom-select-native {
   line-height: 1.5;
 }
 
+/* Cache policy and ownership controls */
+.cache-ratio-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.cache-ratio-grid .form-group {
+  min-width: 0;
+}
+.input-suffix {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+.input-suffix input {
+  min-width: 0;
+  flex: 1;
+  border-radius: var(--radius-md) 0 0 var(--radius-md) !important;
+}
+.input-suffix span {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.625rem;
+  border: 1px solid var(--border);
+  border-left: 0;
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.api-key-cache-settings {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+.api-key-cache-summary,
+.api-key-bound-count {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.badge-key {
+  background: #0f766e;
+  color: #fff;
+  border-color: #0f766e;
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Badges */
 .badge {
   display: inline-flex;
@@ -1826,6 +1877,13 @@ img.brand-icon {
   }
 }
 @media (max-width: 720px) {
+  .cache-ratio-grid {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .api-key-cache-settings {
+    margin-top: 1rem;
+  }
   .account-header {
     flex-direction: column;
     align-items: stretch;

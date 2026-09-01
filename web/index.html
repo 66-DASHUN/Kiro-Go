@@ -262,6 +262,42 @@
           <div id="apiKeysList"></div>
         </div>
 
+        <!-- Prompt cache emulation -->
+        <div class="card">
+          <div class="card-header"><span class="card-title" data-i18n="settings.promptCacheSettings"></span></div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="promptCacheEnabled" checked /><span class="slider"></span></span>
+              <span data-i18n="settings.promptCacheEnabled"></span>
+            </label>
+            <small data-i18n="settings.promptCacheEnabledHint"></small>
+          </div>
+          <div class="form-group">
+            <label for="promptCacheMode" data-i18n="settings.promptCacheMode"></label>
+            <select id="promptCacheMode">
+              <option value="uniform" data-i18n="settings.promptCacheModeUniform"></option>
+              <option value="independent" data-i18n="settings.promptCacheModeIndependent"></option>
+            </select>
+            <small data-i18n="settings.promptCacheModeHint"></small>
+          </div>
+          <div class="cache-ratio-grid">
+            <div class="form-group">
+              <label for="promptCacheRatio" data-i18n="settings.promptCacheRatio"></label>
+              <div class="input-suffix"><input type="number" id="promptCacheRatio" min="0" max="100" step="0.1" /><span>%</span></div>
+            </div>
+            <div class="form-group">
+              <label for="promptCacheCreationRatio" data-i18n="settings.promptCacheCreationRatio"></label>
+              <div class="input-suffix"><input type="number" id="promptCacheCreationRatio" min="0" max="100" step="0.1" /><span>%</span></div>
+            </div>
+            <div class="form-group">
+              <label for="promptCacheReadRatio" data-i18n="settings.promptCacheReadRatio"></label>
+              <div class="input-suffix"><input type="number" id="promptCacheReadRatio" min="0" max="100" step="0.1" /><span>%</span></div>
+            </div>
+          </div>
+          <small class="block" data-i18n="settings.promptCacheRatioHint"></small>
+          <button class="btn btn-primary" id="savePromptCacheBtn" data-i18n="settings.savePromptCache"></button>
+        </div>
+
         <!-- Usage settings -->
         <div class="card">
           <div class="card-header"><span class="card-title" data-i18n="settings.usageSettings"></span></div>
@@ -639,6 +675,44 @@
           <label data-i18n="apiKeys.limitCredits"></label>
           <input type="number" id="apiKeyForm_creditLimit" min="0" step="0.01" value="0" />
           <small data-i18n="apiKeys.limitHint"></small>
+        </div>
+        <div class="api-key-cache-settings">
+          <div class="form-group">
+            <label for="apiKeyCacheScope" data-i18n="apiKeys.cacheScope"></label>
+            <select id="apiKeyCacheScope">
+              <option value="inherit" data-i18n="apiKeys.cacheInherit"></option>
+              <option value="independent" data-i18n="apiKeys.cacheOverride"></option>
+            </select>
+            <small data-i18n="apiKeys.cacheScopeHint"></small>
+          </div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="apiKeyCacheEnabled" checked /><span class="slider"></span></span>
+              <span data-i18n="apiKeys.cacheEnabled"></span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label for="apiKeyCacheMode" data-i18n="apiKeys.cacheMode"></label>
+            <select id="apiKeyCacheMode">
+              <option value="uniform" data-i18n="apiKeys.cacheModeUniform"></option>
+              <option value="independent" data-i18n="apiKeys.cacheModeIndependent"></option>
+            </select>
+          </div>
+          <div class="cache-ratio-grid">
+            <div class="form-group">
+              <label for="apiKeyCacheRatio" data-i18n="apiKeys.cacheRatio"></label>
+              <div class="input-suffix"><input type="number" id="apiKeyCacheRatio" min="0" max="100" step="0.1" /><span>%</span></div>
+            </div>
+            <div class="form-group">
+              <label for="apiKeyCacheCreationRatio" data-i18n="apiKeys.cacheCreationRatio"></label>
+              <div class="input-suffix"><input type="number" id="apiKeyCacheCreationRatio" min="0" max="100" step="0.1" /><span>%</span></div>
+            </div>
+            <div class="form-group">
+              <label for="apiKeyCacheReadRatio" data-i18n="apiKeys.cacheReadRatio"></label>
+              <div class="input-suffix"><input type="number" id="apiKeyCacheReadRatio" min="0" max="100" step="0.1" /><span>%</span></div>
+            </div>
+          </div>
+          <small class="block" data-i18n="apiKeys.cacheRatioHint"></small>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" id="apiKeyModalCancelBtn" type="button" data-i18n="apiKeys.cancelBtn"></button>
