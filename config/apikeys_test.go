@@ -244,10 +244,10 @@ func TestResetApiKeyUsage(t *testing.T) {
 
 func TestApiKeyOverLimit(t *testing.T) {
 	tests := []struct {
-		name        string
-		entry       ApiKeyEntry
-		wantToken   bool
-		wantCredit  bool
+		name       string
+		entry      ApiKeyEntry
+		wantToken  bool
+		wantCredit bool
 	}{
 		{"unlimited", ApiKeyEntry{TokensUsed: 100, CreditsUsed: 5}, false, false},
 		{"under token limit", ApiKeyEntry{TokenLimit: 200, TokensUsed: 100}, false, false},
@@ -291,5 +291,83 @@ func TestGenerateApiKeyValueIsUnique(t *testing.T) {
 	}
 	if len(a) < 10 {
 		t.Fatalf("expected non-trivial key length, got %q", a)
+	}
+}
+
+func TestPromptCacheSettingsInheritGlobalDefaults(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	settings := EffectivePromptCacheSettings("missing")
+	if !settings.Enabled {
+		t.Fatal("expected prompt cache emulation to be enabled by default")
+	}
+	if settings.Mode != "uniform" {
+		t.Fatalf("mode=%q, want uniform", settings.Mode)
+	}
+	if settings.Ratio != 1 || settings.CreationRatio != 1 || settings.ReadRatio != 1 {
+		t.Fatalf("settings=%+v, want all ratios 1", settings)
+	}
+}
+
+func TestPromptCacheSettingsUseAPIKeyOverrideAndInheritMissingFields(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	globalRatio := 0.8
+	globalMode := "independent"
+	if err := UpdatePromptCacheSettings(true, globalMode, globalRatio, 0.6, 0.4); err != nil {
+		t.Fatalf("update global settings: %v", err)
+	}
+	keyRatio := 0.7
+	entry, err := AddApiKey(ApiKeyEntry{
+		Key:                       "sk-cache",
+		Enabled:                   true,
+		PromptCacheEmulationRatio: &keyRatio,
+	})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+
+	settings := EffectivePromptCacheSettings(entry.ID)
+	if settings.Ratio != 0.7 {
+		t.Fatalf("ratio=%v, want 0.7", settings.Ratio)
+	}
+	if settings.CreationRatio != 0.7 || settings.ReadRatio != 0.7 {
+		t.Fatalf("settings=%+v, want common key ratio for independent fields", settings)
+	}
+
+	missing := EffectivePromptCacheSettings("unknown")
+	if missing.Ratio != globalRatio || missing.CreationRatio != 0.6 || missing.ReadRatio != 0.4 {
+		t.Fatalf("missing key settings=%+v, want global settings", missing)
+	}
+}
+
+func TestPromptCacheSettingsRejectInvalidValues(t *testing.T) {
+	for _, ratio := range []float64{-0.01, 1.01} {
+		if err := ValidatePromptCacheRatio(ratio); err == nil {
+			t.Fatalf("expected ratio %v to be rejected", ratio)
+		}
+	}
+	if err := ValidatePromptCacheSettings(PromptCacheSettings{Enabled: true, Mode: "invalid", Ratio: 1, CreationRatio: 1, ReadRatio: 1}); err == nil {
+		t.Fatal("expected invalid mode to be rejected")
+	}
+}
+
+func TestPromptCacheSettingsLoadLegacyJSONDefaults(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	legacy := []byte(`{"password":"p","port":8080,"host":"0.0.0.0","accounts":[],"apiKeys":[{"id":"legacy-key","key":"sk-legacy","enabled":true}]}`)
+	if err := os.WriteFile(cfgFile, legacy, 0600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init legacy config: %v", err)
+	}
+	settings := EffectivePromptCacheSettings("legacy-key")
+	if !settings.Enabled || settings.Mode != "uniform" || settings.Ratio != 1 || settings.CreationRatio != 1 || settings.ReadRatio != 1 {
+		t.Fatalf("legacy settings=%+v, want default settings", settings)
 	}
 }

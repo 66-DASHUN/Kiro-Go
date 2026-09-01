@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -148,6 +149,47 @@ type PromptFilterRule struct {
 	Enabled bool   `json:"enabled"`           // Whether this rule is active
 }
 
+// PromptCacheSettings describes the effective prompt-cache emulation policy.
+// Ratio is the common ratio used in uniform mode; CreationRatio and ReadRatio
+// are used independently when Mode is "independent".
+type PromptCacheSettings struct {
+	Enabled       bool    `json:"promptCacheEmulationEnabled"`
+	Mode          string  `json:"promptCacheEmulationMode"`
+	Ratio         float64 `json:"promptCacheEmulationRatio"`
+	CreationRatio float64 `json:"promptCacheCreationEmulationRatio"`
+	ReadRatio     float64 `json:"promptCacheReadEmulationRatio"`
+}
+
+const (
+	PromptCacheModeUniform     = "uniform"
+	PromptCacheModeIndependent = "independent"
+	promptCacheModeUniform     = PromptCacheModeUniform
+	promptCacheModeIndependent = PromptCacheModeIndependent
+)
+
+// ValidatePromptCacheRatio validates a cache emulation ratio.
+func ValidatePromptCacheRatio(ratio float64) error {
+	if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 || ratio > 1 {
+		return fmt.Errorf("prompt cache ratio must be finite and within [0,1], got %v", ratio)
+	}
+	return nil
+}
+
+// ValidatePromptCacheSettings validates a complete effective cache policy.
+func ValidatePromptCacheSettings(settings PromptCacheSettings) error {
+	if settings.Mode != promptCacheModeUniform && settings.Mode != promptCacheModeIndependent {
+		return fmt.Errorf("prompt cache mode must be %q or %q, got %q", promptCacheModeUniform, promptCacheModeIndependent, settings.Mode)
+	}
+	for name, ratio := range map[string]float64{
+		"ratio": settings.Ratio, "creation ratio": settings.CreationRatio, "read ratio": settings.ReadRatio,
+	} {
+		if err := ValidatePromptCacheRatio(ratio); err != nil {
+			return fmt.Errorf("invalid prompt cache %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 // ApiKeyEntry represents a single API key with optional usage limits and counters.
 // Limits with value 0 are treated as "no limit". Counters are cumulative and never reset
 // automatically; operators can use the admin endpoint to manually reset them.
@@ -163,6 +205,14 @@ type ApiKeyEntry struct {
 	// Limits (0 = unlimited)
 	TokenLimit  int64   `json:"tokenLimit,omitempty"`
 	CreditLimit float64 `json:"creditLimit,omitempty"`
+
+	// Prompt-cache settings are optional per-key overrides. A nil value inherits
+	// the corresponding global setting.
+	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled,omitempty"`
+	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode,omitempty"`
+	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio,omitempty"`
+	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio,omitempty"`
+	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio,omitempty"`
 
 	// Cumulative usage (never auto-reset)
 	TokensUsed    int64   `json:"tokensUsed,omitempty"`
@@ -225,6 +275,15 @@ type Config struct {
 	// PromptFilterRules is a list of user-defined prompt sanitization rules (regex or line-filter).
 	PromptFilterRules []PromptFilterRule `json:"promptFilterRules,omitempty"`
 
+	// Prompt-cache emulation defaults. These fields intentionally use values so
+	// they remain straightforward to edit in the persisted JSON; Load supplies
+	// defaults when reading older files that do not contain them.
+	PromptCacheEmulationEnabled       bool    `json:"promptCacheEmulationEnabled"`
+	PromptCacheEmulationMode          string  `json:"promptCacheEmulationMode"`
+	PromptCacheEmulationRatio         float64 `json:"promptCacheEmulationRatio"`
+	PromptCacheCreationEmulationRatio float64 `json:"promptCacheCreationEmulationRatio"`
+	PromptCacheReadEmulationRatio     float64 `json:"promptCacheReadEmulationRatio"`
+
 	// LogLevel controls verbosity of application logs.
 	// Accepted values: "debug", "info", "warn", "error". Defaults to "info".
 	// Can be overridden by the LOG_LEVEL environment variable.
@@ -284,11 +343,16 @@ func Load() error {
 			// Create default configuration.
 			// Binds to 0.0.0.0 by default for Docker/container compatibility.
 			cfg = &Config{
-				Password:      "changeme",
-				Port:          8080,
-				Host:          "0.0.0.0",
-				RequireApiKey: false,
-				Accounts:      []Account{},
+				Password:                          "changeme",
+				Port:                              8080,
+				Host:                              "0.0.0.0",
+				RequireApiKey:                     false,
+				Accounts:                          []Account{},
+				PromptCacheEmulationEnabled:       true,
+				PromptCacheEmulationMode:          promptCacheModeUniform,
+				PromptCacheEmulationRatio:         1,
+				PromptCacheCreationEmulationRatio: 1,
+				PromptCacheReadEmulationRatio:     1,
 			}
 			return saveLocked()
 		}
@@ -298,6 +362,14 @@ func Load() error {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return err
+	}
+	if err := normalizePromptCacheConfig(&c, data); err != nil {
+		return err
+	}
+	for _, entry := range c.ApiKeys {
+		if err := validateApiKeyPromptCacheOverrides(entry); err != nil {
+			return err
+		}
 	}
 	cfg = &c
 
@@ -344,6 +416,108 @@ func Load() error {
 		}
 	}
 	return nil
+}
+
+func normalizePromptCacheConfig(c *Config, data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if _, ok := fields["promptCacheEmulationEnabled"]; !ok {
+		c.PromptCacheEmulationEnabled = true
+	}
+	if _, ok := fields["promptCacheEmulationMode"]; !ok || c.PromptCacheEmulationMode == "" {
+		c.PromptCacheEmulationMode = promptCacheModeUniform
+	}
+	if _, ok := fields["promptCacheEmulationRatio"]; !ok {
+		c.PromptCacheEmulationRatio = 1
+	}
+	if _, ok := fields["promptCacheCreationEmulationRatio"]; !ok {
+		c.PromptCacheCreationEmulationRatio = 1
+	}
+	if _, ok := fields["promptCacheReadEmulationRatio"]; !ok {
+		c.PromptCacheReadEmulationRatio = 1
+	}
+	return ValidatePromptCacheSettings(PromptCacheSettings{
+		Enabled:       c.PromptCacheEmulationEnabled,
+		Mode:          c.PromptCacheEmulationMode,
+		Ratio:         c.PromptCacheEmulationRatio,
+		CreationRatio: c.PromptCacheCreationEmulationRatio,
+		ReadRatio:     c.PromptCacheReadEmulationRatio,
+	})
+}
+
+// EffectivePromptCacheSettings resolves the policy for an API-key entry ID.
+// Unknown or empty IDs use the global defaults. Per-key nil fields inherit
+// their global counterparts.
+func EffectivePromptCacheSettings(apiKeyID string) PromptCacheSettings {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return defaultPromptCacheSettings()
+	}
+	settings := PromptCacheSettings{
+		Enabled:       cfg.PromptCacheEmulationEnabled,
+		Mode:          cfg.PromptCacheEmulationMode,
+		Ratio:         cfg.PromptCacheEmulationRatio,
+		CreationRatio: cfg.PromptCacheCreationEmulationRatio,
+		ReadRatio:     cfg.PromptCacheReadEmulationRatio,
+	}
+	if settings.Mode == "" {
+		settings.Mode = promptCacheModeUniform
+	}
+	for i := range cfg.ApiKeys {
+		entry := &cfg.ApiKeys[i]
+		if entry.ID != apiKeyID {
+			continue
+		}
+		if entry.PromptCacheEmulationEnabled != nil {
+			settings.Enabled = *entry.PromptCacheEmulationEnabled
+		}
+		if entry.PromptCacheEmulationMode != nil {
+			settings.Mode = *entry.PromptCacheEmulationMode
+		}
+		if entry.PromptCacheEmulationRatio != nil {
+			settings.Ratio = *entry.PromptCacheEmulationRatio
+			settings.CreationRatio = *entry.PromptCacheEmulationRatio
+			settings.ReadRatio = *entry.PromptCacheEmulationRatio
+		}
+		if entry.PromptCacheCreationEmulationRatio != nil {
+			settings.CreationRatio = *entry.PromptCacheCreationEmulationRatio
+		}
+		if entry.PromptCacheReadEmulationRatio != nil {
+			settings.ReadRatio = *entry.PromptCacheReadEmulationRatio
+		}
+		break
+	}
+	if settings.Mode == promptCacheModeUniform {
+		settings.CreationRatio = settings.Ratio
+		settings.ReadRatio = settings.Ratio
+	}
+	return settings
+}
+
+func defaultPromptCacheSettings() PromptCacheSettings {
+	return PromptCacheSettings{Enabled: true, Mode: promptCacheModeUniform, Ratio: 1, CreationRatio: 1, ReadRatio: 1}
+}
+
+// UpdatePromptCacheSettings updates and persists the global cache policy.
+func UpdatePromptCacheSettings(enabled bool, mode string, ratio, creationRatio, readRatio float64) error {
+	settings := PromptCacheSettings{Enabled: enabled, Mode: mode, Ratio: ratio, CreationRatio: creationRatio, ReadRatio: readRatio}
+	if err := ValidatePromptCacheSettings(settings); err != nil {
+		return err
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	cfg.PromptCacheEmulationEnabled = enabled
+	cfg.PromptCacheEmulationMode = mode
+	cfg.PromptCacheEmulationRatio = ratio
+	cfg.PromptCacheCreationEmulationRatio = creationRatio
+	cfg.PromptCacheReadEmulationRatio = readRatio
+	return saveLocked()
 }
 
 // saveLocked persists cfg to disk. Caller MUST already hold cfgLock.

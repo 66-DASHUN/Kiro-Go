@@ -48,6 +48,9 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	if entry.Key == "" {
 		return ApiKeyEntry{}, errors.New("api key value must not be empty")
 	}
+	if err := validateApiKeyPromptCacheOverrides(entry); err != nil {
+		return ApiKeyEntry{}, err
+	}
 	for _, existing := range cfg.ApiKeys {
 		if existing.Key == entry.Key {
 			return ApiKeyEntry{}, errors.New("api key already exists")
@@ -90,6 +93,9 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	if idx < 0 {
 		return errors.New("api key not found")
 	}
+	if err := validateApiKeyPromptCacheOverrides(patch); err != nil {
+		return err
+	}
 	if patch.Name != "" {
 		cfg.ApiKeys[idx].Name = patch.Name
 	}
@@ -106,10 +112,43 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	cfg.ApiKeys[idx].Enabled = patch.Enabled
 	cfg.ApiKeys[idx].TokenLimit = patch.TokenLimit
 	cfg.ApiKeys[idx].CreditLimit = patch.CreditLimit
+	if patch.PromptCacheEmulationEnabled != nil {
+		cfg.ApiKeys[idx].PromptCacheEmulationEnabled = patch.PromptCacheEmulationEnabled
+	}
+	if patch.PromptCacheEmulationMode != nil {
+		cfg.ApiKeys[idx].PromptCacheEmulationMode = patch.PromptCacheEmulationMode
+	}
+	if patch.PromptCacheEmulationRatio != nil {
+		cfg.ApiKeys[idx].PromptCacheEmulationRatio = patch.PromptCacheEmulationRatio
+	}
+	if patch.PromptCacheCreationEmulationRatio != nil {
+		cfg.ApiKeys[idx].PromptCacheCreationEmulationRatio = patch.PromptCacheCreationEmulationRatio
+	}
+	if patch.PromptCacheReadEmulationRatio != nil {
+		cfg.ApiKeys[idx].PromptCacheReadEmulationRatio = patch.PromptCacheReadEmulationRatio
+	}
 	if patch.Migrated {
 		cfg.ApiKeys[idx].Migrated = true
 	}
 	return saveLocked()
+}
+
+func validateApiKeyPromptCacheOverrides(entry ApiKeyEntry) error {
+	if entry.PromptCacheEmulationMode != nil && *entry.PromptCacheEmulationMode != promptCacheModeUniform && *entry.PromptCacheEmulationMode != promptCacheModeIndependent {
+		return errors.New("prompt cache mode must be uniform or independent")
+	}
+	for name, value := range map[string]*float64{
+		"ratio":          entry.PromptCacheEmulationRatio,
+		"creation ratio": entry.PromptCacheCreationEmulationRatio,
+		"read ratio":     entry.PromptCacheReadEmulationRatio,
+	} {
+		if value != nil {
+			if err := ValidatePromptCacheRatio(*value); err != nil {
+				return errors.New("invalid prompt cache " + name + ": " + err.Error())
+			}
+		}
+	}
+	return nil
 }
 
 // DeleteApiKey removes the API key entry with the given ID. Returns nil even if
