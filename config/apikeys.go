@@ -96,7 +96,8 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	if idx < 0 {
 		return errors.New("api key not found")
 	}
-	candidate := cloneApiKeyEntry(cfg.ApiKeys[idx])
+	original := cloneApiKeyEntry(cfg.ApiKeys[idx])
+	candidate := cloneApiKeyEntry(original)
 	if patch.Name != "" {
 		candidate.Name = patch.Name
 	}
@@ -140,7 +141,11 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 		return err
 	}
 	cfg.ApiKeys[idx] = candidate
-	return saveLocked()
+	if err := saveLocked(); err != nil {
+		cfg.ApiKeys[idx] = original
+		return err
+	}
+	return nil
 }
 
 // ClearPromptCacheOverrides removes all per-key prompt-cache overrides so the
@@ -155,12 +160,17 @@ func ClearPromptCacheOverrides(id string) error {
 		if cfg.ApiKeys[i].ID != id {
 			continue
 		}
+		original := cloneApiKeyEntry(cfg.ApiKeys[i])
 		cfg.ApiKeys[i].PromptCacheEmulationEnabled = nil
 		cfg.ApiKeys[i].PromptCacheEmulationMode = nil
 		cfg.ApiKeys[i].PromptCacheEmulationRatio = nil
 		cfg.ApiKeys[i].PromptCacheCreationEmulationRatio = nil
 		cfg.ApiKeys[i].PromptCacheReadEmulationRatio = nil
-		return saveLocked()
+		if err := saveLocked(); err != nil {
+			cfg.ApiKeys[i] = original
+			return err
+		}
+		return nil
 	}
 	return errors.New("api key not found")
 }

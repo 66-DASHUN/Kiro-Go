@@ -464,3 +464,43 @@ func TestClearPromptCacheOverridesRestoresInheritance(t *testing.T) {
 		t.Fatalf("overrides were not cleared: %+v", got)
 	}
 }
+
+func TestUpdateApiKeySaveFailureRollsBackInMemoryEntry(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	ratio := 0.2
+	created, err := AddApiKey(ApiKeyEntry{Key: "sk-update-rollback", Enabled: true, PromptCacheEmulationRatio: &ratio})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	badPath := filepath.Join(t.TempDir(), "missing", "config.json")
+	cfgPath = badPath
+	updated := 0.8
+	if err := UpdateApiKey(created.ID, ApiKeyEntry{Enabled: false, PromptCacheEmulationRatio: &updated}); err == nil {
+		t.Fatal("expected update save failure")
+	}
+	got := GetApiKeyEntry(created.ID)
+	if got == nil || got.Enabled != true || got.PromptCacheEmulationRatio == nil || *got.PromptCacheEmulationRatio != 0.2 {
+		t.Fatalf("entry changed after failed update: %+v", got)
+	}
+}
+
+func TestClearPromptCacheOverridesSaveFailureRollsBackInMemoryEntry(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	ratio := 0.35
+	created, err := AddApiKey(ApiKeyEntry{Key: "sk-clear-rollback", Enabled: true, PromptCacheEmulationRatio: &ratio})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	cfgPath = filepath.Join(t.TempDir(), "missing", "config.json")
+	if err := ClearPromptCacheOverrides(created.ID); err == nil {
+		t.Fatal("expected clear save failure")
+	}
+	got := GetApiKeyEntry(created.ID)
+	if got == nil || got.PromptCacheEmulationRatio == nil || *got.PromptCacheEmulationRatio != 0.35 {
+		t.Fatalf("entry changed after failed clear: %+v", got)
+	}
+}
