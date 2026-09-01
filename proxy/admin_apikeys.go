@@ -9,34 +9,44 @@ import (
 // apiKeyView is the response payload for listing/inspecting API keys. The Key field
 // is masked so admins can identify entries without exposing the secret.
 type apiKeyView struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name,omitempty"`
-	KeyMasked     string  `json:"keyMasked"`
-	Enabled       bool    `json:"enabled"`
-	Migrated      bool    `json:"migrated,omitempty"`
-	CreatedAt     int64   `json:"createdAt"`
-	LastUsedAt    int64   `json:"lastUsedAt,omitempty"`
-	TokenLimit    int64   `json:"tokenLimit,omitempty"`
-	CreditLimit   float64 `json:"creditLimit,omitempty"`
-	TokensUsed    int64   `json:"tokensUsed"`
-	CreditsUsed   float64 `json:"creditsUsed"`
-	RequestsCount int64   `json:"requestsCount"`
+	ID                                string   `json:"id"`
+	Name                              string   `json:"name,omitempty"`
+	KeyMasked                         string   `json:"keyMasked"`
+	Enabled                           bool     `json:"enabled"`
+	Migrated                          bool     `json:"migrated,omitempty"`
+	CreatedAt                         int64    `json:"createdAt"`
+	LastUsedAt                        int64    `json:"lastUsedAt,omitempty"`
+	TokenLimit                        int64    `json:"tokenLimit,omitempty"`
+	CreditLimit                       float64  `json:"creditLimit,omitempty"`
+	TokensUsed                        int64    `json:"tokensUsed"`
+	CreditsUsed                       float64  `json:"creditsUsed"`
+	RequestsCount                     int64    `json:"requestsCount"`
+	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled,omitempty"`
+	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode,omitempty"`
+	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio,omitempty"`
+	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio,omitempty"`
+	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio,omitempty"`
 }
 
 func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
 	return apiKeyView{
-		ID:            e.ID,
-		Name:          e.Name,
-		KeyMasked:     config.MaskApiKey(e.Key),
-		Enabled:       e.Enabled,
-		Migrated:      e.Migrated,
-		CreatedAt:     e.CreatedAt,
-		LastUsedAt:    e.LastUsedAt,
-		TokenLimit:    e.TokenLimit,
-		CreditLimit:   e.CreditLimit,
-		TokensUsed:    e.TokensUsed,
-		CreditsUsed:   e.CreditsUsed,
-		RequestsCount: e.RequestsCount,
+		ID:                                e.ID,
+		Name:                              e.Name,
+		KeyMasked:                         config.MaskApiKey(e.Key),
+		Enabled:                           e.Enabled,
+		Migrated:                          e.Migrated,
+		CreatedAt:                         e.CreatedAt,
+		LastUsedAt:                        e.LastUsedAt,
+		TokenLimit:                        e.TokenLimit,
+		CreditLimit:                       e.CreditLimit,
+		TokensUsed:                        e.TokensUsed,
+		CreditsUsed:                       e.CreditsUsed,
+		RequestsCount:                     e.RequestsCount,
+		PromptCacheEmulationEnabled:       e.PromptCacheEmulationEnabled,
+		PromptCacheEmulationMode:          e.PromptCacheEmulationMode,
+		PromptCacheEmulationRatio:         e.PromptCacheEmulationRatio,
+		PromptCacheCreationEmulationRatio: e.PromptCacheCreationEmulationRatio,
+		PromptCacheReadEmulationRatio:     e.PromptCacheReadEmulationRatio,
 	}
 }
 
@@ -60,11 +70,16 @@ func (h *Handler) apiGetApiKey(w http.ResponseWriter, r *http.Request, id string
 }
 
 type apiKeyCreateRequest struct {
-	Name        string  `json:"name,omitempty"`
-	Key         string  `json:"key,omitempty"`
-	Enabled     *bool   `json:"enabled,omitempty"`
-	TokenLimit  int64   `json:"tokenLimit,omitempty"`
-	CreditLimit float64 `json:"creditLimit,omitempty"`
+	Name                              string   `json:"name,omitempty"`
+	Key                               string   `json:"key,omitempty"`
+	Enabled                           *bool    `json:"enabled,omitempty"`
+	TokenLimit                        int64    `json:"tokenLimit,omitempty"`
+	CreditLimit                       float64  `json:"creditLimit,omitempty"`
+	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled,omitempty"`
+	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode,omitempty"`
+	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio,omitempty"`
+	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio,omitempty"`
+	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio,omitempty"`
 }
 
 func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
@@ -86,11 +101,16 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry, err := config.AddApiKey(config.ApiKeyEntry{
-		Name:        req.Name,
-		Key:         keyValue,
-		Enabled:     enabled,
-		TokenLimit:  req.TokenLimit,
-		CreditLimit: req.CreditLimit,
+		Name:                              req.Name,
+		Key:                               keyValue,
+		Enabled:                           enabled,
+		TokenLimit:                        req.TokenLimit,
+		CreditLimit:                       req.CreditLimit,
+		PromptCacheEmulationEnabled:       req.PromptCacheEmulationEnabled,
+		PromptCacheEmulationMode:          req.PromptCacheEmulationMode,
+		PromptCacheEmulationRatio:         req.PromptCacheEmulationRatio,
+		PromptCacheCreationEmulationRatio: req.PromptCacheCreationEmulationRatio,
+		PromptCacheReadEmulationRatio:     req.PromptCacheReadEmulationRatio,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -108,11 +128,17 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 type apiKeyUpdateRequest struct {
-	Name        *string  `json:"name,omitempty"`
-	Key         *string  `json:"key,omitempty"`
-	Enabled     *bool    `json:"enabled,omitempty"`
-	TokenLimit  *int64   `json:"tokenLimit,omitempty"`
-	CreditLimit *float64 `json:"creditLimit,omitempty"`
+	Name                              *string  `json:"name,omitempty"`
+	Key                               *string  `json:"key,omitempty"`
+	Enabled                           *bool    `json:"enabled,omitempty"`
+	TokenLimit                        *int64   `json:"tokenLimit,omitempty"`
+	CreditLimit                       *float64 `json:"creditLimit,omitempty"`
+	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled,omitempty"`
+	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode,omitempty"`
+	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio,omitempty"`
+	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio,omitempty"`
+	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio,omitempty"`
+	ClearPromptCacheOverrides         bool     `json:"clearPromptCacheOverrides,omitempty"`
 }
 
 func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id string) {
@@ -146,11 +172,33 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 	if req.CreditLimit != nil {
 		patch.CreditLimit = *req.CreditLimit
 	}
+	if req.PromptCacheEmulationEnabled != nil {
+		patch.PromptCacheEmulationEnabled = req.PromptCacheEmulationEnabled
+	}
+	if req.PromptCacheEmulationMode != nil {
+		patch.PromptCacheEmulationMode = req.PromptCacheEmulationMode
+	}
+	if req.PromptCacheEmulationRatio != nil {
+		patch.PromptCacheEmulationRatio = req.PromptCacheEmulationRatio
+	}
+	if req.PromptCacheCreationEmulationRatio != nil {
+		patch.PromptCacheCreationEmulationRatio = req.PromptCacheCreationEmulationRatio
+	}
+	if req.PromptCacheReadEmulationRatio != nil {
+		patch.PromptCacheReadEmulationRatio = req.PromptCacheReadEmulationRatio
+	}
 
 	if err := config.UpdateApiKey(id, patch); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
+	}
+	if req.ClearPromptCacheOverrides {
+		if err := config.ClearPromptCacheOverrides(id); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	updated := config.GetApiKeyEntry(id)

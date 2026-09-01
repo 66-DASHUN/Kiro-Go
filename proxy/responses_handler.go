@@ -109,6 +109,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	openaiReq.Model = actualModel
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
+	cacheProfile := h.promptCache.BuildOpenAIProfile(openaiReq, estimatedInputTokens)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
@@ -116,18 +117,18 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 
 	if req.Stream {
 		h.handleResponsesStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-			apiKeyID, respID, &req, storedInputCopy, storeResponse)
+			apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
 		return
 	}
 
 	h.handleResponsesNonStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-		apiKeyID, respID, &req, storedInputCopy, storeResponse)
+		apiKeyID, respID, &req, storedInputCopy, storeResponse, cacheProfile)
 }
 
 func (h *Handler) handleResponsesNonStream(
 	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
-	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool, cacheProfile *promptCacheProfile,
 ) {
 	excluded := make(map[string]bool)
 	var lastErr error
@@ -144,6 +145,7 @@ func (h *Handler) handleResponsesNonStream(
 			h.handleAccountFailure(account, err)
 			continue
 		}
+		cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, config.EffectivePromptCacheSettings(apiKeyID))
 
 		var content, reasoningContent string
 		var toolUses []KiroToolUse
@@ -217,9 +219,13 @@ func (h *Handler) handleResponsesNonStream(
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.promptCache.Update(account.ID, cacheProfile)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason)
+		respObj.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
+		respObj.Usage.InputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cacheUsage.CacheReadInputTokens}
+		respObj.Usage.TotalTokens = respObj.Usage.InputTokens + outputTokens
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
 
@@ -320,7 +326,7 @@ func buildResponsesObject(
 func (h *Handler) handleResponsesStream(
 	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
-	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool, cacheProfile *promptCacheProfile,
 ) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -374,6 +380,7 @@ func (h *Handler) handleResponsesStream(
 			h.handleAccountFailure(account, err)
 			continue
 		}
+		cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, config.EffectivePromptCacheSettings(apiKeyID))
 
 		send("response.in_progress", map[string]interface{}{
 			"type":     "response.in_progress",
@@ -612,9 +619,13 @@ func (h *Handler) handleResponsesStream(
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.promptCache.Update(account.ID, cacheProfile)
 		h.recordSuccessLog("responses", model, account.ID, inputTokens+outputTokens, credits, time.Since(reqStart).Milliseconds())
 
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req, upstreamStopReason)
+		respObj.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
+		respObj.Usage.InputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cacheUsage.CacheReadInputTokens}
+		respObj.Usage.TotalTokens = respObj.Usage.InputTokens + outputTokens
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions

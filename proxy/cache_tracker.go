@@ -161,6 +161,49 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	}
 }
 
+// BuildOpenAIProfile mirrors the prefix-oriented cache model for Chat/Responses
+// requests. Each stable request component is hashed as an ordered block so a
+// later turn can reuse any previously stored message prefix.
+func (t *promptCacheTracker) BuildOpenAIProfile(req *OpenAIRequest, totalInputTokens int) *promptCacheProfile {
+	if req == nil {
+		return nil
+	}
+	hasher := sha256.New()
+	breakpoints := make([]promptCacheBreakpoint, 0, len(req.Messages)+len(req.Tools)+2)
+	cumulative := 0
+	appendBlock := func(v interface{}, messageEnd bool) {
+		canonical := canonicalizeCacheValue(v)
+		writeHashChunk(hasher, canonical)
+		cumulative += estimateApproxTokens(canonical)
+		if messageEnd {
+			var fp [32]byte
+			copy(fp[:], hasher.Sum(nil))
+			breakpoints = append(breakpoints, promptCacheBreakpoint{Fingerprint: fp, CumulativeTokens: cumulative, TTL: defaultPromptCacheTTL})
+		}
+	}
+	appendBlock(map[string]interface{}{"kind": "request_prelude", "model": req.Model}, false)
+	for i, tool := range req.Tools {
+		appendBlock(map[string]interface{}{"kind": "tool", "index": i, "type": tool.Type, "function": tool.Function}, false)
+	}
+	for i, msg := range req.Messages {
+		appendBlock(map[string]interface{}{"kind": "message", "index": i, "role": msg.Role, "content": msg.Content, "tool_calls": msg.ToolCalls, "tool_call_id": msg.ToolCallID}, true)
+	}
+	if len(breakpoints) == 0 {
+		return nil
+	}
+	if totalInputTokens <= cumulative {
+		totalInputTokens = cumulative
+	}
+	base := breakpoints[len(breakpoints)-1].CumulativeTokens
+	if base > 0 && totalInputTokens != base {
+		for i := range breakpoints {
+			breakpoints[i].CumulativeTokens = int(math.Round(float64(breakpoints[i].CumulativeTokens) * float64(totalInputTokens) / float64(base)))
+		}
+	}
+	breakpoints[len(breakpoints)-1].CumulativeTokens = totalInputTokens
+	return &promptCacheProfile{Breakpoints: breakpoints, TotalInputTokens: totalInputTokens, Model: req.Model}
+}
+
 // Compute calculates usage using the default full-ratio policy.
 func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfile) promptCacheUsage {
 	policy := config.PromptCacheSettings{Enabled: true, Mode: config.PromptCacheModeUniform, Ratio: 1, CreationRatio: 1, ReadRatio: 1}
