@@ -51,6 +51,7 @@ type Account struct {
 	Email    string `json:"email,omitempty"`    // User email address
 	UserId   string `json:"userId,omitempty"`   // Kiro user ID
 	Nickname string `json:"nickname,omitempty"` // Display name for admin panel
+	ApiKeyID string `json:"apiKeyId,omitempty"` // ID of the API key this account belongs to
 
 	// Authentication credentials
 	AccessToken  string `json:"accessToken"`  // OAuth access token for API calls
@@ -380,6 +381,7 @@ func Load() error {
 	// we mark the entry disabled so it doesn't accidentally start enforcing auth.
 	// Operators can flip it on later from the admin UI. The legacy field is kept
 	// for backward compatibility when reading older config files.
+	migrationNeeded := false
 	if cfg.ApiKey != "" && len(cfg.ApiKeys) == 0 {
 		cfg.ApiKeys = append(cfg.ApiKeys, ApiKeyEntry{
 			ID:        newUUID(),
@@ -389,8 +391,17 @@ func Load() error {
 			Migrated:  true,
 			CreatedAt: time.Now().Unix(),
 		})
-		if err := saveLocked(); err != nil {
-			return err
+		migrationNeeded = true
+	}
+
+	// Migration: assign historical accounts without an ownership ID to the
+	// first enabled API key. Explicit assignments are preserved verbatim.
+	if apiKeyID := firstEnabledApiKeyID(cfg); apiKeyID != "" {
+		for i := range cfg.Accounts {
+			if strings.TrimSpace(cfg.Accounts[i].ApiKeyID) == "" {
+				cfg.Accounts[i].ApiKeyID = apiKeyID
+				migrationNeeded = true
+			}
 		}
 	}
 
@@ -401,22 +412,35 @@ func Load() error {
 	// previously-allowed accounts on first launch, treat allowOverage=true as
 	// OverageStatus="ENABLED" (operators can refresh from AWS later). The
 	// legacy field is then cleared so future saves don't re-emit it.
-	overageMigrated := false
 	for i := range cfg.Accounts {
 		if cfg.Accounts[i].LegacyAllowOverage {
 			if cfg.Accounts[i].OverageStatus == "" {
 				cfg.Accounts[i].OverageStatus = "ENABLED"
 			}
 			cfg.Accounts[i].LegacyAllowOverage = false
-			overageMigrated = true
+			migrationNeeded = true
 		}
 	}
-	if overageMigrated {
+	if migrationNeeded {
 		if err := saveLocked(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// firstEnabledApiKeyID returns the ID of the first enabled, usable API key.
+// Load calls this while holding cfgLock.
+func firstEnabledApiKeyID(c *Config) string {
+	if c == nil {
+		return ""
+	}
+	for _, entry := range c.ApiKeys {
+		if entry.Enabled && strings.TrimSpace(entry.ID) != "" && strings.TrimSpace(entry.Key) != "" {
+			return entry.ID
+		}
+	}
+	return ""
 }
 
 func normalizePromptCacheConfig(c *Config, data []byte) error {
@@ -624,6 +648,46 @@ func GetEnabledAccounts() []Account {
 		}
 	}
 	return accounts
+}
+
+// ApiKeyIDExists reports whether an API key entry with id is configured,
+// regardless of whether that key is currently enabled.
+func ApiKeyIDExists(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return false
+	}
+	for _, entry := range cfg.ApiKeys {
+		if entry.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// IsApiKeyIDValid reports whether id identifies an enabled API key with a
+// non-empty key value, suitable for account ownership and request routing.
+func IsApiKeyIDValid(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return false
+	}
+	for _, entry := range cfg.ApiKeys {
+		if entry.ID == id {
+			return entry.Enabled && strings.TrimSpace(entry.Key) != ""
+		}
+	}
+	return false
 }
 
 // RefreshTokenFingerprint returns a stable, non-reversible identifier for an

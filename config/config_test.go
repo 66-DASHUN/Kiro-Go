@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -240,5 +241,123 @@ func TestAccountAllowOverageMigration(t *testing.T) {
 		if _, ok := a["allowOverage"]; ok {
 			t.Fatalf("expected allowOverage to be omitted from persisted file, got %+v", a)
 		}
+	}
+}
+
+func TestAccountAPIKeyIDJSONPersistence(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{ID: "key-1", Key: "sk-one", Enabled: true}); err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	if err := AddAccount(Account{ID: "account-1", ApiKeyID: "key-1", RefreshToken: "refresh-1", Enabled: true}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+
+	raw, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var persisted struct {
+		Accounts []map[string]interface{} `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if got := persisted.Accounts[0]["apiKeyId"]; got != "key-1" {
+		t.Fatalf("persisted apiKeyId = %v, want key-1", got)
+	}
+
+	if err := Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := GetAccounts()[0].ApiKeyID; got != "key-1" {
+		t.Fatalf("reloaded apiKeyId = %q, want key-1", got)
+	}
+}
+
+func TestAccountAPIKeyIDMigrationAssignsFirstEnabledKey(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	seed := map[string]interface{}{
+		"password": "p",
+		"port":     8080,
+		"host":     "0.0.0.0",
+		"apiKeys": []map[string]interface{}{
+			{"id": "disabled", "key": "sk-disabled", "enabled": false},
+			{"id": "key-1", "key": "sk-one", "enabled": true},
+			{"id": "key-2", "key": "sk-two", "enabled": true},
+		},
+		"accounts": []map[string]interface{}{
+			{"id": "legacy-1", "enabled": true},
+			{"id": "explicit", "apiKeyId": "key-2", "enabled": true},
+			{"id": "legacy-2", "apiKeyId": "", "enabled": true},
+		},
+	}
+	raw, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := os.WriteFile(cfgFile, raw, 0600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	accounts := GetAccounts()
+	byID := make(map[string]Account, len(accounts))
+	for _, account := range accounts {
+		byID[account.ID] = account
+	}
+	if got := byID["legacy-1"].ApiKeyID; got != "key-1" {
+		t.Fatalf("legacy-1 apiKeyId = %q, want key-1", got)
+	}
+	if got := byID["legacy-2"].ApiKeyID; got != "key-1" {
+		t.Fatalf("legacy-2 apiKeyId = %q, want key-1", got)
+	}
+	if got := byID["explicit"].ApiKeyID; got != "key-2" {
+		t.Fatalf("explicit apiKeyId = %q, want key-2", got)
+	}
+
+	persisted, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatalf("read migrated config: %v", err)
+	}
+	if !strings.Contains(string(persisted), `"apiKeyId": "key-1"`) {
+		t.Fatalf("migrated apiKeyId was not persisted: %s", persisted)
+	}
+
+	if err := Load(); err != nil {
+		t.Fatalf("second reload: %v", err)
+	}
+	if got := GetAccounts()[0].ApiKeyID; got != "key-1" {
+		t.Fatalf("second reload changed apiKeyId to %q", got)
+	}
+}
+
+func TestAPIKeyIDValidityHelpers(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{ID: "enabled", Key: "sk-enabled", Enabled: true}); err != nil {
+		t.Fatalf("add enabled key: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{ID: "disabled", Key: "sk-disabled", Enabled: false}); err != nil {
+		t.Fatalf("add disabled key: %v", err)
+	}
+	if !ApiKeyIDExists("enabled") || !ApiKeyIDExists("disabled") {
+		t.Fatal("expected both configured key IDs to exist")
+	}
+	if ApiKeyIDExists("missing") {
+		t.Fatal("missing key ID should not exist")
+	}
+	if !IsApiKeyIDValid("enabled") {
+		t.Fatal("enabled key ID should be valid")
+	}
+	if IsApiKeyIDValid("disabled") || IsApiKeyIDValid("missing") || IsApiKeyIDValid("") {
+		t.Fatal("disabled, missing, and empty key IDs should be invalid")
 	}
 }
