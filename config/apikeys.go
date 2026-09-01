@@ -16,7 +16,9 @@ func ListApiKeys() []ApiKeyEntry {
 		return nil
 	}
 	out := make([]ApiKeyEntry, len(cfg.ApiKeys))
-	copy(out, cfg.ApiKeys)
+	for i := range cfg.ApiKeys {
+		out[i] = cloneApiKeyEntry(cfg.ApiKeys[i])
+	}
 	return out
 }
 
@@ -29,7 +31,7 @@ func GetApiKeyEntry(id string) *ApiKeyEntry {
 	}
 	for i := range cfg.ApiKeys {
 		if cfg.ApiKeys[i].ID == id {
-			cp := cfg.ApiKeys[i]
+			cp := cloneApiKeyEntry(cfg.ApiKeys[i])
 			return &cp
 		}
 	}
@@ -51,6 +53,7 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	if err := validateApiKeyPromptCacheOverrides(entry); err != nil {
 		return ApiKeyEntry{}, err
 	}
+	entry = cloneApiKeyEntry(entry)
 	for _, existing := range cfg.ApiKeys {
 		if existing.Key == entry.Key {
 			return ApiKeyEntry{}, errors.New("api key already exists")
@@ -68,7 +71,7 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 		cfg.ApiKeys = cfg.ApiKeys[:len(cfg.ApiKeys)-1]
 		return ApiKeyEntry{}, err
 	}
-	return entry, nil
+	return cloneApiKeyEntry(entry), nil
 }
 
 // UpdateApiKey applies a patch to an existing API key. Patch semantics:
@@ -93,11 +96,9 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	if idx < 0 {
 		return errors.New("api key not found")
 	}
-	if err := validateApiKeyPromptCacheOverrides(patch); err != nil {
-		return err
-	}
+	candidate := cloneApiKeyEntry(cfg.ApiKeys[idx])
 	if patch.Name != "" {
-		cfg.ApiKeys[idx].Name = patch.Name
+		candidate.Name = patch.Name
 	}
 	if patch.Key != "" {
 		newKey := strings.TrimSpace(patch.Key)
@@ -107,30 +108,85 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 				return errors.New("api key value collides with existing entry")
 			}
 		}
-		cfg.ApiKeys[idx].Key = newKey
+		candidate.Key = newKey
 	}
-	cfg.ApiKeys[idx].Enabled = patch.Enabled
-	cfg.ApiKeys[idx].TokenLimit = patch.TokenLimit
-	cfg.ApiKeys[idx].CreditLimit = patch.CreditLimit
+	candidate.Enabled = patch.Enabled
+	candidate.TokenLimit = patch.TokenLimit
+	candidate.CreditLimit = patch.CreditLimit
 	if patch.PromptCacheEmulationEnabled != nil {
-		cfg.ApiKeys[idx].PromptCacheEmulationEnabled = patch.PromptCacheEmulationEnabled
+		value := *patch.PromptCacheEmulationEnabled
+		candidate.PromptCacheEmulationEnabled = &value
 	}
 	if patch.PromptCacheEmulationMode != nil {
-		cfg.ApiKeys[idx].PromptCacheEmulationMode = patch.PromptCacheEmulationMode
+		value := *patch.PromptCacheEmulationMode
+		candidate.PromptCacheEmulationMode = &value
 	}
 	if patch.PromptCacheEmulationRatio != nil {
-		cfg.ApiKeys[idx].PromptCacheEmulationRatio = patch.PromptCacheEmulationRatio
+		value := *patch.PromptCacheEmulationRatio
+		candidate.PromptCacheEmulationRatio = &value
 	}
 	if patch.PromptCacheCreationEmulationRatio != nil {
-		cfg.ApiKeys[idx].PromptCacheCreationEmulationRatio = patch.PromptCacheCreationEmulationRatio
+		value := *patch.PromptCacheCreationEmulationRatio
+		candidate.PromptCacheCreationEmulationRatio = &value
 	}
 	if patch.PromptCacheReadEmulationRatio != nil {
-		cfg.ApiKeys[idx].PromptCacheReadEmulationRatio = patch.PromptCacheReadEmulationRatio
+		value := *patch.PromptCacheReadEmulationRatio
+		candidate.PromptCacheReadEmulationRatio = &value
 	}
 	if patch.Migrated {
-		cfg.ApiKeys[idx].Migrated = true
+		candidate.Migrated = true
 	}
+	if err := validateApiKeyPromptCacheOverrides(candidate); err != nil {
+		return err
+	}
+	cfg.ApiKeys[idx] = candidate
 	return saveLocked()
+}
+
+// ClearPromptCacheOverrides removes all per-key prompt-cache overrides so the
+// entry inherits the current global policy.
+func ClearPromptCacheOverrides(id string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	for i := range cfg.ApiKeys {
+		if cfg.ApiKeys[i].ID != id {
+			continue
+		}
+		cfg.ApiKeys[i].PromptCacheEmulationEnabled = nil
+		cfg.ApiKeys[i].PromptCacheEmulationMode = nil
+		cfg.ApiKeys[i].PromptCacheEmulationRatio = nil
+		cfg.ApiKeys[i].PromptCacheCreationEmulationRatio = nil
+		cfg.ApiKeys[i].PromptCacheReadEmulationRatio = nil
+		return saveLocked()
+	}
+	return errors.New("api key not found")
+}
+
+func cloneApiKeyEntry(entry ApiKeyEntry) ApiKeyEntry {
+	if entry.PromptCacheEmulationEnabled != nil {
+		value := *entry.PromptCacheEmulationEnabled
+		entry.PromptCacheEmulationEnabled = &value
+	}
+	if entry.PromptCacheEmulationMode != nil {
+		value := *entry.PromptCacheEmulationMode
+		entry.PromptCacheEmulationMode = &value
+	}
+	if entry.PromptCacheEmulationRatio != nil {
+		value := *entry.PromptCacheEmulationRatio
+		entry.PromptCacheEmulationRatio = &value
+	}
+	if entry.PromptCacheCreationEmulationRatio != nil {
+		value := *entry.PromptCacheCreationEmulationRatio
+		entry.PromptCacheCreationEmulationRatio = &value
+	}
+	if entry.PromptCacheReadEmulationRatio != nil {
+		value := *entry.PromptCacheReadEmulationRatio
+		entry.PromptCacheReadEmulationRatio = &value
+	}
+	return entry
 }
 
 func validateApiKeyPromptCacheOverrides(entry ApiKeyEntry) error {
@@ -178,7 +234,7 @@ func FindApiKeyByValue(key string) *ApiKeyEntry {
 	}
 	for i := range cfg.ApiKeys {
 		if cfg.ApiKeys[i].Key == key {
-			cp := cfg.ApiKeys[i]
+			cp := cloneApiKeyEntry(cfg.ApiKeys[i])
 			return &cp
 		}
 	}

@@ -371,3 +371,96 @@ func TestPromptCacheSettingsLoadLegacyJSONDefaults(t *testing.T) {
 		t.Fatalf("legacy settings=%+v, want default settings", settings)
 	}
 }
+
+func TestApiKeyPromptCacheOverridesAreDeepCopied(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	ratio := 0.25
+	entry, err := AddApiKey(ApiKeyEntry{Key: "sk-copy", Enabled: true, PromptCacheEmulationRatio: &ratio})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	ratio = 0.75
+	if got := *GetApiKeyEntry(entry.ID).PromptCacheEmulationRatio; got != 0.25 {
+		t.Fatalf("stored ratio changed through add input pointer: got %v", got)
+	}
+
+	listed := ListApiKeys()
+	*listed[0].PromptCacheEmulationRatio = 0.9
+	found := FindApiKeyByValue("sk-copy")
+	if got := *found.PromptCacheEmulationRatio; got != 0.25 {
+		t.Fatalf("stored ratio changed through list output pointer: got %v", got)
+	}
+	got := GetApiKeyEntry(entry.ID)
+	*got.PromptCacheEmulationRatio = 0.8
+	if got := *FindApiKeyByValue("sk-copy").PromptCacheEmulationRatio; got != 0.25 {
+		t.Fatalf("stored ratio changed through get output pointer: got %v", got)
+	}
+}
+
+func TestPromptCacheSettingsExplicitNullUsesDefaults(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	legacy := []byte(`{"password":"p","port":8080,"host":"0.0.0.0","accounts":[],"promptCacheEmulationEnabled":null,"promptCacheEmulationMode":null,"promptCacheEmulationRatio":null,"promptCacheCreationEmulationRatio":null,"promptCacheReadEmulationRatio":null}`)
+	if err := os.WriteFile(cfgFile, legacy, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	got := EffectivePromptCacheSettings("")
+	want := defaultPromptCacheSettings()
+	if got != want {
+		t.Fatalf("settings=%+v, want defaults=%+v", got, want)
+	}
+}
+
+func TestApiKeyPromptCacheOverridesPersistAcrossAddUpdateAndReload(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	ratio := 0.3
+	created, err := AddApiKey(ApiKeyEntry{Key: "sk-persist", Enabled: true, PromptCacheEmulationRatio: &ratio})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	updated := 0.4
+	if err := UpdateApiKey(created.ID, ApiKeyEntry{Enabled: true, PromptCacheEmulationRatio: &updated}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	updated = 0.9
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got := GetApiKeyEntry(created.ID)
+	if got == nil || got.PromptCacheEmulationRatio == nil || *got.PromptCacheEmulationRatio != 0.4 {
+		t.Fatalf("persisted override=%+v, want 0.4", got)
+	}
+}
+
+func TestClearPromptCacheOverridesRestoresInheritance(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	enabled := false
+	mode := "independent"
+	ratio, creation, read := 0.2, 0.3, 0.4
+	created, err := AddApiKey(ApiKeyEntry{
+		Key: "sk-clear", Enabled: true,
+		PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode,
+		PromptCacheEmulationRatio: &ratio, PromptCacheCreationEmulationRatio: &creation,
+		PromptCacheReadEmulationRatio: &read,
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if err := ClearPromptCacheOverrides(created.ID); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got := GetApiKeyEntry(created.ID)
+	if got == nil || got.PromptCacheEmulationEnabled != nil || got.PromptCacheEmulationMode != nil ||
+		got.PromptCacheEmulationRatio != nil || got.PromptCacheCreationEmulationRatio != nil || got.PromptCacheReadEmulationRatio != nil {
+		t.Fatalf("overrides were not cleared: %+v", got)
+	}
+}

@@ -167,7 +167,8 @@ const (
 	promptCacheModeIndependent = PromptCacheModeIndependent
 )
 
-// ValidatePromptCacheRatio validates a cache emulation ratio.
+// ValidatePromptCacheRatio validates a cache emulation ratio and rejects values
+// outside the inclusive [0, 1] range; it does not silently clamp them.
 func ValidatePromptCacheRatio(ratio float64) error {
 	if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 || ratio > 1 {
 		return fmt.Errorf("prompt cache ratio must be finite and within [0,1], got %v", ratio)
@@ -423,19 +424,19 @@ func normalizePromptCacheConfig(c *Config, data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	if _, ok := fields["promptCacheEmulationEnabled"]; !ok {
+	if isMissingOrNull(fields["promptCacheEmulationEnabled"]) {
 		c.PromptCacheEmulationEnabled = true
 	}
-	if _, ok := fields["promptCacheEmulationMode"]; !ok || c.PromptCacheEmulationMode == "" {
+	if isMissingOrNull(fields["promptCacheEmulationMode"]) || c.PromptCacheEmulationMode == "" {
 		c.PromptCacheEmulationMode = promptCacheModeUniform
 	}
-	if _, ok := fields["promptCacheEmulationRatio"]; !ok {
+	if isMissingOrNull(fields["promptCacheEmulationRatio"]) {
 		c.PromptCacheEmulationRatio = 1
 	}
-	if _, ok := fields["promptCacheCreationEmulationRatio"]; !ok {
+	if isMissingOrNull(fields["promptCacheCreationEmulationRatio"]) {
 		c.PromptCacheCreationEmulationRatio = 1
 	}
-	if _, ok := fields["promptCacheReadEmulationRatio"]; !ok {
+	if isMissingOrNull(fields["promptCacheReadEmulationRatio"]) {
 		c.PromptCacheReadEmulationRatio = 1
 	}
 	return ValidatePromptCacheSettings(PromptCacheSettings{
@@ -445,6 +446,10 @@ func normalizePromptCacheConfig(c *Config, data []byte) error {
 		CreationRatio: c.PromptCacheCreationEmulationRatio,
 		ReadRatio:     c.PromptCacheReadEmulationRatio,
 	})
+}
+
+func isMissingOrNull(value json.RawMessage) bool {
+	return len(value) == 0 || strings.TrimSpace(string(value)) == "null"
 }
 
 // EffectivePromptCacheSettings resolves the policy for an API-key entry ID.
