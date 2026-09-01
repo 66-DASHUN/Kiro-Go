@@ -2566,6 +2566,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 
 		result[i] = map[string]interface{}{
 			"id":                a.ID,
+			"apiKeyId":          a.ApiKeyID,
 			"email":             a.Email,
 			"userId":            a.UserId,
 			"nickname":          a.Nickname,
@@ -2617,6 +2618,11 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
 	}
+	if account.ApiKeyID != "" && !config.IsApiKeyIDValid(account.ApiKeyID) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "apiKeyId must reference an enabled API key"})
+		return
+	}
 
 	if account.ID == "" {
 		account.ID = auth.GenerateAccountID()
@@ -2640,7 +2646,7 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 			}
 		}(account)
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "id": account.ID})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "id": account.ID, "apiKeyId": account.ApiKeyID})
 }
 
 func (h *Handler) apiDeleteAccount(w http.ResponseWriter, r *http.Request, id string) {
@@ -2674,6 +2680,23 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
 		return
+	}
+	if raw, ok := updates["apiKeyId"]; ok {
+		apiKeyID, isString := raw.(string)
+		if !isString {
+			if raw != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "apiKeyId must be a string or empty"})
+				return
+			}
+			apiKeyID = ""
+		}
+		if apiKeyID != "" && !config.IsApiKeyIDValid(apiKeyID) {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "apiKeyId must reference an enabled API key"})
+			return
+		}
+		existing.ApiKeyID = apiKeyID
 	}
 
 	// 只更新传入的字段
@@ -2709,7 +2732,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 			}
 		}(*existing)
 	}
-	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "apiKeyId": existing.ApiKeyID})
 }
 
 // apiGetAccountOverage 拉取并返回单个账号的上游 Overages 状态。

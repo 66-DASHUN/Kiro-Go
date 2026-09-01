@@ -59,6 +59,44 @@ func TestAuthenticateRejectsMissingKey(t *testing.T) {
 	}
 }
 
+func TestApiKeyViewIncludesBoundAccountCount(t *testing.T) {
+	mustInitConfig(t)
+	entry, err := config.AddApiKey(config.ApiKeyEntry{Name: "bound", Key: "sk-bound", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	for _, account := range []config.Account{
+		{ID: "bound-1", ApiKeyID: entry.ID, Enabled: true, AccessToken: "token-1"},
+		{ID: "bound-2", ApiKeyID: entry.ID, Enabled: false, AccessToken: "token-2"},
+		{ID: "unbound", Enabled: true, AccessToken: "token-3"},
+	} {
+		if err := config.AddAccount(account); err != nil {
+			t.Fatalf("add account %s: %v", account.ID, err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	(&Handler{}).apiListApiKeys(rec, httptest.NewRequest(http.MethodGet, "/admin/api/api-keys", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		APIKeys []struct {
+			ID                string `json:"id"`
+			BoundAccountCount int    `json:"boundAccountCount"`
+		} `json:"apiKeys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.APIKeys) != 1 || payload.APIKeys[0].ID != entry.ID {
+		t.Fatalf("unexpected api keys: %+v", payload.APIKeys)
+	}
+	if payload.APIKeys[0].BoundAccountCount != 2 {
+		t.Fatalf("boundAccountCount=%d, want 2", payload.APIKeys[0].BoundAccountCount)
+	}
+}
+
 func TestAuthenticateRejectsDisabledKey(t *testing.T) {
 	mustInitConfig(t)
 	created, err := config.AddApiKey(config.ApiKeyEntry{Name: "off", Key: "sk-off", Enabled: false})

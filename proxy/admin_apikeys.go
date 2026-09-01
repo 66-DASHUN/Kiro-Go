@@ -21,11 +21,25 @@ type apiKeyView struct {
 	TokensUsed                        int64    `json:"tokensUsed"`
 	CreditsUsed                       float64  `json:"creditsUsed"`
 	RequestsCount                     int64    `json:"requestsCount"`
+	BoundAccountCount                 int      `json:"boundAccountCount"`
 	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled,omitempty"`
 	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode,omitempty"`
 	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio,omitempty"`
 	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio,omitempty"`
 	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio,omitempty"`
+}
+
+func boundAccountCount(apiKeyID string) int {
+	if apiKeyID == "" {
+		return 0
+	}
+	count := 0
+	for _, account := range config.GetAccounts() {
+		if account.ApiKeyID == apiKeyID {
+			count++
+		}
+	}
+	return count
 }
 
 func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
@@ -42,6 +56,7 @@ func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
 		TokensUsed:                        e.TokensUsed,
 		CreditsUsed:                       e.CreditsUsed,
 		RequestsCount:                     e.RequestsCount,
+		BoundAccountCount:                 boundAccountCount(e.ID),
 		PromptCacheEmulationEnabled:       e.PromptCacheEmulationEnabled,
 		PromptCacheEmulationMode:          e.PromptCacheEmulationMode,
 		PromptCacheEmulationRatio:         e.PromptCacheEmulationRatio,

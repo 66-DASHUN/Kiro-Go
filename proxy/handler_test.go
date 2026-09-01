@@ -27,6 +27,117 @@ func TestThinkingSourceReasoningFirst(t *testing.T) {
 	}
 }
 
+func TestAdminAccountsExposeApiKeyID(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "account-owner", ApiKeyID: key.ID, Enabled: true, AccessToken: "token-owner"}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p}
+	rec := httptest.NewRecorder()
+	h.apiGetAccounts(rec, httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("accounts status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var accounts []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &accounts); err != nil {
+		t.Fatalf("decode accounts: %v", err)
+	}
+	if len(accounts) != 1 || accounts[0]["apiKeyId"] != key.ID {
+		t.Fatalf("expected apiKeyId %q, got %+v", key.ID, accounts)
+	}
+}
+
+func TestAdminAddAccountRejectsInvalidOrDisabledApiKeyID(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	disabled, err := config.AddApiKey(config.ApiKeyEntry{Name: "disabled", Key: "sk-disabled", Enabled: false})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+	for _, tc := range []struct {
+		name string
+		id   string
+	}{
+		{name: "unknown", id: "missing-key"},
+		{name: "disabled", id: disabled.ID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.NewReader(`{"id":"reject-` + tc.name + `","apiKeyId":"` + tc.id + `","enabled":true,"accessToken":"token-` + tc.name + `"}`)
+			rec := httptest.NewRecorder()
+			h.apiAddAccount(rec, httptest.NewRequest(http.MethodPost, "/admin/api/accounts", body))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if got := config.GetAccounts(); len(got) != 0 {
+		t.Fatalf("invalid bindings should not be saved, got %+v", got)
+	}
+}
+
+func TestAdminAccountCreateAndUpdateRoundTripApiKeyID(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+	createRec := httptest.NewRecorder()
+	h.apiAddAccount(createRec, httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(`{"id":"roundtrip","apiKeyId":"`+key.ID+`","enabled":true,"accessToken":"token-roundtrip"}`)))
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", createRec.Code, createRec.Body.String())
+	}
+	var createPayload map[string]interface{}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &createPayload); err != nil || createPayload["apiKeyId"] != key.ID {
+		t.Fatalf("create response apiKeyId=%v body=%s", createPayload["apiKeyId"], createRec.Body.String())
+	}
+	updateRec := httptest.NewRecorder()
+	h.apiUpdateAccount(updateRec, httptest.NewRequest(http.MethodPut, "/admin/api/accounts/roundtrip", strings.NewReader(`{"apiKeyId":""}`)), "roundtrip")
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updateRec.Code, updateRec.Body.String())
+	}
+	var updatePayload map[string]interface{}
+	if err := json.Unmarshal(updateRec.Body.Bytes(), &updatePayload); err != nil || updatePayload["apiKeyId"] != "" {
+		t.Fatalf("update response apiKeyId=%v body=%s", updatePayload["apiKeyId"], updateRec.Body.String())
+	}
+}
+
+func TestAdminUpdateAccountRejectsInvalidApiKeyIDWithoutChangingAccount(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "account-owner", ApiKeyID: key.ID, Enabled: true, AccessToken: "token-owner"}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"apiKeyId":"missing-key","nickname":"changed"}`)
+	h.apiUpdateAccount(rec, httptest.NewRequest(http.MethodPut, "/admin/api/accounts/account-owner", body), "account-owner")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	got := config.GetAccounts()
+	if len(got) != 1 || got[0].ApiKeyID != key.ID || got[0].Nickname != "" {
+		t.Fatalf("account changed after rejected update: %+v", got)
+	}
+}
+
 func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) {
 	cfgFile := t.TempDir() + "/config.json"
 	if err := config.Init(cfgFile); err != nil {
