@@ -145,7 +145,7 @@ func TestMicrosoftSSOTwoStageManualCallback(t *testing.T) {
 	})}
 	restoreMicrosoftAuthClient(t, client)
 
-	sessionID, _, _, err := StartMicrosoftSSOLogin()
+	sessionID, _, _, err := StartMicrosoftSSOLogin("key-a")
 	if err != nil {
 		t.Fatalf("StartMicrosoftSSOLogin() error = %v", err)
 	}
@@ -166,6 +166,9 @@ func TestMicrosoftSSOTwoStageManualCallback(t *testing.T) {
 	}
 	if progress == nil || progress.AuthorizationURL == "" || progress.Result != nil {
 		t.Fatalf("first progress = %#v, want a provider authorization URL only", progress)
+	}
+	if progress.ApiKeyID != "key-a" || !progress.ApiKeyIDSet {
+		t.Fatalf("first progress api-key snapshot = (%q, %v), want (key-a, true)", progress.ApiKeyID, progress.ApiKeyIDSet)
 	}
 
 	providerURL := mustParseMicrosoftURL(t, progress.AuthorizationURL)
@@ -201,6 +204,9 @@ func TestMicrosoftSSOTwoStageManualCallback(t *testing.T) {
 		result.IssuerURL != issuer ||
 		result.Scopes != scopes {
 		t.Errorf("unexpected Microsoft SSO result: %#v", result)
+	}
+	if result.ApiKeyID != "key-a" || !result.ApiKeyIDSet {
+		t.Errorf("completed result api-key snapshot = (%q, %v), want (key-a, true)", result.ApiKeyID, result.ApiKeyIDSet)
 	}
 	if result.Email != "developer@example.com" {
 		t.Errorf("result.Email = %q", result.Email)

@@ -31,6 +31,10 @@ func (fn handlerMicrosoftRoundTripFunc) RoundTrip(request *http.Request) (*http.
 
 func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t *testing.T) {
 	h := newMicrosoftHandlerForTest(t)
+	key, err := config.AddApiKey(config.ApiKeyEntry{ID: "microsoft-flow-key", Key: "sk-microsoft-flow", Enabled: true})
+	if err != nil {
+		t.Fatalf("seed Microsoft flow API key: %v", err)
+	}
 
 	issuerURL := handlerMicrosoftIssuerURL()
 	tokenEndpoint := handlerMicrosoftTokenEndpoint()
@@ -129,7 +133,7 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 	startRecorder := httptest.NewRecorder()
 	h.apiStartMicrosoftSSO(
 		startRecorder,
-		httptest.NewRequest(http.MethodPost, "/auth/microsoft-sso/start", strings.NewReader("{}")),
+		httptest.NewRequest(http.MethodPost, "/auth/microsoft-sso/start", strings.NewReader(`{"apiKeyId":"`+key.ID+`"}`)),
 	)
 	if startRecorder.Code != http.StatusOK {
 		t.Fatalf("start status = %d, body=%s", startRecorder.Code, startRecorder.Body.String())
@@ -138,10 +142,14 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 		SessionID    string `json:"sessionId"`
 		AuthorizeURL string `json:"authorizeUrl"`
 		Stage        string `json:"stage"`
+		ApiKeyID     string `json:"apiKeyId"`
 	}
 	decodeHandlerMicrosoftJSON(t, startRecorder, &startResponse)
 	if startResponse.SessionID == "" || startResponse.Stage != "kiro" {
 		t.Fatalf("unexpected start response: %+v", startResponse)
+	}
+	if startResponse.ApiKeyID != key.ID {
+		t.Fatalf("start response apiKeyId = %q, want %q", startResponse.ApiKeyID, key.ID)
 	}
 	t.Cleanup(func() { auth.CancelMicrosoftSSOLogin(startResponse.SessionID) })
 	portalAuthorizeURL := mustHandlerMicrosoftURL(t, startResponse.AuthorizeURL)
@@ -249,6 +257,9 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 		t.Fatalf("accounts = %+v, want one persisted account", accounts)
 	}
 	got := accounts[0]
+	if got.ApiKeyID != key.ID {
+		t.Fatalf("account apiKeyId = %q, want %q after omitted callback fields", got.ApiKeyID, key.ID)
+	}
 	if got.Region != "us-east-1" {
 		t.Fatalf("auth Region changed to %q during profile selection", got.Region)
 	}

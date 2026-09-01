@@ -3021,7 +3021,28 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiStartMicrosoftSSO(w http.ResponseWriter, r *http.Request) {
-	sessionID, authorizeURL, expiresIn, err := auth.StartMicrosoftSSOLogin()
+	var req struct {
+		ApiKeyID *string `json:"apiKeyId"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	apiKeyID := ""
+	var apiKeyArgs []string
+	if req.ApiKeyID != nil {
+		var err error
+		apiKeyID, err = normalizeRequestApiKeyID(*req.ApiKeyID)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		apiKeyArgs = []string{apiKeyID}
+	}
+	sessionID, authorizeURL, expiresIn, err := auth.StartMicrosoftSSOLogin(apiKeyArgs...)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3032,13 +3053,15 @@ func (h *Handler) apiStartMicrosoftSSO(w http.ResponseWriter, r *http.Request) {
 		"authorizeUrl": authorizeURL,
 		"expiresIn":    expiresIn,
 		"stage":        "kiro",
+		"apiKeyId":     apiKeyID,
 	})
 }
 
 func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SessionID   string `json:"sessionId"`
-		CallbackURL string `json:"callbackUrl"`
+		SessionID   string  `json:"sessionId"`
+		CallbackURL string  `json:"callbackUrl"`
+		ApiKeyID    *string `json:"apiKeyId"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -3051,8 +3074,18 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 		json.NewEncoder(w).Encode(map[string]string{"error": "sessionId and callbackUrl are required"})
 		return
 	}
+	var apiKeyArgs []string
+	if req.ApiKeyID != nil {
+		apiKeyID, err := normalizeRequestApiKeyID(*req.ApiKeyID)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		apiKeyArgs = []string{apiKeyID}
+	}
 
-	progress, err := auth.ContinueMicrosoftSSOLogin(req.SessionID, req.CallbackURL)
+	progress, err := auth.ContinueMicrosoftSSOLogin(req.SessionID, req.CallbackURL, apiKeyArgs...)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3068,6 +3101,7 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 			"success":      true,
 			"stage":        "microsoft",
 			"authorizeUrl": progress.AuthorizationURL,
+			"apiKeyId":     progress.ApiKeyID,
 		})
 		return
 	}
@@ -3094,6 +3128,7 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 		TokenEndpoint: result.TokenEndpoint,
 		IssuerURL:     result.IssuerURL,
 		Scopes:        result.Scopes,
+		ApiKeyID:      result.ApiKeyID,
 	}
 
 	discoveryContext, discovery, ok := h.beginMicrosoftProfileDiscovery(r.Context(), req.SessionID)
@@ -3135,6 +3170,7 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 			"stage":                    "profile",
 			"requiresProfileSelection": true,
 			"selectionId":              selectionID,
+			"apiKeyId":                 account.ApiKeyID,
 			"profiles":                 profiles,
 		})
 		return
@@ -3154,7 +3190,7 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 	response := map[string]interface{}{
 		"success": true,
 		"stage":   "complete",
-		"account": map[string]interface{}{"id": account.ID, "email": account.Email},
+		"account": map[string]interface{}{"id": account.ID, "email": account.Email, "apiKeyId": account.ApiKeyID},
 	}
 	if profileErr != nil {
 		response["warning"] = "The account was added, but its Kiro profile could not be resolved yet"
@@ -3164,8 +3200,9 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 
 func (h *Handler) apiSelectMicrosoftSSOProfile(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SelectionID string `json:"selectionId"`
-		ProfileARN  string `json:"profileArn"`
+		SelectionID string  `json:"selectionId"`
+		ProfileARN  string  `json:"profileArn"`
+		ApiKeyID    *string `json:"apiKeyId"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -3174,6 +3211,16 @@ func (h *Handler) apiSelectMicrosoftSSOProfile(w http.ResponseWriter, r *http.Re
 		return
 	}
 	selectionID := strings.TrimSpace(req.SelectionID)
+	var requestedApiKeyID string
+	if req.ApiKeyID != nil {
+		var err error
+		requestedApiKeyID, err = normalizeRequestApiKeyID(*req.ApiKeyID)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
 	selection := h.getMicrosoftProfileSelection(selectionID)
 	if selection == nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -3206,6 +3253,17 @@ func (h *Handler) apiSelectMicrosoftSSOProfile(w http.ResponseWriter, r *http.Re
 	}
 
 	account := selection.Account
+	if req.ApiKeyID != nil {
+		if requestedApiKeyID == "" {
+			// An explicitly empty value is the only way to clear a binding
+			// captured by the earlier asynchronous login step.
+			account.ApiKeyID = ""
+		} else if account.ApiKeyID == "" {
+			// Preserve a non-empty snapshot; a legacy selection with no snapshot
+			// may still accept an explicit binding at this final step.
+			account.ApiKeyID = requestedApiKeyID
+		}
+	}
 	account.ProfileArn = profileARN
 	h.microsoftFlowMu.Lock()
 	now := time.Now()
@@ -3238,7 +3296,7 @@ func (h *Handler) apiSelectMicrosoftSSOProfile(w http.ResponseWriter, r *http.Re
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"stage":   "complete",
-		"account": map[string]interface{}{"id": account.ID, "email": account.Email},
+		"account": map[string]interface{}{"id": account.ID, "email": account.Email, "apiKeyId": account.ApiKeyID},
 	})
 }
 

@@ -63,6 +63,11 @@ type microsoftSSOSession struct {
 	PortalState string
 	ProxyURL    string
 	ExpiresAt   time.Time
+	// ApiKeyID is the optional account-group ownership selected when the
+	// interactive flow starts. ApiKeyIDSet distinguishes an explicit empty
+	// selection (which intentionally unbinds the account) from an omitted field.
+	ApiKeyID    string
+	ApiKeyIDSet bool
 	timer       *time.Timer
 	mu          sync.Mutex
 	canceled    atomic.Bool
@@ -83,6 +88,8 @@ type MicrosoftSSOResult struct {
 	Email         string
 	UserID        string
 	ExpiresAt     int64
+	ApiKeyID      string
+	ApiKeyIDSet   bool
 }
 
 // MicrosoftSSOProgress represents either the authorization URL for the second
@@ -90,6 +97,8 @@ type MicrosoftSSOResult struct {
 type MicrosoftSSOProgress struct {
 	AuthorizationURL string
 	Result           *MicrosoftSSOResult
+	ApiKeyID         string
+	ApiKeyIDSet      bool
 }
 
 var (
@@ -102,7 +111,11 @@ var (
 // the fixed localhost callback; it is not an OAuth code exchange for this
 // proxy, so no PKCE verifier is retained server-side. Microsoft's second leg
 // still uses a stored PKCE verifier.
-func StartMicrosoftSSOLogin() (sessionID, authorizationURL string, expiresIn int, err error) {
+func StartMicrosoftSSOLogin(apiKeyIDs ...string) (sessionID, authorizationURL string, expiresIn int, err error) {
+	apiKeyID, apiKeyIDSet, err := parseMicrosoftSSOApiKeyArgument(apiKeyIDs)
+	if err != nil {
+		return "", "", 0, err
+	}
 	// code_challenge is still sent because Kiro's hosted sign-in URL expects the
 	// same query shape as other clients. There is no later code_verifier check
 	// for this portal leg.
@@ -121,6 +134,8 @@ func StartMicrosoftSSOLogin() (sessionID, authorizationURL string, expiresIn int
 		PortalState: state,
 		ProxyURL:    config.GetProxyURL(),
 		ExpiresAt:   now.Add(microsoftSSOSessionTTL),
+		ApiKeyID:    apiKeyID,
+		ApiKeyIDSet: apiKeyIDSet,
 		stage:       microsoftSSOWaitingForPortal,
 	}
 
@@ -159,7 +174,11 @@ func StartMicrosoftSSOLogin() (sessionID, authorizationURL string, expiresIn int
 // ContinueMicrosoftSSOLogin consumes one pasted callback URL. The first call
 // returns the Microsoft authorization URL; the second exchanges the Microsoft
 // authorization code and returns the credential.
-func ContinueMicrosoftSSOLogin(sessionID, callbackURL string) (*MicrosoftSSOProgress, error) {
+func ContinueMicrosoftSSOLogin(sessionID, callbackURL string, apiKeyIDs ...string) (*MicrosoftSSOProgress, error) {
+	requestedApiKeyID, apiKeyProvided, err := parseMicrosoftSSOApiKeyArgument(apiKeyIDs)
+	if err != nil {
+		return nil, err
+	}
 	session := getMicrosoftSSOSession(strings.TrimSpace(sessionID))
 	if session == nil {
 		return nil, fmt.Errorf("Microsoft SSO session not found or expired")
@@ -182,15 +201,55 @@ func ContinueMicrosoftSSOLogin(sessionID, callbackURL string) (*MicrosoftSSOProg
 		retireMicrosoftSSOSessionLocked(session)
 		return nil, fmt.Errorf("Microsoft SSO session expired")
 	}
+	if apiKeyProvided {
+		// The start request owns the flow's account-group binding. A later
+		// callback may explicitly clear it, but a non-empty callback value cannot
+		// silently move an already-bound login into another group. For legacy
+		// sessions without a snapshot, accept the first non-empty callback value.
+		if requestedApiKeyID == "" {
+			session.ApiKeyID = ""
+			session.ApiKeyIDSet = true
+		} else if !session.ApiKeyIDSet {
+			session.ApiKeyID = requestedApiKeyID
+			session.ApiKeyIDSet = true
+		}
+	}
+	// Capture the binding before a provider-leg completion retires and scrubs
+	// the session. The returned progress/result must still carry the snapshot.
+	snapshotApiKeyID, snapshotApiKeySet := session.ApiKeyID, session.ApiKeyIDSet
 
 	switch session.stage {
 	case microsoftSSOWaitingForPortal:
-		return continueMicrosoftPortalLeg(session, callbackURL)
+		progress, err := continueMicrosoftPortalLeg(session, callbackURL)
+		if progress != nil {
+			progress.ApiKeyID = snapshotApiKeyID
+			progress.ApiKeyIDSet = snapshotApiKeySet
+		}
+		return progress, err
 	case microsoftSSOWaitingForProvider:
-		return continueMicrosoftProviderLeg(session, callbackURL)
+		progress, err := continueMicrosoftProviderLeg(session, callbackURL)
+		if progress != nil {
+			progress.ApiKeyID = snapshotApiKeyID
+			progress.ApiKeyIDSet = snapshotApiKeySet
+			if progress.Result != nil {
+				progress.Result.ApiKeyID = snapshotApiKeyID
+				progress.Result.ApiKeyIDSet = snapshotApiKeySet
+			}
+		}
+		return progress, err
 	default:
 		return nil, fmt.Errorf("Microsoft SSO session is in an invalid state")
 	}
+}
+
+func parseMicrosoftSSOApiKeyArgument(apiKeyIDs []string) (string, bool, error) {
+	if len(apiKeyIDs) > 1 {
+		return "", false, fmt.Errorf("Microsoft SSO accepts at most one api key binding")
+	}
+	if len(apiKeyIDs) == 0 {
+		return "", false, nil
+	}
+	return strings.TrimSpace(apiKeyIDs[0]), true, nil
 }
 
 // CancelMicrosoftSSOLogin discards one transient session. It is safe to call for
@@ -366,6 +425,8 @@ func continueMicrosoftProviderLeg(session *microsoftSSOSession, rawURL string) (
 		Email:         metadata.Email,
 		UserID:        userID,
 		ExpiresAt:     time.Now().Unix() + int64(token.ExpiresIn),
+		ApiKeyID:      session.ApiKeyID,
+		ApiKeyIDSet:   session.ApiKeyIDSet,
 	}
 	retireMicrosoftSSOSessionLocked(session)
 	return &MicrosoftSSOProgress{Result: result}, nil
@@ -974,6 +1035,8 @@ func retireMicrosoftSSOSessionLocked(session *microsoftSSOSession) {
 func clearMicrosoftSSOSessionLocked(session *microsoftSSOSession) {
 	session.PortalState = ""
 	session.ProxyURL = ""
+	session.ApiKeyID = ""
+	session.ApiKeyIDSet = false
 	session.providerLeg = nil
 }
 
