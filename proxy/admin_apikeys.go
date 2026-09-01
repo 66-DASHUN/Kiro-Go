@@ -133,6 +133,11 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	// Adding an enabled key can migrate legacy unbound accounts. Rebuild the
+	// runtime pool so ownership and quota changes take effect immediately.
+	if h.pool != nil {
+		h.pool.Reload()
+	}
 
 	// Return the cleartext key exactly once on creation so the operator can copy it.
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -204,17 +209,22 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 		patch.PromptCacheReadEmulationRatio = req.PromptCacheReadEmulationRatio
 	}
 
-	if err := config.UpdateApiKey(id, patch); err != nil {
+	var updateErr error
+	if req.ClearPromptCacheOverrides {
+		updateErr = config.UpdateApiKeyAndClearPromptCacheOverrides(id, patch)
+	} else {
+		updateErr = config.UpdateApiKey(id, patch)
+	}
+	if updateErr != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		json.NewEncoder(w).Encode(map[string]string{"error": updateErr.Error()})
 		return
 	}
-	if req.ClearPromptCacheOverrides {
-		if err := config.ClearPromptCacheOverrides(id); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
+	// Updating Enabled may trigger the one-time legacy ownership migration;
+	// cache policy and limits also affect runtime routing, so reload after any
+	// successful mutation.
+	if h.pool != nil {
+		h.pool.Reload()
 	}
 
 	updated := config.GetApiKeyEntry(id)

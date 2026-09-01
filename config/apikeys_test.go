@@ -505,6 +505,81 @@ func TestClearPromptCacheOverridesSaveFailureRollsBackInMemoryEntry(t *testing.T
 	}
 }
 
+func TestUpdateApiKeyAndClearPromptCacheOverridesAppliesTogether(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	enabled := true
+	mode := PromptCacheModeIndependent
+	ratio, creation, read := 0.2, 0.3, 0.4
+	created, err := AddApiKey(ApiKeyEntry{
+		Name: "before", Key: "sk-atomic", Enabled: true,
+		PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode,
+		PromptCacheEmulationRatio: &ratio, PromptCacheCreationEmulationRatio: &creation,
+		PromptCacheReadEmulationRatio: &read,
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	if err := UpdateApiKeyAndClearPromptCacheOverrides(created.ID, ApiKeyEntry{
+		Name: "after", Key: created.Key, Enabled: false,
+	}); err != nil {
+		t.Fatalf("atomic update: %v", err)
+	}
+	got := GetApiKeyEntry(created.ID)
+	if got == nil {
+		t.Fatal("entry disappeared after atomic update")
+	}
+	if got.Name != "after" || got.Enabled {
+		t.Fatalf("ordinary fields were not updated: %+v", got)
+	}
+	if got.PromptCacheEmulationEnabled != nil || got.PromptCacheEmulationMode != nil ||
+		got.PromptCacheEmulationRatio != nil || got.PromptCacheCreationEmulationRatio != nil ||
+		got.PromptCacheReadEmulationRatio != nil {
+		t.Fatalf("cache overrides were not cleared: %+v", got)
+	}
+}
+
+func TestUpdateApiKeyAndClearPromptCacheOverridesRollsBackTogetherOnSaveFailure(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	enabled := true
+	mode := PromptCacheModeIndependent
+	ratio, creation, read := 0.2, 0.3, 0.4
+	created, err := AddApiKey(ApiKeyEntry{
+		Name: "before", Key: "sk-atomic-rollback", Enabled: true,
+		PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode,
+		PromptCacheEmulationRatio: &ratio, PromptCacheCreationEmulationRatio: &creation,
+		PromptCacheReadEmulationRatio: &read,
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	cfgPath = filepath.Join(t.TempDir(), "missing", "config.json")
+	if err := UpdateApiKeyAndClearPromptCacheOverrides(created.ID, ApiKeyEntry{
+		Name: "after", Key: created.Key, Enabled: false,
+	}); err == nil {
+		t.Fatal("expected atomic update save failure")
+	}
+	got := GetApiKeyEntry(created.ID)
+	if got == nil {
+		t.Fatal("entry disappeared after failed atomic update")
+	}
+	if got.Name != "before" || !got.Enabled {
+		t.Fatalf("ordinary fields changed after failed update: %+v", got)
+	}
+	if got.PromptCacheEmulationEnabled == nil || !*got.PromptCacheEmulationEnabled ||
+		got.PromptCacheEmulationMode == nil || *got.PromptCacheEmulationMode != mode ||
+		got.PromptCacheEmulationRatio == nil || *got.PromptCacheEmulationRatio != ratio ||
+		got.PromptCacheCreationEmulationRatio == nil || *got.PromptCacheCreationEmulationRatio != creation ||
+		got.PromptCacheReadEmulationRatio == nil || *got.PromptCacheReadEmulationRatio != read {
+		t.Fatalf("cache overrides changed after failed update: %+v", got)
+	}
+}
+
 func TestUpdatePromptCacheSettingsSaveFailureRollsBackConfig(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init: %v", err)
