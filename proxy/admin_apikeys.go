@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"kiro-go/config"
 	"net/http"
 )
@@ -230,7 +231,11 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 
 func (h *Handler) apiDeleteApiKey(w http.ResponseWriter, r *http.Request, id string) {
 	if err := config.DeleteApiKey(id); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if errors.Is(err, config.ErrApiKeyInUse) {
+			status = http.StatusConflict
+		}
+		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}

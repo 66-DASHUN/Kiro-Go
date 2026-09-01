@@ -190,6 +190,84 @@ func TestAdminUpdateAccountRejectsInvalidApiKeyIDWithoutChangingAccount(t *testi
 	}
 }
 
+func TestAdminSettingsExposePromptCacheConfig(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+	rec := httptest.NewRecorder()
+	h.apiGetSettings(rec, httptest.NewRequest(http.MethodGet, "/admin/api/settings", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("settings status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode settings: %v", err)
+	}
+	if payload["promptCacheEmulationEnabled"] != true || payload["promptCacheEmulationMode"] != config.PromptCacheModeUniform {
+		t.Fatalf("missing/default prompt cache fields: %+v", payload)
+	}
+	for _, field := range []string{
+		"promptCacheEmulationRatio",
+		"promptCacheCreationEmulationRatio",
+		"promptCacheReadEmulationRatio",
+	} {
+		if _, ok := payload[field]; !ok {
+			t.Fatalf("settings response missing %q: %+v", field, payload)
+		}
+	}
+}
+
+func TestAdminSettingsUpdatePromptCacheConfigRoundTripAndPatch(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+	body := strings.NewReader(`{"promptCacheEmulationEnabled":true,"promptCacheEmulationMode":"independent","promptCacheEmulationRatio":0.8,"promptCacheCreationEmulationRatio":0.6,"promptCacheReadEmulationRatio":0.4}`)
+	rec := httptest.NewRecorder()
+	h.apiUpdateSettings(rec, httptest.NewRequest(http.MethodPost, "/admin/api/settings", body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got := config.EffectivePromptCacheSettings("")
+	want := config.PromptCacheSettings{Enabled: true, Mode: config.PromptCacheModeIndependent, Ratio: 0.8, CreationRatio: 0.6, ReadRatio: 0.4}
+	if got != want {
+		t.Fatalf("settings=%+v, want %+v", got, want)
+	}
+
+	patchRec := httptest.NewRecorder()
+	h.apiUpdateSettings(patchRec, httptest.NewRequest(http.MethodPost, "/admin/api/settings", strings.NewReader(`{"promptCacheReadEmulationRatio":0.2}`)))
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch status=%d body=%s", patchRec.Code, patchRec.Body.String())
+	}
+	got = config.EffectivePromptCacheSettings("")
+	if got.Enabled != want.Enabled || got.Mode != want.Mode || got.Ratio != want.Ratio || got.CreationRatio != want.CreationRatio || got.ReadRatio != 0.2 {
+		t.Fatalf("partial patch changed unexpected fields: %+v", got)
+	}
+}
+
+func TestAdminSettingsRejectInvalidPromptCacheConfigWithoutChangingIt(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+	original := config.EffectivePromptCacheSettings("")
+	for _, body := range []string{
+		`{"promptCacheEmulationMode":"unsupported"}`,
+		`{"promptCacheEmulationRatio":1.01}`,
+		`{"promptCacheReadEmulationRatio":-0.01}`,
+	} {
+		rec := httptest.NewRecorder()
+		h.apiUpdateSettings(rec, httptest.NewRequest(http.MethodPost, "/admin/api/settings", strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body=%s status=%d response=%s, want 400", body, rec.Code, rec.Body.String())
+		}
+		if got := config.EffectivePromptCacheSettings(""); got != original {
+			t.Fatalf("invalid update changed settings: got=%+v want=%+v", got, original)
+		}
+	}
+}
+
 func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) {
 	cfgFile := t.TempDir() + "/config.json"
 	if err := config.Init(cfgFile); err != nil {

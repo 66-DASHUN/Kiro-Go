@@ -171,6 +171,91 @@ func TestUpdateAccountStaleSnapshotPreservesCredentialRotation(t *testing.T) {
 	}
 }
 
+func TestUpdateAccountStaleSnapshotPreservesApiKeyBinding(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{ID: "key-one", Key: "sk-one", Enabled: true}); err != nil {
+		t.Fatalf("add key one: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{ID: "key-two", Key: "sk-two", Enabled: true}); err != nil {
+		t.Fatalf("add key two: %v", err)
+	}
+	account := Account{ID: "binding-account", ApiKeyID: "key-one", AccessToken: "access", Enabled: true}
+	if err := AddAccount(account); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+
+	stale := GetAccounts()[0]
+	if err := UpdateAccountApiKeyID(account.ID, "key-two"); err != nil {
+		t.Fatalf("update binding: %v", err)
+	}
+	stale.Nickname = "status update"
+	if err := UpdateAccount(account.ID, stale); err != nil {
+		t.Fatalf("apply stale snapshot: %v", err)
+	}
+
+	got := GetAccounts()[0]
+	if got.ApiKeyID != "key-two" {
+		t.Fatalf("stale snapshot reverted api key binding to %q", got.ApiKeyID)
+	}
+	if got.Nickname != "status update" {
+		t.Fatalf("stale snapshot did not update nickname: %q", got.Nickname)
+	}
+}
+
+func TestUpdateAccountPatchOnlyChangesSpecifiedFieldsAfterBindingChange(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{ID: "key-one", Key: "sk-one", Enabled: true}); err != nil {
+		t.Fatalf("add key one: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{ID: "key-two", Key: "sk-two", Enabled: true}); err != nil {
+		t.Fatalf("add key two: %v", err)
+	}
+	account := Account{ID: "patch-account", ApiKeyID: "key-one", AccessToken: "access", Enabled: true}
+	if err := AddAccount(account); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := UpdateAccountApiKeyID(account.ID, "key-two"); err != nil {
+		t.Fatalf("update binding: %v", err)
+	}
+
+	nickname := "patched"
+	updated, err := UpdateAccountPatch(account.ID, AccountPatch{Nickname: &nickname})
+	if err != nil {
+		t.Fatalf("patch account: %v", err)
+	}
+	if updated.ApiKeyID != "key-two" || updated.Nickname != nickname {
+		t.Fatalf("patch result=%+v, want key-two and nickname", updated)
+	}
+	if got := GetAccounts()[0]; got.ApiKeyID != "key-two" || got.Nickname != nickname {
+		t.Fatalf("stored account=%+v, want binding preserved", got)
+	}
+}
+
+func TestUpdateAccountPatchCanExplicitlyUnbindApiKey(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := AddApiKey(ApiKeyEntry{ID: "key-one", Key: "sk-one", Enabled: true}); err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	account := Account{ID: "unbind-account", ApiKeyID: "key-one", AccessToken: "access", Enabled: true}
+	if err := AddAccount(account); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	empty := ""
+	updated, err := UpdateAccountPatch(account.ID, AccountPatch{ApiKeyID: &empty})
+	if err != nil {
+		t.Fatalf("unbind account: %v", err)
+	}
+	if updated.ApiKeyID != "" || GetAccounts()[0].ApiKeyID != "" {
+		t.Fatalf("expected explicit unbind, result=%+v stored=%+v", updated, GetAccounts()[0])
+	}
+}
+
 // TestAccountAllowOverageMigration verifies that a config.json from before the
 // upstream-Overages-switch refactor (which carried `allowOverage: true` per
 // account) is migrated into OverageStatus="ENABLED" on first load, and that
@@ -337,6 +422,56 @@ func TestAccountAPIKeyIDMigrationAssignsFirstEnabledKey(t *testing.T) {
 	}
 }
 
+func TestExplicitApiKeyUnbindSurvivesReloadAfterLegacyMigration(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	seed := map[string]interface{}{
+		"password": "p",
+		"port":     8080,
+		"host":     "0.0.0.0",
+		"apiKeys": []map[string]interface{}{
+			{"id": "key-one", "key": "sk-one", "enabled": true},
+		},
+		"accounts": []map[string]interface{}{
+			{"id": "legacy", "enabled": true},
+		},
+	}
+	raw, err := json.Marshal(seed)
+	if err != nil {
+		t.Fatalf("marshal seed: %v", err)
+	}
+	if err := os.WriteFile(cfgFile, raw, 0600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if got := GetAccounts()[0].ApiKeyID; got != "key-one" {
+		t.Fatalf("legacy account apiKeyId=%q, want key-one", got)
+	}
+	empty := ""
+	if _, err := UpdateAccountPatch("legacy", AccountPatch{ApiKeyID: &empty}); err != nil {
+		t.Fatalf("explicit unbind: %v", err)
+	}
+	if err := Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := GetAccounts()[0].ApiKeyID; got != "" {
+		t.Fatalf("explicit unbind was re-migrated to %q", got)
+	}
+
+	persisted, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatalf("read persisted config: %v", err)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(persisted, &decoded); err != nil {
+		t.Fatalf("decode persisted config: %v", err)
+	}
+	if completed, ok := decoded["apiKeyAccountMigrationCompleted"].(bool); !ok || !completed {
+		t.Fatalf("expected persisted migration marker, got %v", decoded["apiKeyAccountMigrationCompleted"])
+	}
+}
+
 func TestAPIKeyIDValidityHelpers(t *testing.T) {
 	cfgFile := filepath.Join(t.TempDir(), "config.json")
 	if err := Init(cfgFile); err != nil {
@@ -359,5 +494,28 @@ func TestAPIKeyIDValidityHelpers(t *testing.T) {
 	}
 	if IsApiKeyIDValid("disabled") || IsApiKeyIDValid("missing") || IsApiKeyIDValid("") {
 		t.Fatal("disabled, missing, and empty key IDs should be invalid")
+	}
+}
+
+func TestDeleteApiKeyRejectsBoundAccounts(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	key, err := AddApiKey(ApiKeyEntry{ID: "bound-key", Key: "sk-bound", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	if err := AddAccount(Account{ID: "bound-account", ApiKeyID: key.ID, Enabled: true}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := DeleteApiKey(key.ID); err != ErrApiKeyInUse {
+		t.Fatalf("delete bound key error=%v, want %v", err, ErrApiKeyInUse)
+	}
+	if GetApiKeyEntry(key.ID) == nil {
+		t.Fatal("bound key was deleted despite account binding")
+	}
+	if got := GetAccounts()[0].ApiKeyID; got != key.ID {
+		t.Fatalf("account binding changed after rejected delete: %q", got)
 	}
 }

@@ -65,10 +65,23 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	if entry.CreatedAt == 0 {
 		entry.CreatedAt = time.Now().Unix()
 	}
+	previousMarker := cfg.ApiKeyAccountMigrationCompleted
+	var previousAccounts []Account
+	if !previousMarker {
+		// The first enabled API key may be added after an old config was loaded
+		// without any usable key. Keep a copy so a failed save can roll back the
+		// one-time account migration together with the API-key append.
+		previousAccounts = append([]Account(nil), cfg.Accounts...)
+	}
 	cfg.ApiKeys = append(cfg.ApiKeys, entry)
+	migrateUnboundAccountsLocked()
 	if err := saveLocked(); err != nil {
 		// Roll back the in-memory append so we don't leave inconsistent state.
 		cfg.ApiKeys = cfg.ApiKeys[:len(cfg.ApiKeys)-1]
+		if !previousMarker {
+			cfg.ApiKeyAccountMigrationCompleted = previousMarker
+			cfg.Accounts = previousAccounts
+		}
 		return ApiKeyEntry{}, err
 	}
 	return cloneApiKeyEntry(entry), nil
@@ -225,10 +238,20 @@ func DeleteApiKey(id string) error {
 	if cfg == nil {
 		return errors.New("config not initialized")
 	}
+	for _, account := range cfg.Accounts {
+		if strings.TrimSpace(account.ApiKeyID) == id {
+			return ErrApiKeyInUse
+		}
+	}
 	for i, e := range cfg.ApiKeys {
 		if e.ID == id {
+			previous := append([]ApiKeyEntry(nil), cfg.ApiKeys...)
 			cfg.ApiKeys = append(cfg.ApiKeys[:i], cfg.ApiKeys[i+1:]...)
-			return saveLocked()
+			if err := saveLocked(); err != nil {
+				cfg.ApiKeys = previous
+				return err
+			}
+			return nil
 		}
 	}
 	return nil

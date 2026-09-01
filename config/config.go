@@ -30,6 +30,8 @@ var (
 	ErrDuplicateRefreshToken = errors.New("account refresh token already exists")
 	ErrDuplicateAPIKey       = errors.New("account API key already exists")
 	ErrEmptyAPIKey           = errors.New("kiroApiKey is empty")
+	ErrInvalidAccountApiKey  = errors.New("apiKeyId must reference an enabled API key")
+	ErrApiKeyInUse           = errors.New("api key is still bound to one or more accounts")
 )
 
 // GenerateMachineId generates a UUID v4 format machine identifier.
@@ -138,6 +140,18 @@ type Account struct {
 	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
 }
 
+// AccountPatch contains the mutable administrative fields that can be changed
+// without replacing an account's credential snapshot. A nil field is left
+// unchanged; a non-nil ApiKeyID (including an empty string) is intentional.
+type AccountPatch struct {
+	ApiKeyID  *string
+	Nickname  *string
+	Enabled   *bool
+	MachineID *string
+	Weight    *int
+	ProxyURL  *string
+}
+
 // PromptFilterRule defines a single custom prompt sanitization rule.
 // Type can be: "regex" (regexp find/replace within prompt) or
 // "lines-containing" (remove lines containing the match substring).
@@ -235,6 +249,10 @@ type Config struct {
 	SystemVersion string        `json:"systemVersion,omitempty"`
 	NodeVersion   string        `json:"nodeVersion,omitempty"`
 	Accounts      []Account     `json:"accounts"` // Registered Kiro accounts
+	// ApiKeyAccountMigrationCompleted prevents a later explicit unbind (which
+	// is represented by an empty ApiKeyID) from being mistaken for a legacy
+	// account on restart. It is written after the one-time legacy migration.
+	ApiKeyAccountMigrationCompleted bool `json:"apiKeyAccountMigrationCompleted,omitempty"`
 
 	// Thinking mode configuration for extended reasoning output
 	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")
@@ -395,14 +413,11 @@ func Load() error {
 	}
 
 	// Migration: assign historical accounts without an ownership ID to the
-	// first enabled API key. Explicit assignments are preserved verbatim.
-	if apiKeyID := firstEnabledApiKeyID(cfg); apiKeyID != "" {
-		for i := range cfg.Accounts {
-			if strings.TrimSpace(cfg.Accounts[i].ApiKeyID) == "" {
-				cfg.Accounts[i].ApiKeyID = apiKeyID
-				migrationNeeded = true
-			}
-		}
+	// first enabled API key exactly once. The completion marker is important:
+	// an explicit unbind is persisted as an empty ID and must not be mistaken
+	// for a legacy account on every subsequent restart.
+	if migrateUnboundAccountsLocked() {
+		migrationNeeded = true
 	}
 
 	// Migration: per-account AllowOverage → OverageStatus.
@@ -441,6 +456,30 @@ func firstEnabledApiKeyID(c *Config) string {
 		}
 	}
 	return ""
+}
+
+// migrateUnboundAccountsLocked performs the one-time ownership migration for
+// a loaded configuration. The caller must hold cfgLock. It returns true when
+// the configuration was changed and therefore needs to be persisted.
+func migrateUnboundAccountsLocked() bool {
+	if cfg == nil || cfg.ApiKeyAccountMigrationCompleted {
+		return false
+	}
+	apiKeyID := firstEnabledApiKeyID(cfg)
+	if apiKeyID == "" {
+		return false
+	}
+	for i := range cfg.Accounts {
+		normalized := strings.TrimSpace(cfg.Accounts[i].ApiKeyID)
+		if normalized != cfg.Accounts[i].ApiKeyID {
+			cfg.Accounts[i].ApiKeyID = normalized
+		}
+		if normalized == "" {
+			cfg.Accounts[i].ApiKeyID = apiKeyID
+		}
+	}
+	cfg.ApiKeyAccountMigrationCompleted = true
+	return true
 }
 
 func normalizePromptCacheConfig(c *Config, data []byte) error {
@@ -679,7 +718,13 @@ func IsApiKeyIDValid(id string) bool {
 	}
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	if cfg == nil {
+	return isApiKeyIDValidLocked(id)
+}
+
+// isApiKeyIDValidLocked is the lock-free counterpart used by atomic config
+// mutations. The caller must hold at least cfgLock.RLock.
+func isApiKeyIDValidLocked(id string) bool {
+	if cfg == nil || id == "" {
 		return false
 	}
 	for _, entry := range cfg.ApiKeys {
@@ -885,6 +930,13 @@ func AccountIDExists(id string) bool {
 func AddAccount(account Account) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	account.ApiKeyID = strings.TrimSpace(account.ApiKeyID)
+	if account.ApiKeyID != "" && !isApiKeyIDValidLocked(account.ApiKeyID) {
+		return ErrInvalidAccountApiKey
+	}
 	if IsAPIKeyAccount(&account) {
 		if err := NormalizeAPIKeyAccount(&account); err != nil {
 			return err
@@ -947,6 +999,10 @@ func UpdateAccount(id string, account Account) error {
 			account.TokenEndpoint = a.TokenEndpoint
 			account.IssuerURL = a.IssuerURL
 			account.Scopes = a.Scopes
+			// Ownership is an administrative field with its own atomic update
+			// path. Preserve it here so legacy full-snapshot callers cannot
+			// overwrite a newer binding with stale data.
+			account.ApiKeyID = a.ApiKeyID
 			if account.RefreshTokenFingerprint == "" {
 				account.RefreshTokenFingerprint = RefreshTokenFingerprint(a.RefreshToken)
 			}
@@ -960,6 +1016,68 @@ func UpdateAccount(id string, account Account) error {
 		}
 	}
 	return nil
+}
+
+// UpdateAccountPatch atomically applies administrative fields to an account.
+// It starts from the current account under cfgLock, so a stale caller snapshot
+// cannot overwrite fields that were changed concurrently. A non-nil ApiKeyID
+// is applied after trimming; an empty value explicitly unbinds the account.
+// The returned account is the exact persisted state after the update.
+func UpdateAccountPatch(id string, patch AccountPatch) (Account, error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return Account{}, errors.New("config not initialized")
+	}
+	for i, current := range cfg.Accounts {
+		if current.ID != id {
+			continue
+		}
+		updated := current
+		previousMarker := cfg.ApiKeyAccountMigrationCompleted
+		if patch.ApiKeyID != nil {
+			apiKeyID := strings.TrimSpace(*patch.ApiKeyID)
+			if apiKeyID != "" && !isApiKeyIDValidLocked(apiKeyID) {
+				return Account{}, ErrInvalidAccountApiKey
+			}
+			updated.ApiKeyID = apiKeyID
+			// An explicit ownership operation, including unbind, is an
+			// administrative declaration that legacy migration must not run later.
+			cfg.ApiKeyAccountMigrationCompleted = true
+		}
+		if patch.Nickname != nil {
+			updated.Nickname = *patch.Nickname
+		}
+		if patch.Enabled != nil {
+			updated.Enabled = *patch.Enabled
+		}
+		if patch.MachineID != nil {
+			updated.MachineId = *patch.MachineID
+		}
+		if patch.Weight != nil {
+			updated.Weight = *patch.Weight
+		}
+		if patch.ProxyURL != nil {
+			updated.ProxyURL = *patch.ProxyURL
+		}
+
+		previous := cfg.Accounts[i]
+		cfg.Accounts[i] = updated
+		if err := Save(); err != nil {
+			cfg.Accounts[i] = previous
+			cfg.ApiKeyAccountMigrationCompleted = previousMarker
+			return Account{}, err
+		}
+		return updated, nil
+	}
+	return Account{}, ErrAccountNotFound
+}
+
+// UpdateAccountApiKeyID atomically changes only an account's API-key
+// ownership. Passing an empty ID explicitly unbinds the account.
+func UpdateAccountApiKeyID(id, apiKeyID string) error {
+	_, err := UpdateAccountPatch(id, AccountPatch{ApiKeyID: &apiKeyID})
+	return err
 }
 
 // UpdateAccountOverageStatus persists the cached upstream overage status fields.

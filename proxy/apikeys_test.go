@@ -97,6 +97,25 @@ func TestApiKeyViewIncludesBoundAccountCount(t *testing.T) {
 	}
 }
 
+func TestApiKeyDeleteRejectsBoundAccounts(t *testing.T) {
+	mustInitConfig(t)
+	entry, err := config.AddApiKey(config.ApiKeyEntry{Name: "bound", Key: "sk-bound", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "bound-account", ApiKeyID: entry.ID, Enabled: true}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	(&Handler{}).apiDeleteApiKey(rec, httptest.NewRequest(http.MethodDelete, "/admin/api/api-keys/"+entry.ID, nil), entry.ID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("delete status=%d body=%s, want 409", rec.Code, rec.Body.String())
+	}
+	if config.GetApiKeyEntry(entry.ID) == nil {
+		t.Fatal("bound key was deleted")
+	}
+}
+
 func TestAuthenticateRejectsDisabledKey(t *testing.T) {
 	mustInitConfig(t)
 	created, err := config.AddApiKey(config.ApiKeyEntry{Name: "off", Key: "sk-off", Enabled: false})

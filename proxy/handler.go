@@ -2633,7 +2633,11 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := config.AddAccount(account); err != nil {
-		w.WriteHeader(500)
+		status := http.StatusInternalServerError
+		if errors.Is(err, config.ErrInvalidAccountApiKey) {
+			status = http.StatusBadRequest
+		}
+		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
@@ -2668,20 +2672,25 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	// 获取现有账号
+	// Read only the current state needed for response-side behavior. The actual
+	// mutation below uses an atomic field-level config patch, so this snapshot
+	// cannot overwrite concurrent ownership or credential changes.
 	accounts := config.GetAccounts()
-	var existing *config.Account
+	var current config.Account
+	found := false
 	for i := range accounts {
 		if accounts[i].ID == id {
-			existing = &accounts[i]
+			current = accounts[i]
+			found = true
 			break
 		}
 	}
-	if existing == nil {
+	if !found {
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
 		return
 	}
+	patch := config.AccountPatch{}
 	if raw, ok := updates["apiKeyId"]; ok {
 		apiKeyID, isString := raw.(string)
 		if !isString {
@@ -2693,58 +2702,51 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 			apiKeyID = ""
 		}
 		apiKeyID = strings.TrimSpace(apiKeyID)
-		if apiKeyID != "" && !config.IsApiKeyIDValid(apiKeyID) {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "apiKeyId must reference an enabled API key"})
-			return
-		}
-		existing.ApiKeyID = apiKeyID
+		patch.ApiKeyID = &apiKeyID
 	}
 
 	// 只更新传入的字段
-	oldEnabled := existing.Enabled
+	oldEnabled := current.Enabled
 	if v, ok := updates["enabled"].(bool); ok {
-		existing.Enabled = v
+		patch.Enabled = &v
 	}
 	if v, ok := updates["nickname"].(string); ok {
-		existing.Nickname = v
+		patch.Nickname = &v
 	}
 	if v, ok := updates["machineId"].(string); ok {
-		existing.MachineId = v
+		patch.MachineID = &v
 	}
 	if v, ok := updates["weight"].(float64); ok {
-		existing.Weight = int(v)
+		weight := int(v)
+		patch.Weight = &weight
 	}
 	if v, ok := updates["proxyURL"].(string); ok {
-		existing.ProxyURL = v
-	}
-	if _, specified := updates["apiKeyId"]; !specified {
-		// Re-read the binding immediately before persistence so an unrelated
-		// update cannot write back a stale account snapshot over a newer bind.
-		for _, current := range config.GetAccounts() {
-			if current.ID == id {
-				existing.ApiKeyID = current.ApiKeyID
-				break
-			}
-		}
+		patch.ProxyURL = &v
 	}
 
-	if err := config.UpdateAccount(id, *existing); err != nil {
-		w.WriteHeader(500)
+	updated, err := config.UpdateAccountPatch(id, patch)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, config.ErrInvalidAccountApiKey) {
+			status = http.StatusBadRequest
+		} else if errors.Is(err, config.ErrAccountNotFound) {
+			status = http.StatusNotFound
+		}
+		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
 	h.pool.Reload()
 	// 账号从禁用→启用时，自动拉取并缓存模型列表
-	if !oldEnabled && existing.Enabled && existing.AccessToken != "" {
+	if !oldEnabled && updated.Enabled && accountBearerToken(&updated) != "" {
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for re-enabled account %s: %v", acc.Email, err)
 			}
-		}(*existing)
+		}(updated)
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "apiKeyId": existing.ApiKeyID})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "apiKeyId": updated.ApiKeyID})
 }
 
 // apiGetAccountOverage 拉取并返回单个账号的上游 Overages 状态。
@@ -4042,12 +4044,18 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, r *http.Request) {
+	promptCache := config.EffectivePromptCacheSettings("")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"apiKey":         config.GetApiKey(),
-		"requireApiKey":  config.IsApiKeyRequired(),
-		"port":           config.GetPort(),
-		"host":           config.GetHost(),
-		"allowOverUsage": config.GetAllowOverUsage(),
+		"apiKey":                            config.GetApiKey(),
+		"requireApiKey":                     config.IsApiKeyRequired(),
+		"port":                              config.GetPort(),
+		"host":                              config.GetHost(),
+		"allowOverUsage":                    config.GetAllowOverUsage(),
+		"promptCacheEmulationEnabled":       promptCache.Enabled,
+		"promptCacheEmulationMode":          promptCache.Mode,
+		"promptCacheEmulationRatio":         promptCache.Ratio,
+		"promptCacheCreationEmulationRatio": promptCache.CreationRatio,
+		"promptCacheReadEmulationRatio":     promptCache.ReadRatio,
 	})
 }
 
@@ -4096,15 +4104,58 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey         *string `json:"apiKey,omitempty"`
-		RequireApiKey  *bool   `json:"requireApiKey,omitempty"`
-		Password       string  `json:"password,omitempty"`
-		AllowOverUsage *bool   `json:"allowOverUsage,omitempty"`
+		ApiKey                            *string  `json:"apiKey,omitempty"`
+		RequireApiKey                     *bool    `json:"requireApiKey,omitempty"`
+		Password                          string   `json:"password,omitempty"`
+		AllowOverUsage                    *bool    `json:"allowOverUsage,omitempty"`
+		PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled,omitempty"`
+		PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode,omitempty"`
+		PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio,omitempty"`
+		PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio,omitempty"`
+		PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
+	}
+
+	// Validate and persist the cache policy as one complete update. Pointer
+	// fields preserve omitted values, while explicit false/zero values remain
+	// valid and are applied. Validation happens before ordinary settings are
+	// changed so a malformed cache request cannot partially update the panel.
+	cacheChanged := req.PromptCacheEmulationEnabled != nil ||
+		req.PromptCacheEmulationMode != nil ||
+		req.PromptCacheEmulationRatio != nil ||
+		req.PromptCacheCreationEmulationRatio != nil ||
+		req.PromptCacheReadEmulationRatio != nil
+	if cacheChanged {
+		cache := config.EffectivePromptCacheSettings("")
+		if req.PromptCacheEmulationEnabled != nil {
+			cache.Enabled = *req.PromptCacheEmulationEnabled
+		}
+		if req.PromptCacheEmulationMode != nil {
+			cache.Mode = strings.TrimSpace(*req.PromptCacheEmulationMode)
+		}
+		if req.PromptCacheEmulationRatio != nil {
+			cache.Ratio = *req.PromptCacheEmulationRatio
+		}
+		if req.PromptCacheCreationEmulationRatio != nil {
+			cache.CreationRatio = *req.PromptCacheCreationEmulationRatio
+		}
+		if req.PromptCacheReadEmulationRatio != nil {
+			cache.ReadRatio = *req.PromptCacheReadEmulationRatio
+		}
+		if err := config.ValidatePromptCacheSettings(cache); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if err := config.UpdatePromptCacheSettings(cache.Enabled, cache.Mode, cache.Ratio, cache.CreationRatio, cache.ReadRatio); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	if err := config.UpdateSettingsPatch(req.ApiKey, req.RequireApiKey, req.Password); err != nil {
