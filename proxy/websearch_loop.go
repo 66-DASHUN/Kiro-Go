@@ -31,6 +31,8 @@ type webSearchRoundOutcome struct {
 	inputTokens        int
 	credits            float64
 	stopReasonOverride string
+	cacheUsage         promptCacheUsage
+	cacheProfile       *promptCacheProfile
 }
 
 // runWebSearchLoop is the mixed-tools entry point.
@@ -134,10 +136,10 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 		h.recordSuccessLog("claude", req.Model, lastAccountID, inputTokens+outputTokens, totalCredits, time.Since(reqStart).Milliseconds())
 
 		if req.Stream {
-			h.renderWebSearchLoopSSE(w, req.Model, content, stopReason, inputTokens, outputTokens)
+			h.renderWebSearchLoopSSE(w, req.Model, content, stopReason, inputTokens, outputTokens, round.cacheUsage, round.cacheProfile != nil)
 			return
 		}
-		h.renderWebSearchLoopJSON(w, req.Model, content, stopReason, inputTokens, outputTokens)
+		h.renderWebSearchLoopJSON(w, req.Model, content, stopReason, inputTokens, outputTokens, round.cacheUsage, round.cacheProfile != nil)
 		return
 	}
 
@@ -215,6 +217,11 @@ func (h *Handler) callUpstreamForWebSearch(ctx context.Context, req *ClaudeReque
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
+		cacheProfile := h.promptCache.BuildClaudeProfile(req, inputTokens)
+		// A successful internal round is a valid cache write. Committing here
+		// allows the next round (which includes the search result) to reuse any
+		// stable prefix while keeping state isolated to the selected account.
+		cacheUsage := h.computeAndCommitWebSearchCache(account.ID, cacheProfile, apiKeyID)
 
 		return &webSearchRoundOutcome{
 			text:               text,
@@ -222,6 +229,8 @@ func (h *Handler) callUpstreamForWebSearch(ctx context.Context, req *ClaudeReque
 			inputTokens:        inputTokens,
 			credits:            credits,
 			stopReasonOverride: stopOverride,
+			cacheUsage:         cacheUsage,
+			cacheProfile:       cacheProfile,
 		}, account, nil
 	}
 
@@ -441,6 +450,8 @@ func (h *Handler) renderWebSearchLoopJSON(
 	content []map[string]interface{},
 	stopReason string,
 	inputTokens, outputTokens int,
+	cacheUsage promptCacheUsage,
+	includeCache bool,
 ) {
 	messageID := "msg_" + strings.ReplaceAll(uuid.New().String(), "-", "")
 	if len(messageID) > 4+24 {
@@ -454,12 +465,7 @@ func (h *Handler) renderWebSearchLoopJSON(
 		"content":       content,
 		"stop_reason":   stopReason,
 		"stop_sequence": nil,
-		"usage": map[string]interface{}{
-			"input_tokens":                inputTokens,
-			"output_tokens":               outputTokens,
-			"cache_creation_input_tokens": 0,
-			"cache_read_input_tokens":     0,
-		},
+		"usage":         buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, includeCache),
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -471,6 +477,8 @@ func (h *Handler) renderWebSearchLoopSSE(
 	content []map[string]interface{},
 	stopReason string,
 	inputTokens, outputTokens int,
+	cacheUsage promptCacheUsage,
+	includeCache bool,
 ) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -497,12 +505,7 @@ func (h *Handler) renderWebSearchLoopSSE(
 			"content":       []interface{}{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage": map[string]interface{}{
-				"input_tokens":                inputTokens,
-				"output_tokens":               0,
-				"cache_creation_input_tokens": 0,
-				"cache_read_input_tokens":     0,
-			},
+			"usage":         buildClaudeUsageMap(inputTokens, 0, cacheUsage, includeCache),
 		},
 	})
 
@@ -573,7 +576,7 @@ func (h *Handler) renderWebSearchLoopSSE(
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": stopReason},
-		"usage": map[string]interface{}{"output_tokens": outputTokens},
+		"usage": buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, includeCache),
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
 		"type": "message_stop",

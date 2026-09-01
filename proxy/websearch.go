@@ -501,8 +501,21 @@ func buildWebSearchContentBlocks(query, toolUseID string, results *WebSearchResu
 
 // ==================== Pure-path handler ====================
 
+// computeAndCommitWebSearchCache applies the effective API-key cache policy to
+// a successful web-search round and then records its cacheable prefixes. The
+// usage must be computed before Update so a cold request reports creation and
+// a later matching request reports reads.
+func (h *Handler) computeAndCommitWebSearchCache(accountID string, profile *promptCacheProfile, apiKeyID string) promptCacheUsage {
+	if accountID == "" {
+		return promptCacheUsage{}
+	}
+	usage := h.promptCache.ComputeWithSettings(accountID, profile, config.EffectivePromptCacheSettings(apiKeyID))
+	h.promptCache.Update(accountID, profile)
+	return usage
+}
+
 // handleWebSearchRequest serves pure native web_search requests via MCP.
-func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeRequest, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeRequest, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	query := extractSearchQuery(req)
 	if query == "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Unable to extract search query from message")
@@ -545,15 +558,17 @@ func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeReque
 	}
 
 	accountID := ""
+	cacheUsage := promptCacheUsage{}
 	if account != nil {
 		accountID = account.ID
+		cacheUsage = h.computeAndCommitWebSearchCache(account.ID, cacheProfile, apiKeyID)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, 0)
 	}
 	h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, 0)
 	h.recordSuccessLog("claude", req.Model, accountID, inputTokens+outputTokens, 0, time.Since(reqStart).Milliseconds())
 
 	if req.Stream {
-		h.streamWebSearchSSE(w, req.Model, query, toolUseID, results, inputTokens, outputTokens)
+		h.streamWebSearchSSE(w, req.Model, query, toolUseID, results, inputTokens, outputTokens, cacheUsage, cacheProfile != nil)
 		return
 	}
 
@@ -563,6 +578,10 @@ func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeReque
 	if len(messageID) > 4+24 {
 		messageID = messageID[:4+24]
 	}
+	usage := buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, cacheProfile != nil)
+	usage["server_tool_use"] = map[string]interface{}{
+		"web_search_requests": 1,
+	}
 	resp := map[string]interface{}{
 		"id":            messageID,
 		"type":          "message",
@@ -571,15 +590,7 @@ func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeReque
 		"content":       content,
 		"stop_reason":   "end_turn",
 		"stop_sequence": nil,
-		"usage": map[string]interface{}{
-			"input_tokens":                inputTokens,
-			"output_tokens":               outputTokens,
-			"cache_creation_input_tokens": 0,
-			"cache_read_input_tokens":     0,
-			"server_tool_use": map[string]interface{}{
-				"web_search_requests": 1,
-			},
-		},
+		"usage":         usage,
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -591,6 +602,8 @@ func (h *Handler) streamWebSearchSSE(
 	model, query, toolUseID string,
 	results *WebSearchResults,
 	inputTokens, outputTokens int,
+	cacheUsage promptCacheUsage,
+	includeCache bool,
 ) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -618,12 +631,7 @@ func (h *Handler) streamWebSearchSSE(
 			"content":       []interface{}{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage": map[string]interface{}{
-				"input_tokens":                inputTokens,
-				"output_tokens":               0,
-				"cache_creation_input_tokens": 0,
-				"cache_read_input_tokens":     0,
-			},
+			"usage":         buildClaudeUsageMap(inputTokens, 0, cacheUsage, includeCache),
 		},
 	})
 
@@ -694,15 +702,14 @@ func (h *Handler) streamWebSearchSSE(
 	})
 
 	// 6. message_delta + message_stop
+	usage := buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, includeCache)
+	usage["server_tool_use"] = map[string]interface{}{
+		"web_search_requests": 1,
+	}
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": "end_turn"},
-		"usage": map[string]interface{}{
-			"output_tokens": outputTokens,
-			"server_tool_use": map[string]interface{}{
-				"web_search_requests": 1,
-			},
-		},
+		"usage": usage,
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
 		"type": "message_stop",

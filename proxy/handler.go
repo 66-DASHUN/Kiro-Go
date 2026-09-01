@@ -878,7 +878,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// Pure native web_search: relay via Kiro MCP (generateAssistantResponse does not run it).
 	if hasWebSearchTool(&req) {
-		h.handleWebSearchRequest(w, &req, estimatedInputTokens, apiKeyID)
+		h.handleWebSearchRequest(w, &req, estimatedInputTokens, cacheProfile, apiKeyID)
 		return
 	}
 

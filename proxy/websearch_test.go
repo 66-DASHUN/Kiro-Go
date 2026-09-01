@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"encoding/json"
+	"kiro-go/config"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -557,5 +560,103 @@ func TestParseSearchResults_EmptyResultsArrayIsValid(t *testing.T) {
 	}
 	if len(results.Results) != 0 {
 		t.Fatalf("results len = %d", len(results.Results))
+	}
+}
+
+func TestComputeAndCommitWebSearchCacheUsesApiKeyPolicy(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	ratio := 0.5
+	enabled := true
+	entry, err := config.AddApiKey(config.ApiKeyEntry{
+		ID:                          "web-search-key",
+		Key:                         "sk-web-search",
+		Enabled:                     true,
+		PromptCacheEmulationRatio:   &ratio,
+		PromptCacheEmulationEnabled: &enabled,
+	})
+	if err != nil {
+		t.Fatalf("AddApiKey: %v", err)
+	}
+
+	tracker := newPromptCacheTracker(defaultPromptCacheTTL)
+	h := &Handler{promptCache: tracker}
+	fingerprint := [32]byte{1, 2, 3}
+	profile := &promptCacheProfile{
+		Model:            "claude-sonnet-4",
+		TotalInputTokens: 2000,
+		Breakpoints: []promptCacheBreakpoint{{
+			Fingerprint:      fingerprint,
+			CumulativeTokens: 2000,
+			TTL:              defaultPromptCacheTTL,
+		}},
+	}
+
+	first := h.computeAndCommitWebSearchCache("web-account", profile, entry.ID)
+	if first.CacheCreationInputTokens != 1000 || first.CacheReadInputTokens != 0 {
+		t.Fatalf("first web-search usage = %+v, want 1000 creation and no read", first)
+	}
+	second := h.computeAndCommitWebSearchCache("web-account", profile, entry.ID)
+	if second.CacheCreationInputTokens != 0 || second.CacheReadInputTokens != 1000 {
+		t.Fatalf("second web-search usage = %+v, want 1000 read and no creation", second)
+	}
+}
+
+func TestRenderWebSearchLoopJSONIncludesCacheUsage(t *testing.T) {
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	h.renderWebSearchLoopJSON(
+		rec,
+		"claude-sonnet-4",
+		[]map[string]interface{}{{"type": "text", "text": "done"}},
+		"end_turn",
+		2000,
+		100,
+		promptCacheUsage{CacheCreationInputTokens: 400, CacheReadInputTokens: 120},
+		true,
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var response map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	usage, ok := response["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("usage has unexpected shape: %#v", response["usage"])
+	}
+	if got := int(usage["input_tokens"].(float64)); got != 1480 {
+		t.Fatalf("input_tokens = %d, want 1480", got)
+	}
+	if got := int(usage["cache_creation_input_tokens"].(float64)); got != 400 {
+		t.Fatalf("cache_creation_input_tokens = %d, want 400", got)
+	}
+	if got := int(usage["cache_read_input_tokens"].(float64)); got != 120 {
+		t.Fatalf("cache_read_input_tokens = %d, want 120", got)
+	}
+}
+
+func TestStreamWebSearchSSEIncludesCacheUsage(t *testing.T) {
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	h.streamWebSearchSSE(
+		rec,
+		"claude-sonnet-4",
+		"q",
+		"srvtoolu_test",
+		&WebSearchResults{},
+		2000,
+		100,
+		promptCacheUsage{CacheCreationInputTokens: 400, CacheReadInputTokens: 120},
+		true,
+	)
+	body := rec.Body.String()
+	if !strings.Contains(body, `"cache_creation_input_tokens":400`) {
+		t.Fatalf("SSE missing cache creation usage: %s", body)
+	}
+	if !strings.Contains(body, `"cache_read_input_tokens":120`) {
+		t.Fatalf("SSE missing cache read usage: %s", body)
 	}
 }
