@@ -361,11 +361,11 @@ func parseSearchResults(mcpResp *McpResponse) *WebSearchResults {
 // A 200 JSON-RPC envelope whose search payload cannot be parsed is also treated
 // as failure (retry next account) — only a well-formed results object (including
 // an empty results array) counts as success.
-func (h *Handler) performWebSearch(model, query string) (*WebSearchResults, string, *config.Account, error) {
+func (h *Handler) performWebSearch(model, query, apiKeyID string) (*WebSearchResults, string, *config.Account, error) {
 	excluded := make(map[string]bool)
 	var lastErr error
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.pool.GetNextForModelForAPIKeyExcluding(apiKeyID, model, excluded)
 		if account == nil {
 			break
 		}
@@ -512,7 +512,7 @@ func (h *Handler) handleWebSearchRequest(w http.ResponseWriter, req *ClaudeReque
 	logger.Infof("[WebSearch] Processing query: %s (stream=%v)", query, req.Stream)
 	reqStart := time.Now()
 
-	results, toolUseID, account, err := h.performWebSearch(req.Model, query)
+	results, toolUseID, account, err := h.performWebSearch(req.Model, query, apiKeyID)
 	if err != nil {
 		logger.Warnf("[WebSearch] All MCP attempts failed: %v", err)
 		accountID := ""

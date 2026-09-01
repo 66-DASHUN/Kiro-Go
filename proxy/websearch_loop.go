@@ -54,7 +54,7 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 		if ctx.Err() != nil {
 			return
 		}
-		round, account, err := h.callUpstreamForWebSearch(ctx, &working, thinking, fallbackInput)
+		round, account, err := h.callUpstreamForWebSearch(ctx, &working, thinking, fallbackInput, apiKeyID)
 		if err != nil {
 			logger.Warnf("[WebSearchLoop] upstream round %d failed: %v", roundIdx, err)
 			accountID := ""
@@ -83,7 +83,7 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 		// this round's searches fit under max_uses.
 		roundSearchN := countWebSearchToolUses(round.toolUses)
 		if shouldSearchRound(roundIdx, round.toolUses, maxUses) && searchCount+roundSearchN <= maxUses {
-			searched, searchErr := h.searchAllWebUses(req.Model, round.toolUses)
+			searched, searchErr := h.searchAllWebUses(req.Model, round.toolUses, apiKeyID)
 			if searchErr != nil {
 				logger.Warnf("[WebSearchLoop] MCP search failed: %v", searchErr)
 				h.recordFailureWithDetails("claude", req.Model, lastAccountID, searchErr)
@@ -107,7 +107,7 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 				logger.Warnf("[WebSearchLoop] max_uses=%d reached; skipping further web_search", maxUses)
 				break
 			}
-			results, _, _, sErr := h.performWebSearch(req.Model, toolUseQuery(tu.Input))
+			results, _, _, sErr := h.performWebSearch(req.Model, toolUseQuery(tu.Input), apiKeyID)
 			if sErr != nil {
 				logger.Warnf("[WebSearchLoop] final-round MCP search failed: %v", sErr)
 				h.recordFailureWithDetails("claude", req.Model, lastAccountID, sErr)
@@ -145,13 +145,13 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 }
 
 // callUpstreamForWebSearch converts the Claude request and buffers one Kiro stream.
-func (h *Handler) callUpstreamForWebSearch(ctx context.Context, req *ClaudeRequest, thinking bool, estimatedInputTokens int) (*webSearchRoundOutcome, *config.Account, error) {
+func (h *Handler) callUpstreamForWebSearch(ctx context.Context, req *ClaudeRequest, thinking bool, estimatedInputTokens int, apiKeyID string) (*webSearchRoundOutcome, *config.Account, error) {
 	payload := ClaudeToKiro(req, thinking)
 	excluded := make(map[string]bool)
 	var lastErr error
 
 	for attempt := 0; attempt < maxAccountRetryAttempts; attempt++ {
-		account := h.pool.GetNextForModelExcluding(req.Model, excluded)
+		account := h.pool.GetNextForModelForAPIKeyExcluding(apiKeyID, req.Model, excluded)
 		if account == nil {
 			break
 		}
@@ -259,10 +259,10 @@ func countWebSearchToolUses(toolUses []KiroToolUse) int {
 }
 
 // searchAllWebUses runs MCP for each tool_use in order (all are web_search).
-func (h *Handler) searchAllWebUses(model string, toolUses []KiroToolUse) ([]*WebSearchResults, error) {
+func (h *Handler) searchAllWebUses(model string, toolUses []KiroToolUse, apiKeyID string) ([]*WebSearchResults, error) {
 	out := make([]*WebSearchResults, 0, len(toolUses))
 	for _, tu := range toolUses {
-		results, _, _, err := h.performWebSearch(model, toolUseQuery(tu.Input))
+		results, _, _, err := h.performWebSearch(model, toolUseQuery(tu.Input), apiKeyID)
 		if err != nil {
 			return nil, err
 		}

@@ -118,7 +118,7 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		return acc
 	}
 
-		// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
+	// 无可用账号，返回冷却时间最短的（排除额度用尽的，除非允许超额）
 	var best *config.Account
 	var earliest time.Time
 	for i := range p.accounts {
@@ -187,6 +187,12 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 
 // GetNextForModelExcluding 获取下一个支持指定模型的可用账号，并跳过指定账号。
 func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string]bool) *config.Account {
+	return p.GetNextForModelForAPIKeyExcluding("", model, excluded)
+}
+
+// GetNextForModelForAPIKeyExcluding 获取下一个绑定到指定 API key、支持模型的可用账号，并跳过指定账号。
+// apiKeyID 为空时保留旧行为，允许从全局账号池选择。
+func (p *AccountPool) GetNextForModelForAPIKeyExcluding(apiKeyID, model string, excluded map[string]bool) *config.Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -203,6 +209,10 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
 		acc := &p.accounts[idx]
 
+		if apiKeyID != "" && acc.ApiKeyID != apiKeyID {
+			seen[acc.ID] = true
+			continue
+		}
 		if excluded != nil && excluded[acc.ID] {
 			seen[acc.ID] = true
 			continue
@@ -234,6 +244,9 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 	var earliest time.Time
 	for i := range p.accounts {
 		acc := &p.accounts[i]
+		if apiKeyID != "" && acc.ApiKeyID != apiKeyID {
+			continue
+		}
 		if excluded != nil && excluded[acc.ID] {
 			continue
 		}

@@ -209,6 +209,39 @@ func TestGetNextForModelExcludingReturnsNilOnEmptyPool(t *testing.T) {
 	}
 }
 
+func TestGetNextForModelForAPIKeyFiltersAccounts(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "key-a", ApiKeyID: "key-a"},
+		config.Account{ID: "key-b", ApiKeyID: "key-b"},
+	)
+
+	acc := p.GetNextForModelForAPIKeyExcluding("key-a", "model", nil)
+	if acc == nil || acc.ID != "key-a" {
+		t.Fatalf("expected account bound to key-a, got %#v", acc)
+	}
+}
+
+func TestGetNextForModelForAPIKeyExcludingHonorsRetryExclusions(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "key-a-1", ApiKeyID: "key-a"},
+		config.Account{ID: "key-a-2", ApiKeyID: "key-a"},
+		config.Account{ID: "key-b", ApiKeyID: "key-b"},
+	)
+
+	acc := p.GetNextForModelForAPIKeyExcluding("key-a", "model", map[string]bool{"key-a-1": true})
+	if acc == nil || acc.ID != "key-a-2" {
+		t.Fatalf("expected second account bound to key-a after exclusion, got %#v", acc)
+	}
+}
+
+func TestGetNextForModelForAPIKeyExcludingReturnsNilWithoutBinding(t *testing.T) {
+	p := newTestPool(config.Account{ID: "legacy", ApiKeyID: ""})
+
+	if acc := p.GetNextForModelForAPIKeyExcluding("key-a", "model", nil); acc != nil {
+		t.Fatalf("expected nil when no account is bound to key-a, got %#v", acc)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DisableAccount
 // ---------------------------------------------------------------------------
