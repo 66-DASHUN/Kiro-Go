@@ -24,3 +24,4 @@ backup*/
 PR-*.md
 .worktrees/
 .gocache*/
+.qa-*/
