@@ -2149,9 +2149,9 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 				"finish_reason": finishReason,
 			}},
 			"usage": map[string]interface{}{
-				"prompt_tokens":         inputTokens,
+				"prompt_tokens":         billedClaudeInputTokens(inputTokens, cacheUsage),
 				"completion_tokens":     outputTokens,
-				"total_tokens":          inputTokens + outputTokens,
+				"total_tokens":          billedClaudeInputTokens(inputTokens, cacheUsage) + outputTokens,
 				"prompt_tokens_details": map[string]int{"cached_tokens": cacheUsage.CacheReadInputTokens},
 			},
 		}
