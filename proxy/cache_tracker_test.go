@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"kiro-go/config"
 	"strings"
 	"testing"
 	"time"
@@ -260,5 +261,156 @@ func TestPromptCacheImplicitBreakpointAtMessageEnd(t *testing.T) {
 	result := tracker.Compute("acct-1", profile2)
 	if result.CacheReadInputTokens == 0 {
 		t.Fatalf("expected cache read via implicit message-end breakpoint, got %+v", result)
+	}
+}
+
+func TestPromptCacheTrackerAddsDefaultBreakpointWithoutCacheControl(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model:    "claude-sonnet-4.5",
+		System:   strings.Repeat("system prompt ", 500),
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+	profile := tracker.BuildClaudeProfile(req, 2000)
+	if profile == nil {
+		t.Fatal("expected default cache breakpoint")
+	}
+	tracker.Update("acct-default", profile)
+	usage := tracker.ComputeWithSettings("acct-default", profile, config.PromptCacheSettings{
+		Enabled: true, Mode: config.PromptCacheModeUniform, Ratio: 1, CreationRatio: 1, ReadRatio: 1,
+	})
+	if usage.CacheReadInputTokens != profile.TotalInputTokens {
+		t.Fatalf("read=%d, want full prefix %d", usage.CacheReadInputTokens, profile.TotalInputTokens)
+	}
+}
+
+func TestPromptCacheTrackerDoesNotAddDefaultBreakpointWithoutMessageBlock(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model:  "claude-sonnet-4.5",
+		System: strings.Repeat("system prompt ", 500),
+	}
+	if profile := tracker.BuildClaudeProfile(req, 2000); profile != nil {
+		t.Fatalf("expected no profile without a message block, got %+v", profile)
+	}
+}
+
+func TestPromptCacheTrackerNormalizesLastBreakpointToTotalInput(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model:    "claude-sonnet-4.5",
+		System:   strings.Repeat("system prompt ", 100),
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+	profile := tracker.BuildClaudeProfile(req, 3000)
+	if profile == nil || len(profile.Breakpoints) == 0 {
+		t.Fatal("expected profile with breakpoint")
+	}
+	last := profile.Breakpoints[len(profile.Breakpoints)-1]
+	if last.CumulativeTokens != profile.TotalInputTokens {
+		t.Fatalf("last breakpoint=%d, total=%d", last.CumulativeTokens, profile.TotalInputTokens)
+	}
+}
+
+func TestPromptCacheTrackerNormalizesExplicitBreakpointToTotalInput(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		System: []interface{}{
+			map[string]interface{}{
+				"type":          "text",
+				"text":          strings.Repeat("cached system ", 200),
+				"cache_control": map[string]interface{}{"type": "ephemeral"},
+			},
+		},
+		Messages: []ClaudeMessage{{Role: "user", Content: strings.Repeat("uncached tail ", 100)}},
+	}
+	profile := tracker.BuildClaudeProfile(req, 5000)
+	if profile == nil || len(profile.Breakpoints) == 0 {
+		t.Fatal("expected profile with breakpoint")
+	}
+	last := profile.Breakpoints[len(profile.Breakpoints)-1]
+	if last.CumulativeTokens != profile.TotalInputTokens {
+		t.Fatalf("last breakpoint=%d, total=%d", last.CumulativeTokens, profile.TotalInputTokens)
+	}
+}
+
+func TestPromptCacheTrackerLimitsLookbackToTenBreakpoints(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	var old [32]byte
+	old[0] = 1
+	first := &promptCacheProfile{Model: "claude-sonnet-4.5", TotalInputTokens: 12000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: old, CumulativeTokens: 2000, TTL: time.Hour}}}
+	tracker.Update("acct-lookback", first)
+
+	breakpoints := make([]promptCacheBreakpoint, 11)
+	breakpoints[0] = first.Breakpoints[0]
+	for i := 1; i < len(breakpoints); i++ {
+		var fingerprint [32]byte
+		fingerprint[0] = byte(i + 10)
+		breakpoints[i] = promptCacheBreakpoint{Fingerprint: fingerprint, CumulativeTokens: 2000 + i*1000, TTL: time.Hour}
+	}
+	profile := &promptCacheProfile{Model: "claude-sonnet-4.5", TotalInputTokens: 12000, Breakpoints: breakpoints}
+	usage := tracker.ComputeWithSettings("acct-lookback", profile, config.PromptCacheSettings{
+		Enabled: true, Mode: config.PromptCacheModeUniform, Ratio: 1, CreationRatio: 1, ReadRatio: 1,
+	})
+	if usage.CacheReadInputTokens != 0 {
+		t.Fatalf("read=%d, want no match outside ten-breakpoint lookback", usage.CacheReadInputTokens)
+	}
+}
+
+func TestPromptCacheTrackerScalesCacheUsageByRatio(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model:    "claude-sonnet-4.5",
+		System:   strings.Repeat("system prompt ", 500),
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+	profile := tracker.BuildClaudeProfile(req, 2000)
+	if profile == nil {
+		t.Fatal("expected profile")
+	}
+	tracker.Update("acct-ratio", profile)
+	usage := tracker.ComputeWithSettings("acct-ratio", profile, config.PromptCacheSettings{
+		Enabled: true, Mode: config.PromptCacheModeUniform, Ratio: 0.5, CreationRatio: 1, ReadRatio: 1,
+	})
+	if usage.CacheReadInputTokens != profile.TotalInputTokens/2 {
+		t.Fatalf("read=%d, want %d", usage.CacheReadInputTokens, profile.TotalInputTokens/2)
+	}
+	if usage.CacheCreationInputTokens != 0 {
+		t.Fatalf("creation=%d, want 0", usage.CacheCreationInputTokens)
+	}
+}
+
+func TestPromptCacheTrackerSupportsIndependentRatiosAndDisable(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model:    "claude-sonnet-4.5",
+		System:   strings.Repeat("system prompt ", 500),
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+	profile := tracker.BuildClaudeProfile(req, 2000)
+	if profile == nil {
+		t.Fatal("expected profile")
+	}
+
+	disabled := tracker.ComputeWithSettings("acct-independent", profile, config.PromptCacheSettings{
+		Enabled: false, Mode: config.PromptCacheModeIndependent, CreationRatio: 0.25, ReadRatio: 0.75,
+	})
+	if disabled != (promptCacheUsage{}) {
+		t.Fatalf("disabled policy should report no cache usage, got %+v", disabled)
+	}
+
+	first := tracker.ComputeWithSettings("acct-independent", profile, config.PromptCacheSettings{
+		Enabled: true, Mode: config.PromptCacheModeIndependent, CreationRatio: 0.25, ReadRatio: 0.75,
+	})
+	if first.CacheCreationInputTokens != profile.TotalInputTokens/4 {
+		t.Fatalf("creation=%d, want %d", first.CacheCreationInputTokens, profile.TotalInputTokens/4)
+	}
+	tracker.Update("acct-independent", profile)
+	second := tracker.ComputeWithSettings("acct-independent", profile, config.PromptCacheSettings{
+		Enabled: true, Mode: config.PromptCacheModeIndependent, CreationRatio: 0.25, ReadRatio: 0.75,
+	})
+	if second.CacheReadInputTokens != profile.TotalInputTokens*3/4 {
+		t.Fatalf("read=%d, want %d", second.CacheReadInputTokens, profile.TotalInputTokens*3/4)
 	}
 }

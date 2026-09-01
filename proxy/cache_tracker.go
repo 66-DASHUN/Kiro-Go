@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"kiro-go/config"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +21,7 @@ const defaultPromptCacheTTL = 5 * time.Minute
 // short requests.
 const defaultMinCacheableTokens = 1024
 const opusMinCacheableTokens = 4096
+const maxPromptCacheLookback = 10
 
 type promptCacheUsage struct {
 	CacheCreationInputTokens   int
@@ -78,6 +81,7 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	breakpoints := make([]promptCacheBreakpoint, 0)
 	cumulativeTokens := 0
 	var activeTTL time.Duration
+	hasExplicitBreakpoint := false
 
 	for _, block := range blocks {
 		canonical := canonicalizeCacheValue(block.Value)
@@ -93,6 +97,7 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 		if block.TTL > 0 {
 			breakpointTTL = block.TTL
 			activeTTL = block.TTL
+			hasExplicitBreakpoint = true
 		} else if block.IsMessageEnd && activeTTL > 0 {
 			breakpointTTL = activeTTL
 		}
@@ -111,11 +116,42 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	}
 
 	if len(breakpoints) == 0 {
-		return nil
+		// Sub2API emulation adds a default 5-minute breakpoint at the final
+		// message/block when the request has no explicit cache_control.
+		if len(blocks) == 0 || !blocks[len(blocks)-1].IsMessageEnd {
+			return nil
+		}
+		var fingerprint [32]byte
+		copy(fingerprint[:], hasher.Sum(nil))
+		breakpoints = append(breakpoints, promptCacheBreakpoint{
+			Fingerprint:      fingerprint,
+			CumulativeTokens: cumulativeTokens,
+			TTL:              defaultPromptCacheTTL,
+		})
 	}
 
+	if totalInputTokens <= 0 {
+		totalInputTokens = cumulativeTokens
+	}
 	if totalInputTokens < cumulativeTokens {
 		totalInputTokens = cumulativeTokens
+	}
+	// Normalize estimated cumulative tokens into the caller's total-input
+	// token space so cache usage is reported against upstream billing totals.
+	if len(breakpoints) > 0 {
+		normalizationBase := breakpoints[len(breakpoints)-1].CumulativeTokens
+		if normalizationBase > 0 && totalInputTokens != normalizationBase {
+			for i := range breakpoints {
+				n := int(math.Round(float64(breakpoints[i].CumulativeTokens) * float64(totalInputTokens) / float64(normalizationBase)))
+				if i > 0 && n < breakpoints[i-1].CumulativeTokens {
+					n = breakpoints[i-1].CumulativeTokens
+				}
+				breakpoints[i].CumulativeTokens = n
+			}
+		}
+	}
+	if !hasExplicitBreakpoint && len(breakpoints) > 0 {
+		breakpoints[len(breakpoints)-1].CumulativeTokens = totalInputTokens
 	}
 
 	return &promptCacheProfile{
@@ -125,9 +161,35 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	}
 }
 
+// Compute calculates usage using the default full-ratio policy.
 func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfile) promptCacheUsage {
+	policy := config.PromptCacheSettings{Enabled: true, Mode: config.PromptCacheModeUniform, Ratio: 1, CreationRatio: 1, ReadRatio: 1}
+	return t.compute(accountID, profile, policy)
+}
+
+func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *promptCacheProfile, settings config.PromptCacheSettings) promptCacheUsage {
+	return t.compute(accountID, profile, settings)
+}
+
+func (t *promptCacheTracker) compute(accountID string, profile *promptCacheProfile, settings config.PromptCacheSettings) promptCacheUsage {
 	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
 		return promptCacheUsage{}
+	}
+	if !settings.Enabled {
+		return promptCacheUsage{}
+	}
+	if settings.Mode == "" {
+		settings.Mode = config.PromptCacheModeUniform
+	}
+	if settings.Mode == config.PromptCacheModeUniform {
+		settings.CreationRatio = settings.Ratio
+		settings.ReadRatio = settings.Ratio
+	}
+	if settings.CreationRatio < 0 || settings.CreationRatio > 1 {
+		settings.CreationRatio = 1
+	}
+	if settings.ReadRatio < 0 || settings.ReadRatio > 1 {
+		settings.ReadRatio = 1
 	}
 
 	minTokens := minCacheableTokensForModel(profile.Model)
@@ -146,25 +208,22 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 		if effectiveCreation < minTokens {
 			effectiveCreation = 0
 		}
+		creation := int(float64(effectiveCreation) * settings.CreationRatio)
 		cache5m, cache1h := computePromptCacheTTLBreakdown(profile, 0)
+		cache5m = int(float64(cache5m) * settings.CreationRatio)
+		cache1h = int(float64(cache1h) * settings.CreationRatio)
 		return promptCacheUsage{
-			CacheCreationInputTokens:   effectiveCreation,
+			CacheCreationInputTokens:   creation,
 			CacheReadInputTokens:       0,
 			CacheCreation5mInputTokens: cache5m,
 			CacheCreation1hInputTokens: cache1h,
 		}
 	}
 
-	// Cap cacheable tokens at 85% of total input to ensure a realistic
-	// uncached portion. The newest content in a request is never fully
-	// served from cache on the current turn.
-	maxCacheable := int(float64(profile.TotalInputTokens) * 0.85)
-	if lastTokens > maxCacheable {
-		lastTokens = maxCacheable
-	}
-
 	matchedTokens := 0
-	for i := len(profile.Breakpoints) - 1; i >= 0; i-- {
+	lookback := 0
+	for i := len(profile.Breakpoints) - 1; i >= 0 && lookback < maxPromptCacheLookback; i-- {
+		lookback++
 		breakpoint := profile.Breakpoints[i]
 		// Skip breakpoints below the minimum cacheable token threshold.
 		if breakpoint.CumulativeTokens < minTokens {
@@ -183,8 +242,12 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 		break
 	}
 
-	creation := maxInt(lastTokens-matchedTokens, 0)
-	cache5m, cache1h := computePromptCacheTTLBreakdown(profile, matchedTokens)
+	rawMatched := matchedTokens
+	matchedTokens = int(float64(rawMatched) * settings.ReadRatio)
+	creation := int(float64(maxInt(lastTokens-rawMatched, 0)) * settings.CreationRatio)
+	cache5m, cache1h := computePromptCacheTTLBreakdown(profile, rawMatched)
+	cache5m = int(float64(cache5m) * settings.CreationRatio)
+	cache1h = int(float64(cache1h) * settings.CreationRatio)
 	return promptCacheUsage{
 		CacheCreationInputTokens:   creation,
 		CacheReadInputTokens:       matchedTokens,
