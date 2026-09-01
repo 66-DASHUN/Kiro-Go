@@ -504,3 +504,17 @@ func TestClearPromptCacheOverridesSaveFailureRollsBackInMemoryEntry(t *testing.T
 		t.Fatalf("entry changed after failed clear: %+v", got)
 	}
 }
+
+func TestUpdatePromptCacheSettingsSaveFailureRollsBackConfig(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	original := EffectivePromptCacheSettings("")
+	cfgPath = filepath.Join(t.TempDir(), "missing", "config.json")
+	if err := UpdatePromptCacheSettings(false, "independent", 0.2, 0.3, 0.4); err == nil {
+		t.Fatal("expected update save failure")
+	}
+	if got := EffectivePromptCacheSettings(""); got != original {
+		t.Fatalf("global settings changed after failed update: got=%+v want=%+v", got, original)
+	}
+}

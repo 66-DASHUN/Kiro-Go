@@ -515,12 +515,17 @@ func UpdatePromptCacheSettings(enabled bool, mode string, ratio, creationRatio, 
 	if cfg == nil {
 		return errors.New("config not initialized")
 	}
+	original := *cfg
 	cfg.PromptCacheEmulationEnabled = enabled
 	cfg.PromptCacheEmulationMode = mode
 	cfg.PromptCacheEmulationRatio = ratio
 	cfg.PromptCacheCreationEmulationRatio = creationRatio
 	cfg.PromptCacheReadEmulationRatio = readRatio
-	return saveLocked()
+	if err := saveLocked(); err != nil {
+		*cfg = original
+		return err
+	}
+	return nil
 }
 
 // saveLocked persists cfg to disk. Caller MUST already hold cfgLock.
