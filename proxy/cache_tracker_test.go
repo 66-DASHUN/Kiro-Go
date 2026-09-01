@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"kiro-go/config"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -284,14 +285,40 @@ func TestPromptCacheTrackerAddsDefaultBreakpointWithoutCacheControl(t *testing.T
 	}
 }
 
-func TestPromptCacheTrackerDoesNotAddDefaultBreakpointWithoutMessageBlock(t *testing.T) {
+func TestPromptCacheTrackerAddsDefaultBreakpointForSystemOnlyRequest(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	req := &ClaudeRequest{
 		Model:  "claude-sonnet-4.5",
 		System: strings.Repeat("system prompt ", 500),
 	}
-	if profile := tracker.BuildClaudeProfile(req, 2000); profile != nil {
-		t.Fatalf("expected no profile without a message block, got %+v", profile)
+	profile := tracker.BuildClaudeProfile(req, 2000)
+	if profile == nil {
+		t.Fatal("expected default cache breakpoint for system-only request")
+	}
+	tracker.Update("acct-system-only", profile)
+	usage := tracker.Compute("acct-system-only", profile)
+	if usage.CacheReadInputTokens != profile.TotalInputTokens {
+		t.Fatalf("read=%d, want full prefix %d", usage.CacheReadInputTokens, profile.TotalInputTokens)
+	}
+}
+
+func TestPromptCacheTrackerAddsDefaultBreakpointForToolsOnlyRequest(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Tools: []ClaudeTool{{
+			Name:        "lookup",
+			Description: strings.Repeat("tool description ", 500),
+		}},
+	}
+	profile := tracker.BuildClaudeProfile(req, 2000)
+	if profile == nil {
+		t.Fatal("expected default cache breakpoint for tools-only request")
+	}
+	tracker.Update("acct-tools-only", profile)
+	usage := tracker.Compute("acct-tools-only", profile)
+	if usage.CacheReadInputTokens != profile.TotalInputTokens {
+		t.Fatalf("read=%d, want full prefix %d", usage.CacheReadInputTokens, profile.TotalInputTokens)
 	}
 }
 
@@ -412,5 +439,25 @@ func TestPromptCacheTrackerSupportsIndependentRatiosAndDisable(t *testing.T) {
 	})
 	if second.CacheReadInputTokens != profile.TotalInputTokens*3/4 {
 		t.Fatalf("read=%d, want %d", second.CacheReadInputTokens, profile.TotalInputTokens*3/4)
+	}
+}
+
+func TestPromptCacheTrackerDefensivelyNormalizesInvalidSettings(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model:    "claude-sonnet-4.5",
+		System:   strings.Repeat("system prompt ", 500),
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+	profile := tracker.BuildClaudeProfile(req, 2000)
+	if profile == nil {
+		t.Fatal("expected profile")
+	}
+	tracker.Update("acct-invalid-settings", profile)
+	usage := tracker.ComputeWithSettings("acct-invalid-settings", profile, config.PromptCacheSettings{
+		Enabled: true, Mode: "unsupported", Ratio: math.NaN(), CreationRatio: 1, ReadRatio: 1,
+	})
+	if usage.CacheReadInputTokens != 0 {
+		t.Fatalf("invalid uniform ratio should produce zero reads, got %+v", usage)
 	}
 }

@@ -118,7 +118,7 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	if len(breakpoints) == 0 {
 		// Sub2API emulation adds a default 5-minute breakpoint at the final
 		// message/block when the request has no explicit cache_control.
-		if len(blocks) == 0 || !blocks[len(blocks)-1].IsMessageEnd {
+		if len(blocks) == 0 {
 			return nil
 		}
 		var fingerprint [32]byte
@@ -181,9 +181,18 @@ func (t *promptCacheTracker) compute(accountID string, profile *promptCacheProfi
 	if settings.Mode == "" {
 		settings.Mode = config.PromptCacheModeUniform
 	}
+	if settings.Mode != config.PromptCacheModeUniform && settings.Mode != config.PromptCacheModeIndependent {
+		settings.Mode = config.PromptCacheModeUniform
+	}
 	if settings.Mode == config.PromptCacheModeUniform {
 		settings.CreationRatio = settings.Ratio
 		settings.ReadRatio = settings.Ratio
+	}
+	if math.IsNaN(settings.CreationRatio) || math.IsInf(settings.CreationRatio, 0) {
+		settings.CreationRatio = 0
+	}
+	if math.IsNaN(settings.ReadRatio) || math.IsInf(settings.ReadRatio, 0) {
+		settings.ReadRatio = 0
 	}
 	if settings.CreationRatio < 0 || settings.CreationRatio > 1 {
 		settings.CreationRatio = 1
