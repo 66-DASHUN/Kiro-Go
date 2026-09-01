@@ -114,6 +114,58 @@ func TestAdminAccountCreateAndUpdateRoundTripApiKeyID(t *testing.T) {
 	}
 }
 
+func TestAdminAccountApiKeyIDIsTrimmedOnCreateAndUpdate(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+	createBody := `{"id":"trimmed","apiKeyId":"  ` + key.ID + `  ","enabled":true,"accessToken":"token-trimmed"}`
+	createRec := httptest.NewRecorder()
+	h.apiAddAccount(createRec, httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(createBody)))
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", createRec.Code, createRec.Body.String())
+	}
+	accounts := config.GetAccounts()
+	if len(accounts) != 1 || accounts[0].ApiKeyID != key.ID {
+		t.Fatalf("create did not normalize apiKeyId: %+v", accounts)
+	}
+	updateRec := httptest.NewRecorder()
+	h.apiUpdateAccount(updateRec, httptest.NewRequest(http.MethodPut, "/admin/api/accounts/trimmed", strings.NewReader(`{"apiKeyId":"  `+key.ID+`  "}`)), "trimmed")
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", updateRec.Code, updateRec.Body.String())
+	}
+	if got := config.GetAccounts()[0].ApiKeyID; got != key.ID {
+		t.Fatalf("update did not normalize apiKeyId: %q", got)
+	}
+}
+
+func TestAdminUpdateAccountPreservesBindingWhenApiKeyIDOmitted(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "preserve-binding", ApiKeyID: key.ID, Enabled: true, AccessToken: "token-preserve"}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	h := &Handler{pool: accountpool.GetPool()}
+	rec := httptest.NewRecorder()
+	h.apiUpdateAccount(rec, httptest.NewRequest(http.MethodPut, "/admin/api/accounts/preserve-binding", strings.NewReader(`{"nickname":"updated"}`)), "preserve-binding")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got := config.GetAccounts()
+	if len(got) != 1 || got[0].ApiKeyID != key.ID || got[0].Nickname != "updated" {
+		t.Fatalf("binding was lost during unrelated update: %+v", got)
+	}
+}
+
 func TestAdminUpdateAccountRejectsInvalidApiKeyIDWithoutChangingAccount(t *testing.T) {
 	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
 		t.Fatalf("config.Init: %v", err)

@@ -2618,6 +2618,7 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
 	}
+	account.ApiKeyID = strings.TrimSpace(account.ApiKeyID)
 	if account.ApiKeyID != "" && !config.IsApiKeyIDValid(account.ApiKeyID) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "apiKeyId must reference an enabled API key"})
@@ -2691,6 +2692,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 			}
 			apiKeyID = ""
 		}
+		apiKeyID = strings.TrimSpace(apiKeyID)
 		if apiKeyID != "" && !config.IsApiKeyIDValid(apiKeyID) {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "apiKeyId must reference an enabled API key"})
@@ -2715,6 +2717,16 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["proxyURL"].(string); ok {
 		existing.ProxyURL = v
+	}
+	if _, specified := updates["apiKeyId"]; !specified {
+		// Re-read the binding immediately before persistence so an unrelated
+		// update cannot write back a stale account snapshot over a newer bind.
+		for _, current := range config.GetAccounts() {
+			if current.ID == id {
+				existing.ApiKeyID = current.ApiKeyID
+				break
+			}
+		}
 	}
 
 	if err := config.UpdateAccount(id, *existing); err != nil {
