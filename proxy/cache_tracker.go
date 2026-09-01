@@ -195,10 +195,18 @@ func (t *promptCacheTracker) compute(accountID string, profile *promptCacheProfi
 		settings.ReadRatio = 0
 	}
 	if settings.CreationRatio < 0 || settings.CreationRatio > 1 {
-		settings.CreationRatio = 1
+		if settings.CreationRatio < 0 {
+			settings.CreationRatio = 0
+		} else {
+			settings.CreationRatio = 1
+		}
 	}
 	if settings.ReadRatio < 0 || settings.ReadRatio > 1 {
-		settings.ReadRatio = 1
+		if settings.ReadRatio < 0 {
+			settings.ReadRatio = 0
+		} else {
+			settings.ReadRatio = 1
+		}
 	}
 
 	minTokens := minCacheableTokensForModel(profile.Model)

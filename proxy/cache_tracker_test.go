@@ -461,3 +461,29 @@ func TestPromptCacheTrackerDefensivelyNormalizesInvalidSettings(t *testing.T) {
 		t.Fatalf("invalid uniform ratio should produce zero reads, got %+v", usage)
 	}
 }
+
+func TestPromptCacheTrackerClampsRatiosToUnitInterval(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	req := &ClaudeRequest{
+		Model:    "claude-sonnet-4.5",
+		System:   strings.Repeat("system prompt ", 500),
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+	profile := tracker.BuildClaudeProfile(req, 2000)
+	if profile == nil {
+		t.Fatal("expected profile")
+	}
+	tracker.Update("acct-clamp", profile)
+	negative := tracker.ComputeWithSettings("acct-clamp", profile, config.PromptCacheSettings{
+		Enabled: true, Mode: config.PromptCacheModeIndependent, CreationRatio: -0.2, ReadRatio: -0.2,
+	})
+	if negative.CacheReadInputTokens != 0 || negative.CacheCreationInputTokens != 0 {
+		t.Fatalf("negative ratios should clamp to zero, got %+v", negative)
+	}
+	over := tracker.ComputeWithSettings("acct-clamp", profile, config.PromptCacheSettings{
+		Enabled: true, Mode: config.PromptCacheModeIndependent, CreationRatio: 1.2, ReadRatio: 1.2,
+	})
+	if over.CacheReadInputTokens != profile.TotalInputTokens {
+		t.Fatalf("ratios above one should clamp to one, got %+v", over)
+	}
+}
