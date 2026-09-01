@@ -153,9 +153,20 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	if err := validateApiKeyPromptCacheOverrides(candidate); err != nil {
 		return err
 	}
+	previousMarker := cfg.ApiKeyAccountMigrationCompleted
+	var previousAccounts []Account
+	migrationAttempted := false
 	cfg.ApiKeys[idx] = candidate
+	if !previousMarker && candidate.Enabled && strings.TrimSpace(candidate.ID) != "" && strings.TrimSpace(candidate.Key) != "" {
+		previousAccounts = append([]Account(nil), cfg.Accounts...)
+		migrationAttempted = migrateUnboundAccountsLocked()
+	}
 	if err := saveLocked(); err != nil {
 		cfg.ApiKeys[idx] = original
+		if migrationAttempted {
+			cfg.Accounts = previousAccounts
+			cfg.ApiKeyAccountMigrationCompleted = previousMarker
+		}
 		return err
 	}
 	return nil

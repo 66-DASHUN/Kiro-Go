@@ -519,3 +519,36 @@ func TestDeleteApiKeyRejectsBoundAccounts(t *testing.T) {
 		t.Fatalf("account binding changed after rejected delete: %q", got)
 	}
 }
+
+func TestEnablingFirstUsableApiKeyMigratesLegacyAccounts(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := AddAccount(Account{ID: "legacy-before-key", Enabled: true}); err != nil {
+		t.Fatalf("add legacy account: %v", err)
+	}
+	key, err := AddApiKey(ApiKeyEntry{ID: "disabled-key", Key: "sk-disabled", Enabled: false})
+	if err != nil {
+		t.Fatalf("add disabled key: %v", err)
+	}
+	if cfg.ApiKeyAccountMigrationCompleted {
+		t.Fatal("migration marker should remain false while no usable key exists")
+	}
+	if err := UpdateApiKey(key.ID, ApiKeyEntry{Enabled: true}); err != nil {
+		t.Fatalf("enable key: %v", err)
+	}
+	accounts := GetAccounts()
+	if len(accounts) != 1 || accounts[0].ApiKeyID != key.ID {
+		t.Fatalf("legacy account was not migrated after enabling key: %+v", accounts)
+	}
+	if !cfg.ApiKeyAccountMigrationCompleted {
+		t.Fatal("migration marker should be set after enabling first usable key")
+	}
+	if err := Load(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := GetAccounts()[0].ApiKeyID; got != key.ID {
+		t.Fatalf("reloaded binding=%q, want %q", got, key.ID)
+	}
+}
