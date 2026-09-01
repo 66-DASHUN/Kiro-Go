@@ -336,8 +336,8 @@ func TestPromptCacheSettingsUseAPIKeyOverrideAndInheritMissingFields(t *testing.
 	if settings.Ratio != 0.7 {
 		t.Fatalf("ratio=%v, want 0.7", settings.Ratio)
 	}
-	if settings.CreationRatio != 0.7 || settings.ReadRatio != 0.7 {
-		t.Fatalf("settings=%+v, want common key ratio for independent fields", settings)
+	if settings.CreationRatio != 0.6 || settings.ReadRatio != 0.4 {
+		t.Fatalf("settings=%+v, want independent fields to inherit global ratios", settings)
 	}
 
 	missing := EffectivePromptCacheSettings("unknown")

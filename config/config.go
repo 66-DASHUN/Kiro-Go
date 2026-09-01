@@ -479,8 +479,6 @@ func EffectivePromptCacheSettings(apiKeyID string) PromptCacheSettings {
 		}
 		if entry.PromptCacheEmulationRatio != nil {
 			settings.Ratio = *entry.PromptCacheEmulationRatio
-			settings.CreationRatio = *entry.PromptCacheEmulationRatio
-			settings.ReadRatio = *entry.PromptCacheEmulationRatio
 		}
 		if entry.PromptCacheCreationEmulationRatio != nil {
 			settings.CreationRatio = *entry.PromptCacheCreationEmulationRatio
