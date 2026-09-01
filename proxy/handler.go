@@ -44,6 +44,17 @@ func looksLikeKiroAPIKey(value string) bool {
 	return strings.HasPrefix(value, "ksk_")
 }
 
+// normalizeRequestApiKeyID validates an optional account ownership binding
+// supplied by an authentication endpoint. Empty means that the account stays
+// unbound; a non-empty ID must point to an enabled API key with a usable value.
+func normalizeRequestApiKeyID(raw string) (string, error) {
+	id := strings.TrimSpace(raw)
+	if id != "" && !config.IsApiKeyIDValid(id) {
+		return "", config.ErrInvalidAccountApiKey
+	}
+	return id, nil
+}
+
 // RequestLog stores details about a single API request (success or failure).
 type RequestLog struct {
 	Time      int64   `json:"time"`      // Unix timestamp
@@ -2941,6 +2952,7 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		StartUrl string `json:"startUrl"`
 		Region   string `json:"region"`
+		ApiKeyID string `json:"apiKeyId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -2951,6 +2963,12 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 	if req.StartUrl == "" {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "startUrl is required"})
+		return
+	}
+	apiKeyID, err := normalizeRequestApiKeyID(req.ApiKeyID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -2965,6 +2983,7 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 		"sessionId":    sessionID,
 		"authorizeUrl": authorizeUrl,
 		"expiresIn":    expiresIn,
+		"apiKeyId":     apiKeyID,
 	})
 }
 
@@ -2972,10 +2991,17 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID   string `json:"sessionId"`
 		CallbackUrl string `json:"callbackUrl"`
+		ApiKeyID    string `json:"apiKeyId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	apiKeyID, err := normalizeRequestApiKeyID(req.ApiKeyID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -2997,6 +3023,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		RefreshToken: refreshToken,
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
+		ApiKeyID:     apiKeyID,
 		AuthMethod:   "idc",
 		Region:       region,
 		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
@@ -3005,8 +3032,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := config.AddAccount(account); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		h.writeAddAccountError(w, err)
 		return
 	}
 
@@ -3014,8 +3040,9 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"apiKeyId": account.ApiKeyID,
 		},
 	})
 }
@@ -3561,6 +3588,8 @@ func (h *Handler) writeAddAccountError(w http.ResponseWriter, err error, rotated
 		errors.Is(err, config.ErrDuplicateRefreshToken) ||
 		errors.Is(err, config.ErrDuplicateAPIKey) {
 		w.WriteHeader(http.StatusConflict)
+	} else if errors.Is(err, config.ErrInvalidAccountApiKey) {
+		w.WriteHeader(http.StatusBadRequest)
 	} else {
 		w.WriteHeader(http.StatusInternalServerError)
 	}
@@ -3579,9 +3608,20 @@ func (h *Handler) writeAddAccountError(w http.ResponseWriter, err error, rotated
 
 func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Region string `json:"region"`
+		Region   string `json:"region"`
+		ApiKeyID string `json:"apiKeyId"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	apiKeyID, err := normalizeRequestApiKeyID(req.ApiKeyID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
 
 	session, err := auth.StartBuilderIdLogin(req.Region)
 	if err != nil {
@@ -3595,16 +3635,24 @@ func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request)
 		"userCode":        session.UserCode,
 		"verificationUri": session.VerificationUri,
 		"interval":        session.Interval,
+		"apiKeyId":        apiKeyID,
 	})
 }
 
 func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID string `json:"sessionId"`
+		ApiKeyID  string `json:"apiKeyId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	apiKeyID, err := normalizeRequestApiKeyID(req.ApiKeyID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -3644,6 +3692,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		RefreshToken: refreshToken,
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
+		ApiKeyID:     apiKeyID,
 		AuthMethod:   "idc",
 		Provider:     "BuilderId",
 		Region:       region,
@@ -3653,8 +3702,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := config.AddAccount(account); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		h.writeAddAccountError(w, err)
 		return
 	}
 
@@ -3663,8 +3711,9 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		"success":   true,
 		"completed": true,
 		"account": map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"apiKeyId": account.ApiKeyID,
 		},
 	})
 }
@@ -3673,6 +3722,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BearerToken string `json:"bearerToken"`
 		Region      string `json:"region"`
+		ApiKeyID    string `json:"apiKeyId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3683,6 +3733,12 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 	if req.BearerToken == "" {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "bearerToken is required"})
+		return
+	}
+	apiKeyID, err := normalizeRequestApiKeyID(req.ApiKeyID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -3714,6 +3770,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 			RefreshToken: refreshToken,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
+			ApiKeyID:     apiKeyID,
 			AuthMethod:   "idc",
 			Region:       req.Region,
 			ExpiresAt:    time.Now().Unix() + int64(expiresIn),
@@ -3727,8 +3784,9 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		imported = append(imported, map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"apiKeyId": account.ApiKeyID,
 		})
 	}
 
@@ -3768,11 +3826,18 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		TokenEndpoint string `json:"tokenEndpoint"`
 		IssuerURL     string `json:"issuerUrl"`
 		Scopes        string `json:"scopes"`
+		ApiKeyID      string `json:"apiKeyId"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	apiKeyID, err := normalizeRequestApiKeyID(req.ApiKeyID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -3824,6 +3889,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			UserId:     strings.TrimSpace(req.UserID),
 			Nickname:   strings.TrimSpace(req.Nickname),
 			KiroApiKey: req.KiroApiKey,
+			ApiKeyID:   apiKeyID,
 			AuthMethod: "api_key",
 			Provider:   strings.TrimSpace(req.Provider),
 			Region:     strings.TrimSpace(req.Region),
@@ -3853,8 +3919,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"account": map[string]interface{}{
-				"id":    account.ID,
-				"email": account.Email,
+				"id":       account.ID,
+				"email":    account.Email,
+				"apiKeyId": account.ApiKeyID,
 			},
 		})
 		return
@@ -4055,6 +4122,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		Email:                   email,
 		UserId:                  userID,
 		Nickname:                strings.TrimSpace(req.Nickname),
+		ApiKeyID:                apiKeyID,
 		AccessToken:             accessToken,
 		RefreshToken:            req.RefreshToken,
 		RefreshTokenFingerprint: config.RefreshTokenFingerprint(originalRefreshToken),
@@ -4081,8 +4149,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"apiKeyId": account.ApiKeyID,
 		},
 	})
 }
@@ -4468,6 +4537,7 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 	// 返回完整账号信息（包含敏感字段）
 	result := map[string]interface{}{
 		"id":                account.ID,
+		"apiKeyId":          account.ApiKeyID,
 		"email":             account.Email,
 		"userId":            account.UserId,
 		"nickname":          account.Nickname,
@@ -4752,6 +4822,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		AccessToken   string `json:"accessToken"`
 		CsrfToken     string `json:"csrfToken"`
 		RefreshToken  string `json:"refreshToken"`
+		ApiKeyID      string `json:"apiKeyId,omitempty"`
 		ClientID      string `json:"clientId,omitempty"`
 		ClientSecret  string `json:"clientSecret,omitempty"`
 		Region        string `json:"region,omitempty"`
@@ -4777,6 +4848,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 
 	type ExportAccount struct {
 		ID           string             `json:"id"`
+		ApiKeyID     string             `json:"apiKeyId,omitempty"`
 		Email        string             `json:"email"`
 		Nickname     string             `json:"nickname,omitempty"`
 		Idp          string             `json:"idp"`
@@ -4806,6 +4878,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		if config.IsAPIKeyAccount(&a) {
 			exportAccounts = append(exportAccounts, ExportAccount{
 				ID:        a.ID,
+				ApiKeyID:  a.ApiKeyID,
 				Email:     a.Email,
 				Nickname:  a.Nickname,
 				Idp:       "APIKey",
@@ -4814,6 +4887,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 				Credentials: ExportCredentials{
 					AccessToken:  a.KiroApiKey,
 					RefreshToken: "",
+					ApiKeyID:     a.ApiKeyID,
 					Region:       a.Region,
 					AuthMethod:   "api_key",
 					Provider:     "APIKey",
@@ -4867,6 +4941,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 
 		exportAccounts = append(exportAccounts, ExportAccount{
 			ID:         a.ID,
+			ApiKeyID:   a.ApiKeyID,
 			Email:      a.Email,
 			Nickname:   a.Nickname,
 			Idp:        idp,
@@ -4877,6 +4952,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 				AccessToken:   a.AccessToken,
 				CsrfToken:     "",
 				RefreshToken:  a.RefreshToken,
+				ApiKeyID:      a.ApiKeyID,
 				ClientID:      a.ClientID,
 				ClientSecret:  a.ClientSecret,
 				Region:        a.Region,
