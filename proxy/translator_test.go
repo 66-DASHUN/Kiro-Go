@@ -535,7 +535,7 @@ func TestParseModelAndThinkingNormalizesClaudeDashVersions(t *testing.T) {
 }
 
 func TestParseModelAndThinkingUsesConfiguredMappings(t *testing.T) {
-	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := config.Init(filepath.Join(proxyTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
 	t.Cleanup(func() {

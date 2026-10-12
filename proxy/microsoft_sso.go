@@ -165,6 +165,8 @@ func writeMicrosoftError(w http.ResponseWriter, status int, err error) {
 
 func writeMicrosoftAddError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, config.ErrInvalidAccountApiKey):
+		writeMicrosoftError(w, http.StatusBadRequest, err)
 	case errors.Is(err, errMicrosoftSSOCanceled), errors.Is(err, errMicrosoftAccountExists):
 		writeMicrosoftError(w, http.StatusConflict, err)
 	default:
@@ -182,7 +184,7 @@ func (h *Handler) writeMicrosoftAdded(w http.ResponseWriter, account config.Acco
 	response := map[string]interface{}{
 		"success": true,
 		"stage":   "complete",
-		"account": map[string]interface{}{"id": account.ID, "email": account.Email},
+		"account": map[string]interface{}{"id": account.ID, "email": account.Email, "apiKeyId": account.ApiKeyID},
 	}
 	if warning != "" {
 		response["warning"] = warning
@@ -190,7 +192,20 @@ func (h *Handler) writeMicrosoftAdded(w http.ResponseWriter, account config.Acco
 	json.NewEncoder(w).Encode(response)
 }
 
-func (h *Handler) apiStartMicrosoftSSO(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) apiStartMicrosoftSSO(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ApiKeyID string `json:"apiKeyId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		writeMicrosoftError(w, http.StatusBadRequest, errors.New("Invalid JSON"))
+		return
+	}
+	apiKeyID, err := normalizeRequestApiKeyID(req.ApiKeyID)
+	if err != nil {
+		writeMicrosoftError(w, http.StatusBadRequest, err)
+		return
+	}
+
 	sessionID, authorizeURL, expiresIn, err := auth.StartMicrosoftSSOLogin()
 	if err != nil {
 		writeMicrosoftError(w, http.StatusInternalServerError, err)
@@ -201,6 +216,7 @@ func (h *Handler) apiStartMicrosoftSSO(w http.ResponseWriter, _ *http.Request) {
 		"authorizeUrl": authorizeURL,
 		"expiresIn":    expiresIn,
 		"stage":        "kiro",
+		"apiKeyId":     apiKeyID,
 	})
 }
 
@@ -209,14 +225,25 @@ func (h *Handler) apiStartMicrosoftSSO(w http.ResponseWriter, _ *http.Request) {
 // the credential, which is saved once its Kiro profile is known.
 func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SessionID   string `json:"sessionId"`
-		CallbackURL string `json:"callbackUrl"`
+		ApiKeyID    *string `json:"apiKeyId"`
+		SessionID   string  `json:"sessionId"`
+		CallbackURL string  `json:"callbackUrl"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeMicrosoftError(w, http.StatusBadRequest, errors.New("Invalid JSON"))
 		return
 	}
+	var apiKeyID string
+	if req.ApiKeyID != nil {
+		var bindingErr error
+		apiKeyID, bindingErr = normalizeRequestApiKeyID(*req.ApiKeyID)
+		if bindingErr != nil {
+			writeMicrosoftError(w, http.StatusBadRequest, bindingErr)
+			return
+		}
+	}
+
 	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" || strings.TrimSpace(req.CallbackURL) == "" {
 		writeMicrosoftError(w, http.StatusBadRequest, errors.New("sessionId and callbackUrl are required"))
@@ -243,6 +270,7 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 
 	result := progress.Result
 	account := config.Account{
+		ApiKeyID:      apiKeyID,
 		ID:            auth.GenerateAccountID(),
 		Email:         result.Email,
 		UserId:        result.UserID,
@@ -288,6 +316,7 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 			"success":     true,
 			"stage":       "profile",
 			"selectionId": selectionID,
+			"apiKeyId":    account.ApiKeyID,
 			"profiles":    profiles,
 		})
 		return
@@ -311,14 +340,25 @@ func (h *Handler) apiCompleteMicrosoftSSO(w http.ResponseWriter, r *http.Request
 
 func (h *Handler) apiSelectMicrosoftSSOProfile(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SelectionID string `json:"selectionId"`
-		ProfileARN  string `json:"profileArn"`
+		ApiKeyID    *string `json:"apiKeyId"`
+		SelectionID string  `json:"selectionId"`
+		ProfileARN  string  `json:"profileArn"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeMicrosoftError(w, http.StatusBadRequest, errors.New("Invalid JSON"))
 		return
 	}
+	var apiKeyID string
+	if req.ApiKeyID != nil {
+		var bindingErr error
+		apiKeyID, bindingErr = normalizeRequestApiKeyID(*req.ApiKeyID)
+		if bindingErr != nil {
+			writeMicrosoftError(w, http.StatusBadRequest, bindingErr)
+			return
+		}
+	}
+
 	selectionID := strings.TrimSpace(req.SelectionID)
 	profileARN := strings.TrimSpace(req.ProfileARN)
 
@@ -345,6 +385,13 @@ func (h *Handler) apiSelectMicrosoftSSOProfile(w http.ResponseWriter, r *http.Re
 	}
 
 	account := sel.account
+	if req.ApiKeyID != nil {
+		if apiKeyID == "" {
+			account.ApiKeyID = ""
+		} else if account.ApiKeyID == "" {
+			account.ApiKeyID = apiKeyID
+		}
+	}
 	account.ProfileArn = profileARN
 	if err := flows.addAccountLocked(sel.sessionID, account); err != nil {
 		if errors.Is(err, errMicrosoftSSOCanceled) {

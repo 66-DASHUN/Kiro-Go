@@ -686,7 +686,7 @@ func responseSSEInt(t *testing.T, value interface{}) int {
 
 func newResponsesTestHandler(t *testing.T, upstream http.HandlerFunc) *Handler {
 	t.Helper()
-	dir := t.TempDir()
+	dir := proxyTempDir(t)
 	if err := db.ResetForTest(dir); err != nil {
 		t.Fatalf("reset db: %v", err)
 	}

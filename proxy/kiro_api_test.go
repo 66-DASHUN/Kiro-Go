@@ -30,7 +30,7 @@ func TestResolveProfileArnReturnsCachedValueWithoutRequest(t *testing.T) {
 }
 
 func TestResolveProfileArnFetchesAndCachesProfile(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "kiro.db")
+	configPath := filepath.Join(proxyTempDir(t), "kiro.db")
 	if err := config.Init(configPath); err != nil {
 		t.Fatalf("init config: %v", err)
 	}

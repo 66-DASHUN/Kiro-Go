@@ -73,7 +73,7 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	return p.nextAccountLocked("", excluded)
+	return p.nextAccountLocked("", "", excluded)
 }
 
 func (p *AccountPool) SetModelList(accountID string, modelIDs []string) {
@@ -113,10 +113,15 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 }
 
 func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string]bool) *config.Account {
+	return p.GetNextForModelForAPIKeyExcluding("", model, excluded)
+}
+
+// A non-empty API key ID may only use accounts explicitly bound to that key.
+func (p *AccountPool) GetNextForModelForAPIKeyExcluding(apiKeyID, model string, excluded map[string]bool) *config.Account {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	return p.nextAccountLocked(model, excluded)
+	return p.nextAccountLocked(apiKeyID, model, excluded)
 }
 
 // GetPreferredForModelExcluding returns preferredID when that account can serve
@@ -124,6 +129,10 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 // the rotation cursor alone, so sticky conversations do not skew where new
 // conversations land.
 func (p *AccountPool) GetPreferredForModelExcluding(preferredID, model string, excluded map[string]bool) *config.Account {
+	return p.GetPreferredForModelForAPIKeyExcluding("", preferredID, model, excluded)
+}
+
+func (p *AccountPool) GetPreferredForModelForAPIKeyExcluding(apiKeyID, preferredID, model string, excluded map[string]bool) *config.Account {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -135,31 +144,31 @@ func (p *AccountPool) GetPreferredForModelExcluding(preferredID, model string, e
 			if acc.ID != preferredID {
 				continue
 			}
-			if p.canServeLocked(acc, model, excluded, now, allowOverUsage) {
+			if p.canServeLocked(acc, apiKeyID, model, excluded, now, allowOverUsage) {
 				accCopy := *acc
 				return &accCopy
 			}
 			break
 		}
 	}
-	return p.nextAccountLocked(model, excluded)
+	return p.nextAccountLocked(apiKeyID, model, excluded)
 }
 
-func (p *AccountPool) nextAccountLocked(model string, excluded map[string]bool) *config.Account {
+func (p *AccountPool) nextAccountLocked(apiKeyID, model string, excluded map[string]bool) *config.Account {
 	if len(p.accounts) == 0 {
 		return nil
 	}
 
-	if acc := p.findNextAvailableLocked(model, excluded, true); acc != nil {
+	if acc := p.findNextAvailableLocked(apiKeyID, model, excluded, true); acc != nil {
 		return acc
 	}
-	if acc := p.findNextAvailableLocked(model, excluded, false); acc != nil {
+	if acc := p.findNextAvailableLocked(apiKeyID, model, excluded, false); acc != nil {
 		return acc
 	}
 	return nil
 }
 
-func (p *AccountPool) findNextAvailableLocked(model string, excluded map[string]bool, avoidLast bool) *config.Account {
+func (p *AccountPool) findNextAvailableLocked(apiKeyID, model string, excluded map[string]bool, avoidLast bool) *config.Account {
 	allowOverUsage := config.GetAllowOverUsage()
 	now := time.Now()
 	n := len(p.accounts)
@@ -177,7 +186,7 @@ func (p *AccountPool) findNextAvailableLocked(model string, excluded map[string]
 		if avoidLast && acc.ID == p.lastSelected {
 			continue
 		}
-		if !p.canServeLocked(acc, model, excluded, now, allowOverUsage) {
+		if !p.canServeLocked(acc, apiKeyID, model, excluded, now, allowOverUsage) {
 			continue
 		}
 		accCopy := *acc
@@ -188,7 +197,10 @@ func (p *AccountPool) findNextAvailableLocked(model string, excluded map[string]
 	return nil
 }
 
-func (p *AccountPool) canServeLocked(acc *config.Account, model string, excluded map[string]bool, now time.Time, allowOverUsage bool) bool {
+func (p *AccountPool) canServeLocked(acc *config.Account, apiKeyID, model string, excluded map[string]bool, now time.Time, allowOverUsage bool) bool {
+	if apiKeyID != "" && acc.ApiKeyID != apiKeyID {
+		return false
+	}
 	if excluded != nil && excluded[acc.ID] {
 		return false
 	}

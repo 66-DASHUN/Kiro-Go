@@ -31,7 +31,7 @@ func TestAccountFailureClassifiers(t *testing.T) {
 }
 
 func TestProfileUnavailableFailureDoesNotDisableAccount(t *testing.T) {
-	dir := t.TempDir()
+	dir := proxyTempDir(t)
 	if err := db.ResetForTest(dir); err != nil {
 		t.Fatalf("reset db: %v", err)
 	}

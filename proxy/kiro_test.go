@@ -339,7 +339,7 @@ func TestSetPayloadProfileArnForAccountClearsAPIKeyProfile(t *testing.T) {
 }
 
 func TestEndpointsForAccountUsesCLIForAPIKey(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+	if err := config.Init(proxyTempDir(t) + "/kiro.db"); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
 	account := &config.Account{AuthMethod: config.AuthMethodAPIKey, KiroApiKey: "ksk_x", Region: "eu-central-1"}

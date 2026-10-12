@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"strings"
 
+	"kiro-proxy/config"
 	"kiro-proxy/db"
 	"kiro-proxy/logger"
 )
@@ -80,6 +81,15 @@ FROM requests`).Scan(
 	)
 	if err != nil {
 		return stats, err
+	}
+	// Imported JSON counters are a fixed historical baseline. New requests only
+	// enter the requests table, so repeat queries never accumulate this baseline.
+	if historical := config.Get(); historical != nil {
+		stats.TotalRequests += int64(historical.TotalRequests)
+		stats.SuccessRequests += int64(historical.SuccessRequests)
+		stats.FailedRequests += int64(historical.FailedRequests)
+		stats.TotalTokens += int64(historical.TotalTokens)
+		stats.TotalCredits += historical.TotalCredits
 	}
 	err = d.QueryRow(`SELECT COUNT(*) FROM errors`).Scan(&stats.TotalErrorEvents)
 	return stats, err

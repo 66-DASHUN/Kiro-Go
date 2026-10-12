@@ -36,6 +36,7 @@ const (
 )
 
 type claudeWebSearchRound struct {
+	cacheUsage   promptCacheUsage
 	text         string
 	thinking     string
 	toolUses     []KiroToolUse
@@ -289,7 +290,7 @@ func (h *Handler) searchWebWithFailover(ctx context.Context, model, query string
 	var lastErr error
 	var lastAccount *config.Account
 	for attempt := 0; attempt < newRequestRetryPlan().maxPerRequest; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.pool.GetNextForModelForAPIKeyExcluding(apiKeyIDFromContext(ctx), model, excluded)
 		if account == nil {
 			break
 		}
@@ -371,7 +372,7 @@ func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Req
 	getObserveStore().RecordSuccess(account.ID, model, inputTokens, outputTokens, 0)
 	recordFinalRequestForApiKey(r.Context(), apiKeyReservation, account, model, inputTokens, outputTokens, 0, true, 200, "")
 
-	h.writeClaudeWebSearchResponse(w, stream, model, content, "end_turn", inputTokens, outputTokens, 1)
+	h.writeClaudeWebSearchResponse(w, stream, model, content, "end_turn", inputTokens, outputTokens, 1, promptCacheUsage{})
 }
 
 func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request, req *ClaudeRequest, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, apiKeyReservation *apiKeyUsageReservation) {
@@ -387,13 +388,15 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 	inputTokens := 0
 	var credits float64
 	var lastAccount *config.Account
+	cacheUsage := promptCacheUsage{}
 
 	//! Every search round spends budget, so at most maxUses+2 upstream calls run before the final answer.
 	for roundIdx := 0; ; roundIdx++ {
 		if roundIdx > 0 {
 			estimatedInputTokens = estimateClaudeRequestInputTokens(cloneClaudeRequestForThinking(&working, thinking))
 		}
-		round, account, err := h.callClaudeRoundWithFailover(ctx, &working, thinking, estimatedInputTokens)
+
+		round, account, err := h.callClaudeRoundWithFailover(ctx, &working, thinking, estimatedInputTokens, apiKeyReservation.apiKeyID())
 		if account != nil {
 			lastAccount = account
 		}
@@ -414,6 +417,10 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		credits += round.credits
 		outputTokens += round.outputTokens
 		inputTokens += round.inputTokens
+		cacheUsage.CacheCreationInputTokens += round.cacheUsage.CacheCreationInputTokens
+		cacheUsage.CacheReadInputTokens += round.cacheUsage.CacheReadInputTokens
+		cacheUsage.CacheCreation5mInputTokens += round.cacheUsage.CacheCreation5mInputTokens
+		cacheUsage.CacheCreation1hInputTokens += round.cacheUsage.CacheCreation1hInputTokens
 		getObserveStore().RecordSuccess(account.ID, req.Model, round.inputTokens, round.outputTokens, round.credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.UpdateStats(account.ID, round.inputTokens+round.outputTokens, round.credits)
@@ -478,14 +485,16 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 		recordFinalRequestForApiKey(r.Context(), apiKeyReservation, lastAccount, req.Model, inputTokens, outputTokens, credits, true, 200, "")
 
-		h.writeClaudeWebSearchResponse(w, req.Stream, req.Model, content, stopReason, inputTokens, outputTokens, searches)
+		h.writeClaudeWebSearchResponse(w, req.Stream, req.Model, content, stopReason, inputTokens, outputTokens, searches, cacheUsage)
 		return
 	}
 }
 
-func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRequest, thinking bool, estimatedInputTokens int) (*claudeWebSearchRound, *config.Account, error) {
+func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRequest, thinking bool, estimatedInputTokens int, apiKeyID string) (*claudeWebSearchRound, *config.Account, error) {
 	payload := ClaudeToKiro(req, thinking)
 	h.applyReasoningEffort(payload, req.Model, claudeOutputEffort(req))
+	cacheProfile := h.promptCache.BuildClaudeProfile(cloneClaudeRequestForThinking(req, thinking), estimatedInputTokens)
+	cacheSettings := config.EffectivePromptCacheSettings(apiKeyID)
 	excluded := make(map[string]bool)
 	var lastErr error
 	var lastAccount *config.Account
@@ -493,14 +502,19 @@ func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRe
 	retryPlan := newRequestRetryPlan()
 	totalAttempts := 0
 	for totalAttempts < retryPlan.maxPerRequest && !isUpstreamClientError(lastErr) {
-		account := h.pickAccount(payload, req.Model, excluded)
+		account := h.pickAccountForAPIKey(apiKeyID, payload, req.Model, excluded)
 		if account == nil {
 			break
 		}
 		for accountAttempt := 0; accountAttempt < retryPlan.maxPerAccount && totalAttempts < retryPlan.maxPerRequest; accountAttempt++ {
 			totalAttempts++
+			cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, cacheSettings)
 			round, err := h.callClaudeRound(ctx, account, payload, req.Model, thinking, estimatedInputTokens)
 			if err == nil {
+				round.cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, round.inputTokens)
+				if cacheSettings.Enabled {
+					h.promptCache.Update(account.ID, cacheProfileWithInputTokens(cacheProfile, round.inputTokens))
+				}
 				h.rememberAccount(payload, account)
 				return round, account, nil
 			}
@@ -625,17 +639,13 @@ func estimateWebSearchContentTokens(content []map[string]interface{}) int {
 	return total
 }
 
-func webSearchUsage(inputTokens, outputTokens, searches int) map[string]interface{} {
-	return map[string]interface{}{
-		"input_tokens":                inputTokens,
-		"output_tokens":               outputTokens,
-		"cache_creation_input_tokens": 0,
-		"cache_read_input_tokens":     0,
-		"server_tool_use":             map[string]interface{}{"web_search_requests": searches},
-	}
+func webSearchUsage(inputTokens, outputTokens, searches int, cacheUsage promptCacheUsage) map[string]interface{} {
+	usage := buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, true)
+	usage["server_tool_use"] = map[string]interface{}{"web_search_requests": searches}
+	return usage
 }
 
-func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream bool, model string, content []map[string]interface{}, stopReason string, inputTokens, outputTokens, searches int) {
+func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream bool, model string, content []map[string]interface{}, stopReason string, inputTokens, outputTokens, searches int, cacheUsage promptCacheUsage) {
 	msgID := "msg_" + uuid.New().String()
 	if !stream {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -647,7 +657,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 			"content":       content,
 			"stop_reason":   stopReason,
 			"stop_sequence": nil,
-			"usage":         webSearchUsage(inputTokens, outputTokens, searches),
+			"usage":         webSearchUsage(inputTokens, outputTokens, searches, cacheUsage),
 		})
 		return
 	}
@@ -671,7 +681,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 			"content":       []interface{}{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage":         webSearchUsage(inputTokens, 0, 0),
+			"usage":         webSearchUsage(inputTokens, 0, 0, cacheUsage),
 		},
 	})
 	for index, block := range content {
@@ -680,10 +690,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
-		"usage": map[string]interface{}{
-			"output_tokens":   outputTokens,
-			"server_tool_use": map[string]interface{}{"web_search_requests": searches},
-		},
+		"usage": webSearchUsage(inputTokens, outputTokens, searches, cacheUsage),
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 }

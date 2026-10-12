@@ -27,8 +27,9 @@ import (
 const tokenRefreshSkewSeconds int64 = 120
 
 type Handler struct {
-	adminGuesses adminGuessLimiter
-	pool         *pool.AccountPool
+	adminGuesses       adminGuessLimiter
+	credentialImportMu sync.Mutex
+	pool               *pool.AccountPool
 
 	startTime      int64
 	stopRefresh    chan struct{}
@@ -912,6 +913,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	defer apiKeyReservation.release()
+	cacheSettings := config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID())
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -953,7 +955,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 	retryPlan := newRequestRetryPlan()
 	totalAttempts := 0
 	for totalAttempts < retryPlan.maxPerRequest && !isUpstreamClientError(lastErr) {
-		account := h.pickAccount(payload, model, excluded)
+		account := h.pickAccountForContext(r.Context(), payload, model, excluded)
 		if account == nil {
 			break
 		}
@@ -977,7 +979,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				}
 				break
 			}
-			cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
+			cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, cacheSettings)
 			messageStartUsage = cacheUsage
 
 			var inputTokens, outputTokens int
@@ -1349,6 +1351,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 			}
 			estimatedOutputTokens := estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
 			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, realInputTokens, estimatedOutputTokens)
+			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
+			cacheProfile = cacheProfileWithInputTokens(cacheProfile, inputTokens)
 
 			h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 			getObserveStore().RecordSuccess(account.ID, model, inputTokens, outputTokens, credits)
@@ -1356,7 +1360,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 			h.pool.RecordSuccess(account.ID)
 			h.rememberAccount(payload, account)
 			h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-			h.promptCache.Update(account.ID, cacheProfile)
+			if cacheSettings.Enabled {
+				h.promptCache.Update(account.ID, cacheProfile)
+			}
 
 			stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
 
@@ -1450,11 +1456,12 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 	var lastErr error
 	var lastAccount *config.Account
 	defer apiKeyReservation.release()
+	cacheSettings := config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID())
 
 	retryPlan := newRequestRetryPlan()
 	totalAttempts := 0
 	for totalAttempts < retryPlan.maxPerRequest && !isUpstreamClientError(lastErr) {
-		account := h.pickAccount(payload, model, excluded)
+		account := h.pickAccountForContext(r.Context(), payload, model, excluded)
 		if account == nil {
 			break
 		}
@@ -1478,7 +1485,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 				}
 				break
 			}
-			cacheUsage := h.promptCache.Compute(account.ID, cacheProfile)
+			cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, cacheSettings)
 
 			var content string
 			var thinkingContent string
@@ -1546,6 +1553,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 
 			estimatedOutputTokens := estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
 			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, realInputTokens, estimatedOutputTokens)
+			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
+			cacheProfile = cacheProfileWithInputTokens(cacheProfile, inputTokens)
 
 			h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 			getObserveStore().RecordSuccess(account.ID, model, inputTokens, outputTokens, credits)
@@ -1553,7 +1562,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			h.pool.RecordSuccess(account.ID)
 			h.rememberAccount(payload, account)
 			h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-			h.promptCache.Update(account.ID, cacheProfile)
+			if cacheSettings.Enabled {
+				h.promptCache.Update(account.ID, cacheProfile)
+			}
 
 			responseThinkingContent := rawThinkingContent
 			includeEmptyThinkingBlock := thinking && thinkingOpts.OmitDisplay && rawThinkingContent != ""
@@ -1687,12 +1698,13 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 	retryPlan := newRequestRetryPlan()
 	totalAttempts := 0
 	for totalAttempts < retryPlan.maxPerRequest && !isUpstreamClientError(lastErr) {
-		account := h.pickAccount(payload, model, excluded)
+		account := h.pickAccountForContext(r.Context(), payload, model, excluded)
 		if account == nil {
 			break
 		}
 		for accountAttempt := 0; accountAttempt < retryPlan.maxPerAccount && totalAttempts < retryPlan.maxPerRequest; accountAttempt++ {
 			totalAttempts++
+			cacheSnapshot := beginOpenAICacheUsage(h.promptCache, account.ID, payload, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()))
 			if err := h.ensureValidTokenContext(r.Context(), account); err != nil {
 				if r.Context().Err() != nil {
 					recordClientDisconnect(r.Context(), apiKeyReservation, account, model)
@@ -2070,7 +2082,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 					"delta":         map[string]interface{}{},
 					"finish_reason": finishReason,
 				}},
-				"usage": buildOpenAIUsage(inputTokens, outputTokens, resolveOpenAICacheUsage(h.promptCache, account.ID, payload, inputTokens)),
+				"usage": buildOpenAIUsage(inputTokens, outputTokens, finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)),
 			}
 			data, _ := json.Marshal(chunk)
 			fmt.Fprintf(w, "data: %s\n\n", string(data))
@@ -2100,12 +2112,13 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, r *http.Request, 
 	retryPlan := newRequestRetryPlan()
 	totalAttempts := 0
 	for totalAttempts < retryPlan.maxPerRequest && !isUpstreamClientError(lastErr) {
-		account := h.pickAccount(payload, model, excluded)
+		account := h.pickAccountForContext(r.Context(), payload, model, excluded)
 		if account == nil {
 			break
 		}
 		for accountAttempt := 0; accountAttempt < retryPlan.maxPerAccount && totalAttempts < retryPlan.maxPerRequest; accountAttempt++ {
 			totalAttempts++
+			cacheSnapshot := beginOpenAICacheUsage(h.promptCache, account.ID, payload, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()))
 			if err := h.ensureValidTokenContext(r.Context(), account); err != nil {
 				if r.Context().Err() != nil {
 					recordClientDisconnect(r.Context(), apiKeyReservation, account, model)
@@ -2191,7 +2204,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, r *http.Request, 
 
 			thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 			resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
-			resp["usage"] = buildOpenAIUsage(inputTokens, outputTokens, resolveOpenAICacheUsage(h.promptCache, account.ID, payload, inputTokens))
+			resp["usage"] = buildOpenAIUsage(inputTokens, outputTokens, finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens))
 			if choices, ok := resp["choices"].([]map[string]interface{}); ok && len(choices) > 0 {
 				choices[0]["finish_reason"] = mapOpenAIFinishReason(upstreamStopReason, len(toolUses))
 			}
@@ -2470,6 +2483,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, _ *http.Request) {
 
 		result[i] = map[string]interface{}{
 			"id":                a.ID,
+			"apiKeyId":          a.ApiKeyID,
+			"apiKeyName":        accountBindingName(a.ApiKeyID),
 			"email":             a.Email,
 			"userId":            a.UserId,
 			"nickname":          a.Nickname,
@@ -2525,6 +2540,13 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var bindingErr error
+	account.ApiKeyID, bindingErr = normalizeRequestApiKeyID(account.ApiKeyID)
+	if bindingErr != nil {
+		h.writeAddAccountError(w, bindingErr)
+		return
+	}
+
 	if account.ID == "" {
 		account.ID = auth.GenerateAccountID()
 	}
@@ -2533,8 +2555,7 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := config.AddAccount(account); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		h.writeAddAccountError(w, err)
 		return
 	}
 
@@ -2582,63 +2603,91 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	patch := config.AccountPatch{}
+	if raw, present := updates["apiKeyId"]; present {
+		value, ok := raw.(string)
+		if !ok && raw != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "apiKeyId must be a string or empty"})
+			return
+		}
+		id, err := normalizeRequestApiKeyID(value)
+		if err != nil {
+			h.writeAddAccountError(w, err)
+			return
+		}
+		patch.ApiKeyID = &id
+	}
+
 	oldEnabled := existing.Enabled
 	if v, ok := updates["enabled"].(bool); ok {
-		existing.Enabled = v
+		patch.Enabled = &v
 		if v && existing.BanStatus != "" && existing.BanStatus != "ACTIVE" {
-			existing.BanStatus = "ACTIVE"
-			existing.BanReason = ""
-			existing.BanTime = 0
-			existing.Silent = false
-			existing.SilentReason = ""
-			existing.SilentTime = 0
+			active := "ACTIVE"
+			empty := ""
+			zero := int64(0)
+			no := false
+			patch.BanStatus = &active
+			patch.BanReason = &empty
+			patch.BanTime = &zero
+			patch.Silent = &no
+			patch.SilentReason = &empty
+			patch.SilentTime = &zero
+
 		}
 	}
 	if v, ok := updates["nickname"].(string); ok {
-		existing.Nickname = v
+		patch.Nickname = &v
 	}
 	if v, ok := updates["machineId"].(string); ok {
-		existing.MachineId = v
+		patch.MachineID = &v
 	}
 	if v, ok := updates["weight"].(float64); ok {
-		existing.Weight = int(v)
+		weight := int(v)
+		patch.Weight = &weight
 	}
 	if v, ok := updates["proxyURL"].(string); ok {
-		existing.ProxyURL = v
+		patch.ProxyURL = &v
 	}
 	if v, ok := updates["silent"].(bool); ok {
-		existing.Silent = v
+		patch.Silent = &v
 		if v {
-			existing.Enabled = false
+			disabled := false
+			patch.Enabled = &disabled
 			if reason, ok := updates["silentReason"].(string); ok && strings.TrimSpace(reason) != "" {
-				existing.SilentReason = strings.TrimSpace(reason)
+				trimmed := strings.TrimSpace(reason)
+				patch.SilentReason = &trimmed
 			} else if existing.SilentReason == "" {
-				existing.SilentReason = "manual"
+				manual := "manual"
+				patch.SilentReason = &manual
 			}
 			if existing.SilentTime == 0 {
-				existing.SilentTime = time.Now().Unix()
+				now := time.Now().Unix()
+				patch.SilentTime = &now
 			}
 		} else {
-			existing.SilentReason = ""
-			existing.SilentTime = 0
+			empty := ""
+			zero := int64(0)
+			patch.SilentReason = &empty
+			patch.SilentTime = &zero
 		}
 	}
-	if err := config.UpdateAccount(id, *existing); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	updated, err := config.UpdateAccountPatch(id, patch)
+	if err != nil {
+		h.writeAddAccountError(w, err)
 		return
 	}
 
 	h.pool.Reload()
 
-	if !oldEnabled && existing.Enabled && existing.AccessToken != "" {
+	if !oldEnabled && updated.Enabled && updated.AccessToken != "" {
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for re-enabled account %s: %v", acc.Email, err)
 			}
-		}(*existing)
+		}(updated)
 	}
-	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "apiKeyId": updated.ApiKeyID})
 }
 
 func (h *Handler) apiGetAccountOverage(w http.ResponseWriter, r *http.Request, id string) {
@@ -2860,12 +2909,19 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ApiKeyID string `json:"apiKeyId"`
 		StartUrl string `json:"startUrl"`
 		Region   string `json:"region"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	apiKeyID, bindingErr := normalizeRequestApiKeyID(req.ApiKeyID)
+	if bindingErr != nil {
+		h.writeAddAccountError(w, bindingErr)
 		return
 	}
 
@@ -2883,6 +2939,7 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"apiKeyId":     apiKeyID,
 		"sessionId":    sessionID,
 		"authorizeUrl": authorizeUrl,
 		"expiresIn":    expiresIn,
@@ -2891,12 +2948,19 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ApiKeyID    string `json:"apiKeyId"`
 		SessionID   string `json:"sessionId"`
 		CallbackUrl string `json:"callbackUrl"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	apiKeyID, bindingErr := normalizeRequestApiKeyID(req.ApiKeyID)
+	if bindingErr != nil {
+		h.writeAddAccountError(w, bindingErr)
 		return
 	}
 
@@ -2910,6 +2974,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	email, _, _ := auth.GetUserInfo(accessToken)
 
 	account := config.Account{
+		ApiKeyID:     apiKeyID,
 		ID:           auth.GenerateAccountID(),
 		Email:        email,
 		AccessToken:  accessToken,
@@ -2924,8 +2989,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := config.AddAccount(account); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		h.writeAddAccountError(w, err)
 		return
 	}
 
@@ -2933,17 +2997,29 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"apiKeyId": account.ApiKeyID,
 		},
 	})
 }
 
 func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Region string `json:"region"`
+		ApiKeyID string `json:"apiKeyId"`
+		Region   string `json:"region"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	apiKeyID, bindingErr := normalizeRequestApiKeyID(req.ApiKeyID)
+	if bindingErr != nil {
+		h.writeAddAccountError(w, bindingErr)
+		return
+	}
 
 	session, err := auth.StartBuilderIdLogin(req.Region)
 	if err != nil {
@@ -2953,6 +3029,7 @@ func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request)
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
+		"apiKeyId":        apiKeyID,
 		"sessionId":       session.ID,
 		"userCode":        session.UserCode,
 		"verificationUri": session.VerificationUri,
@@ -2962,11 +3039,18 @@ func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request)
 
 func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ApiKeyID  string `json:"apiKeyId"`
 		SessionID string `json:"sessionId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	apiKeyID, bindingErr := normalizeRequestApiKeyID(req.ApiKeyID)
+	if bindingErr != nil {
+		h.writeAddAccountError(w, bindingErr)
 		return
 	}
 
@@ -2998,6 +3082,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	email, _, _ := auth.GetUserInfo(accessToken)
 
 	account := config.Account{
+		ApiKeyID:     apiKeyID,
 		ID:           auth.GenerateAccountID(),
 		Email:        email,
 		AccessToken:  accessToken,
@@ -3013,8 +3098,7 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := config.AddAccount(account); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		h.writeAddAccountError(w, err)
 		return
 	}
 
@@ -3023,20 +3107,28 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		"success":   true,
 		"completed": true,
 		"account": map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"apiKeyId": account.ApiKeyID,
 		},
 	})
 }
 
 func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ApiKeyID    string `json:"apiKeyId"`
 		BearerToken string `json:"bearerToken"`
 		Region      string `json:"region"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	apiKeyID, bindingErr := normalizeRequestApiKeyID(req.ApiKeyID)
+	if bindingErr != nil {
+		h.writeAddAccountError(w, bindingErr)
 		return
 	}
 
@@ -3065,6 +3157,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 		email, _, _ := auth.GetUserInfo(accessToken)
 
 		account := config.Account{
+			ApiKeyID:     apiKeyID,
 			ID:           auth.GenerateAccountID(),
 			Email:        email,
 			AccessToken:  accessToken,
@@ -3084,8 +3177,9 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		imported = append(imported, map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"apiKeyId": account.ApiKeyID,
 		})
 	}
 
@@ -3109,6 +3203,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ApiKeyID     string `json:"apiKeyId"`
 		AccessToken  string `json:"accessToken"`
 		RefreshToken string `json:"refreshToken"`
 		KiroApiKey   string `json:"kiroApiKey"`
@@ -3132,7 +3227,16 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	apiKeyID, bindingErr := normalizeRequestApiKeyID(req.ApiKeyID)
+	if bindingErr != nil {
+		h.writeAddAccountError(w, bindingErr)
+		return
+	}
+
 	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
+	originalRefreshToken := req.RefreshToken
+	h.credentialImportMu.Lock()
+	defer h.credentialImportMu.Unlock()
 	req.AccessToken = strings.TrimSpace(req.AccessToken)
 	req.KiroApiKey = strings.TrimSpace(req.KiroApiKey)
 	methodHint := strings.ToLower(strings.TrimSpace(req.AuthMethod))
@@ -3143,6 +3247,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.KiroApiKey != "" {
 		h.importKiroAPIKeyAccount(w, config.Account{
+			ApiKeyID:   apiKeyID,
 			ID:         auth.GenerateAccountID(),
 			Email:      strings.TrimSpace(req.Email),
 			Nickname:   strings.TrimSpace(req.Nickname),
@@ -3158,6 +3263,11 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	if req.RefreshToken == "" {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "refreshToken or kiroApiKey is required"})
+		return
+	}
+
+	if config.AccountCredentialExists(originalRefreshToken) {
+		h.writeAddAccountError(w, config.ErrDuplicateRefreshToken)
 		return
 	}
 
@@ -3244,24 +3354,26 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 
 	account := config.Account{
-		ID:            auth.GenerateAccountID(),
-		Email:         email,
-		UserId:        userID,
-		Nickname:      strings.TrimSpace(req.Nickname),
-		AccessToken:   accessToken,
-		RefreshToken:  req.RefreshToken,
-		ClientID:      req.ClientID,
-		ClientSecret:  req.ClientSecret,
-		AuthMethod:    req.AuthMethod,
-		Provider:      req.Provider,
-		Region:        req.Region,
-		ExpiresAt:     expiresAt,
-		Enabled:       true,
-		MachineId:     config.GenerateMachineId(),
-		ProfileArn:    profileArn,
-		TokenEndpoint: tempAccount.TokenEndpoint,
-		IssuerURL:     tempAccount.IssuerURL,
-		Scopes:        tempAccount.Scopes,
+		ApiKeyID:                apiKeyID,
+		ID:                      auth.GenerateAccountID(),
+		Email:                   email,
+		UserId:                  userID,
+		Nickname:                strings.TrimSpace(req.Nickname),
+		AccessToken:             accessToken,
+		RefreshToken:            req.RefreshToken,
+		RefreshTokenFingerprint: config.RefreshTokenFingerprint(originalRefreshToken),
+		ClientID:                req.ClientID,
+		ClientSecret:            req.ClientSecret,
+		AuthMethod:              req.AuthMethod,
+		Provider:                req.Provider,
+		Region:                  req.Region,
+		ExpiresAt:               expiresAt,
+		Enabled:                 true,
+		MachineId:               config.GenerateMachineId(),
+		ProfileArn:              profileArn,
+		TokenEndpoint:           tempAccount.TokenEndpoint,
+		IssuerURL:               tempAccount.IssuerURL,
+		Scopes:                  tempAccount.Scopes,
 	}
 
 	if config.IsExternalIdpAccount(&account) {
@@ -3274,8 +3386,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if err := config.AddAccount(account); err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		h.writeAddAccountError(w, err)
 		return
 	}
 
@@ -3283,8 +3394,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"apiKeyId": account.ApiKeyID,
 		},
 	})
 }
@@ -3297,12 +3409,7 @@ func (h *Handler) importKiroAPIKeyAccount(w http.ResponseWriter, account config.
 		return
 	}
 	if err := config.AddAccount(account); err != nil {
-		if errors.Is(err, config.ErrDuplicateKiroAPIKey) {
-			w.WriteHeader(http.StatusConflict)
-		} else {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		h.writeAddAccountError(w, err)
 		return
 	}
 
@@ -3315,8 +3422,9 @@ func (h *Handler) importKiroAPIKeyAccount(w http.ResponseWriter, account config.
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
-			"id":    account.ID,
-			"email": account.Email,
+			"id":       account.ID,
+			"email":    account.Email,
+			"apiKeyId": account.ApiKeyID,
 		},
 	})
 }
@@ -3326,8 +3434,16 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *Handler) apiGetSettings(w http.ResponseWriter, _ *http.Request) {
+	rawConfig := config.Get()
+	cache := config.PromptCacheSettings{Enabled: rawConfig.PromptCacheEmulationEnabled, Mode: rawConfig.PromptCacheEmulationMode, Ratio: rawConfig.PromptCacheEmulationRatio, CreationRatio: rawConfig.PromptCacheCreationEmulationRatio, ReadRatio: rawConfig.PromptCacheReadEmulationRatio}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"requireApiKey":          config.IsApiKeyRequired(),
+		"requireApiKey":                     config.IsApiKeyRequired(),
+		"promptCacheEmulationEnabled":       cache.Enabled,
+		"promptCacheEmulationMode":          cache.Mode,
+		"promptCacheEmulationRatio":         cache.Ratio,
+		"promptCacheCreationEmulationRatio": cache.CreationRatio,
+		"promptCacheReadEmulationRatio":     cache.ReadRatio,
+
 		"port":                   config.GetPort(),
 		"host":                   config.GetHost(),
 		"allowOverUsage":         config.GetAllowOverUsage(),
@@ -3404,6 +3520,12 @@ func (h *Handler) apiUpdateModelMappings(w http.ResponseWriter, r *http.Request)
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled"`
+		PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode"`
+		PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio"`
+		PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio"`
+		PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio"`
+
 		RequireApiKey          *bool  `json:"requireApiKey,omitempty"`
 		Password               string `json:"password,omitempty"`
 		AllowOverUsage         *bool  `json:"allowOverUsage,omitempty"`
@@ -3414,6 +3536,38 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
+	}
+
+	rawConfig := config.Get()
+	cache := config.PromptCacheSettings{Enabled: rawConfig.PromptCacheEmulationEnabled, Mode: rawConfig.PromptCacheEmulationMode, Ratio: rawConfig.PromptCacheEmulationRatio, CreationRatio: rawConfig.PromptCacheCreationEmulationRatio, ReadRatio: rawConfig.PromptCacheReadEmulationRatio}
+	cacheChanged := false
+	if req.PromptCacheEmulationEnabled != nil {
+		cache.Enabled = *req.PromptCacheEmulationEnabled
+		cacheChanged = true
+	}
+	if req.PromptCacheEmulationMode != nil {
+		cache.Mode = *req.PromptCacheEmulationMode
+		cacheChanged = true
+	}
+	if req.PromptCacheEmulationRatio != nil {
+		cache.Ratio = *req.PromptCacheEmulationRatio
+		cacheChanged = true
+	}
+	if req.PromptCacheCreationEmulationRatio != nil {
+		cache.CreationRatio = *req.PromptCacheCreationEmulationRatio
+		cacheChanged = true
+	}
+	if req.PromptCacheReadEmulationRatio != nil {
+		cache.ReadRatio = *req.PromptCacheReadEmulationRatio
+		cacheChanged = true
+	}
+
+	if cacheChanged {
+		if err := config.ValidatePromptCacheSettings(cache); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	if req.Password != "" && utf8.RuneCountInString(req.Password) < config.MinAdminPasswordLength {
@@ -3458,6 +3612,13 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if cacheChanged {
+		if err := config.UpdatePromptCacheSettings(cache.Enabled, cache.Mode, cache.Ratio, cache.CreationRatio, cache.ReadRatio); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
@@ -3676,6 +3837,8 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, _ *http.Request, id s
 
 	result := map[string]interface{}{
 		"id":                account.ID,
+		"apiKeyId":          account.ApiKeyID,
+		"apiKeyName":        accountBindingName(account.ApiKeyID),
 		"email":             account.Email,
 		"userId":            account.UserId,
 		"nickname":          account.Nickname,
@@ -3952,6 +4115,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type ExportCredentials struct {
+		ApiKeyID     string `json:"apiKeyId,omitempty"`
 		AccessToken  string `json:"accessToken"`
 		CsrfToken    string `json:"csrfToken"`
 		RefreshToken string `json:"refreshToken"`
@@ -3980,6 +4144,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type ExportAccount struct {
+		ApiKeyID     string             `json:"apiKeyId,omitempty"`
 		ID           string             `json:"id"`
 		Email        string             `json:"email"`
 		Nickname     string             `json:"nickname,omitempty"`
@@ -4034,6 +4199,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 
 		exportAccounts = append(exportAccounts, ExportAccount{
+			ApiKeyID:   a.ApiKeyID,
 			ID:         a.ID,
 			Email:      a.Email,
 			Nickname:   a.Nickname,
@@ -4042,6 +4208,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 			ProfileArn: a.ProfileArn,
 			MachineId:  a.MachineId,
 			Credentials: ExportCredentials{
+				ApiKeyID:      a.ApiKeyID,
 				AccessToken:   a.AccessToken,
 				CsrfToken:     "",
 				RefreshToken:  a.RefreshToken,

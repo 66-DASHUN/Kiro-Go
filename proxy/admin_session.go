@@ -40,15 +40,18 @@ func newSecret() (string, error) {
 // password itself: a session token sent as a header, and single-use tickets for
 // EventSource, which cannot set headers.
 type adminSessionStore struct {
-	mu       sync.Mutex
-	sessions map[string]time.Time
-	tickets  map[string]time.Time
+	mu         sync.Mutex
+	sessions   map[string]time.Time
+	tickets    map[string]time.Time
+	issueOrder map[string]uint64
+	nextIssue  uint64
 }
 
 func newAdminSessionStore() *adminSessionStore {
 	return &adminSessionStore{
-		sessions: make(map[string]time.Time),
-		tickets:  make(map[string]time.Time),
+		sessions:   make(map[string]time.Time),
+		issueOrder: make(map[string]uint64),
+		tickets:    make(map[string]time.Time),
 	}
 }
 
@@ -56,6 +59,7 @@ func (s *adminSessionStore) pruneLocked(now time.Time) {
 	for token, expiry := range s.sessions {
 		if now.After(expiry) {
 			delete(s.sessions, token)
+			delete(s.issueOrder, token)
 		}
 	}
 	for ticket, expiry := range s.tickets {
@@ -82,13 +86,16 @@ func (s *adminSessionStore) Issue() (string, time.Time, error) {
 	for len(s.sessions) >= maxAdminSessions {
 		oldest, oldestExpiry := "", time.Time{}
 		for candidate, candidateExpiry := range s.sessions {
-			if oldest == "" || candidateExpiry.Before(oldestExpiry) {
+			if oldest == "" || candidateExpiry.Before(oldestExpiry) || (candidateExpiry.Equal(oldestExpiry) && s.issueOrder[candidate] < s.issueOrder[oldest]) {
 				oldest, oldestExpiry = candidate, candidateExpiry
 			}
 		}
 		delete(s.sessions, oldest)
+		delete(s.issueOrder, oldest)
 	}
 	s.sessions[token] = expiry
+	s.nextIssue++
+	s.issueOrder[token] = s.nextIssue
 	return token, expiry, nil
 }
 
@@ -105,6 +112,7 @@ func (s *adminSessionStore) Valid(token string) bool {
 	}
 	if now.After(expiry) {
 		delete(s.sessions, token)
+		delete(s.issueOrder, token)
 		return false
 	}
 	return true
@@ -117,6 +125,7 @@ func (s *adminSessionStore) Revoke(token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, token)
+	delete(s.issueOrder, token)
 }
 
 // RevokeAll invalidates every session. Called when the password changes, so a
@@ -125,6 +134,7 @@ func (s *adminSessionStore) RevokeAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions = make(map[string]time.Time)
+	s.issueOrder = make(map[string]uint64)
 	s.tickets = make(map[string]time.Time)
 }
 

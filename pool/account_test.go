@@ -49,7 +49,7 @@ func TestOverageAccountsCanBeSelectedWhenAllowed(t *testing.T) {
 }
 
 func TestGlobalAllowOverUsageKeepsOverLimitAccountsInReloadedPool(t *testing.T) {
-	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := config.Init(filepath.Join(poolTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
 	if err := config.UpdateAllowOverUsage(true); err != nil {
@@ -161,7 +161,7 @@ func TestGetNextRotatesAcrossUsableAccounts(t *testing.T) {
 }
 
 func TestReloadDoesNotRestartRotationAtFirstAccount(t *testing.T) {
-	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := config.Init(filepath.Join(poolTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
 	if err := config.AddAccount(config.Account{ID: "a", Enabled: true}); err != nil {
@@ -186,7 +186,7 @@ func TestReloadDoesNotRestartRotationAtFirstAccount(t *testing.T) {
 }
 
 func TestWeightedAccountDoesNotRepeatWhenAnotherUsableAccountExists(t *testing.T) {
-	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := config.Init(filepath.Join(poolTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
 	if err := config.AddAccount(config.Account{ID: "heavy", Enabled: true, Weight: 5}); err != nil {
@@ -364,6 +364,31 @@ func TestGetNextForModelExcludingReturnsNilOnEmptyPool(t *testing.T) {
 	}
 }
 
+func TestGetNextForModelForAPIKeyStrictlyFiltersBindings(t *testing.T) {
+	p := &AccountPool{accounts: []config.Account{
+		{ID: "bound", ApiKeyID: "key-a", Enabled: true},
+		{ID: "other", ApiKeyID: "key-b", Enabled: true},
+		{ID: "legacy", ApiKeyID: "", Enabled: true},
+	}}
+	for i := 0; i < 12; i++ {
+		got := p.GetNextForModelForAPIKeyExcluding("key-a", "model", nil)
+		if got == nil || got.ID != "bound" {
+			t.Fatalf("iteration %d selected %v, want only key-a account", i, got)
+		}
+	}
+}
+
+func TestGetPreferredForModelForAPIKeyStrictlyFiltersBindings(t *testing.T) {
+	p := &AccountPool{accounts: []config.Account{
+		{ID: "bound", ApiKeyID: "key-a", Enabled: true},
+		{ID: "other", ApiKeyID: "key-b", Enabled: true},
+	}}
+	got := p.GetPreferredForModelForAPIKeyExcluding("key-a", "other", "model", map[string]bool{"bound": true})
+	if got != nil {
+		t.Fatalf("selected %v despite no key-a account serving requested model", got)
+	}
+}
+
 func TestReturnedAccountsAreSnapshots(t *testing.T) {
 	p := newTestPool(config.Account{
 		ID:           "acct",
@@ -432,7 +457,7 @@ func TestGetNextAndUpdateTokenCanRunConcurrently(t *testing.T) {
 
 func TestDisableAccountSetsCooldown(t *testing.T) {
 
-	cfgFile := filepath.Join(t.TempDir(), "kiro.db")
+	cfgFile := filepath.Join(poolTempDir(t), "kiro.db")
 	if err := config.Init(cfgFile); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}

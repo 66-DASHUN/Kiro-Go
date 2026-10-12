@@ -118,7 +118,7 @@ func TestObserveStore_ModelMixSortedByCredits(t *testing.T) {
 }
 
 func TestObserveStore_RequestPagePersistsAndFilters(t *testing.T) {
-	dir := t.TempDir()
+	dir := proxyTempDir(t)
 	resetObservePersistenceForTest(t)
 	if err := db.ResetForTest(dir); err != nil {
 		t.Fatalf("reset db: %v", err)
@@ -180,7 +180,7 @@ func TestObserveStore_RequestPagePersistsAndFilters(t *testing.T) {
 }
 
 func TestQueryPersistedRequestStats(t *testing.T) {
-	dir := t.TempDir()
+	dir := proxyTempDir(t)
 	resetObservePersistenceForTest(t)
 	if err := db.ResetForTest(dir); err != nil {
 		t.Fatalf("reset db: %v", err)

@@ -127,12 +127,13 @@ func (h *Handler) handleOpenAIResponsesNonStream(ctx context.Context, w http.Res
 	retryPlan := newRequestRetryPlan()
 	totalAttempts := 0
 	for totalAttempts < retryPlan.maxPerRequest && !isUpstreamClientError(lastErr) {
-		account := h.pickAccount(payload, model, excluded)
+		account := h.pickAccountForContext(ctx, payload, model, excluded)
 		if account == nil {
 			break
 		}
 		for accountAttempt := 0; accountAttempt < retryPlan.maxPerAccount && totalAttempts < retryPlan.maxPerRequest; accountAttempt++ {
 			totalAttempts++
+			cacheSnapshot := beginOpenAICacheUsage(h.promptCache, account.ID, payload, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()))
 			if err := h.ensureValidTokenContext(ctx, account); err != nil {
 				if ctx.Err() != nil {
 					recordClientDisconnect(ctx, apiKeyReservation, account, model)
@@ -216,7 +217,7 @@ func (h *Handler) handleOpenAIResponsesNonStream(ctx context.Context, w http.Res
 			h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
 			response, storedMessages := buildResponsesCompletedObject(prepared, finalContent, reasoningContent, toolUses, inputTokens, outputTokens)
-			addResponsesCacheUsage(response, resolveOpenAICacheUsage(h.promptCache, account.ID, payload, inputTokens))
+			addResponsesCacheUsage(response, finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens))
 			applyResponsesStopReason(response, upstreamStopReason)
 			if prepared.Store {
 				if err := saveResponseState(responseStateFromObject(response, storedMessages)); err != nil {
@@ -260,12 +261,13 @@ func (h *Handler) handleOpenAIResponsesStream(ctx context.Context, w http.Respon
 	retryPlan := newRequestRetryPlan()
 	totalAttempts := 0
 	for totalAttempts < retryPlan.maxPerRequest && !isUpstreamClientError(lastErr) {
-		account := h.pickAccount(payload, model, excluded)
+		account := h.pickAccountForContext(ctx, payload, model, excluded)
 		if account == nil {
 			break
 		}
 		for accountAttempt := 0; accountAttempt < retryPlan.maxPerAccount && totalAttempts < retryPlan.maxPerRequest; accountAttempt++ {
 			totalAttempts++
+			cacheSnapshot := beginOpenAICacheUsage(h.promptCache, account.ID, payload, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()))
 			if err := h.ensureValidTokenContext(ctx, account); err != nil {
 				if ctx.Err() != nil {
 					recordClientDisconnect(ctx, apiKeyReservation, account, model)
@@ -606,7 +608,7 @@ func (h *Handler) handleOpenAIResponsesStream(ctx context.Context, w http.Respon
 				nextOutputIndex++
 			}
 			response, storedMessages := buildResponsesCompletedObjectWithOutput(responseID, createdAt, prepared, outputItems, finalContent, toolUses, inputTokens, outputTokens)
-			addResponsesCacheUsage(response, resolveOpenAICacheUsage(h.promptCache, account.ID, payload, inputTokens))
+			addResponsesCacheUsage(response, finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens))
 			terminalEvent := applyResponsesStopReason(response, upstreamStopReason)
 			sendResponsesSSE(w, flusher, terminalEvent, map[string]interface{}{
 				"type":     terminalEvent,
@@ -731,9 +733,9 @@ func buildResponsesReasoningOutputItem(reasoning string) map[string]interface{} 
 	return buildResponsesReasoningOutputItemWithID("rs_"+uuid.NewString(), reasoning)
 }
 
-//! Codex decodes reasoning items strictly: "summary" holds summary_text parts and
-//! "content" holds reasoning_text parts. A bare string or an empty summary leaves the
-//! client with nothing to render, so the thinking block vanishes after the stream ends.
+// ! Codex decodes reasoning items strictly: "summary" holds summary_text parts and
+// ! "content" holds reasoning_text parts. A bare string or an empty summary leaves the
+// ! client with nothing to render, so the thinking block vanishes after the stream ends.
 func buildResponsesReasoningOutputItemWithID(id, reasoning string) map[string]interface{} {
 	summary := []interface{}{}
 	content := []interface{}{}

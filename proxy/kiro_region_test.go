@@ -134,7 +134,7 @@ func TestKiroProfileRegionCandidates(t *testing.T) {
 }
 
 func TestResolveProfileArnFallsBackToSecondRegion(t *testing.T) {
-	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := config.Init(filepath.Join(proxyTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	var hosts []string
@@ -216,7 +216,7 @@ func TestResolveProfileArnSuppressesBuilderIDUnsupportedLookup(t *testing.T) {
 func TestResolveProfileArnKeepsRefreshFallbackForBuilderID(t *testing.T) {
 	clearProfileArnResolutionCooldowns()
 	t.Cleanup(clearProfileArnResolutionCooldowns)
-	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := config.Init(filepath.Join(proxyTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	stubRestTransport(t, func(*http.Request) (*http.Response, error) {
@@ -265,7 +265,7 @@ func TestRefreshAccountInfoDoesNotBanWhenProfileLookupFails(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			clearProfileArnResolutionCooldowns()
 			t.Cleanup(clearProfileArnResolutionCooldowns)
-			if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+			if err := config.Init(filepath.Join(proxyTempDir(t), "kiro.db")); err != nil {
 				t.Fatalf("init config: %v", err)
 			}
 			account := config.Account{ID: "acct-" + strings.ReplaceAll(name, " ", "-"), Email: "user@example.com", AccessToken: "token", Provider: "BuilderId", Enabled: true}
