@@ -1690,16 +1690,24 @@
       'promptCacheCreationEmulationRatio', 'promptCacheReadEmulationRatio']
       .some(field => entry && entry[field] !== undefined && entry[field] !== null);
   }
-  function effectiveApiKeyCacheSettings(entry) {
+  function rawApiKeyCacheSettings(entry) {
     const inherited = promptCacheSettings;
     const mode = entry && ['uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
     const ratio = clampRatio(entry && entry.promptCacheEmulationRatio, inherited.ratio);
     return {
       enabled: entry && entry.promptCacheEmulationEnabled != null ? entry.promptCacheEmulationEnabled : inherited.enabled,
       mode, ratio,
-      creationRatio: mode === 'uniform' ? ratio : clampRatio(entry && entry.promptCacheCreationEmulationRatio, inherited.creationRatio),
-      readRatio: mode === 'uniform' ? ratio : clampRatio(entry && entry.promptCacheReadEmulationRatio, inherited.readRatio)
+      creationRatio: clampRatio(entry && entry.promptCacheCreationEmulationRatio, inherited.creationRatio),
+      readRatio: clampRatio(entry && entry.promptCacheReadEmulationRatio, inherited.readRatio)
     };
+  }
+  function effectiveApiKeyCacheSettings(entry) {
+    const settings = rawApiKeyCacheSettings(entry);
+    if (settings.mode === 'uniform') {
+      settings.creationRatio = settings.ratio;
+      settings.readRatio = settings.ratio;
+    }
+    return settings;
   }
   function apiKeyCacheSummary(entry) {
     const effective = effectiveApiKeyCacheSettings(entry);
@@ -1724,10 +1732,6 @@
     $(prefix + 'Ratio').disabled = inherited || !uniform;
     $(prefix + 'CreationRatio').disabled = inherited || uniform;
     $(prefix + 'ReadRatio').disabled = inherited || uniform;
-    if (uniform) {
-      $(prefix + 'CreationRatio').value = $(prefix + 'Ratio').value;
-      $(prefix + 'ReadRatio').value = $(prefix + 'Ratio').value;
-    }
     refreshCustomSelects($(prefix + 'Mode').parentElement);
   }
   function cacheFormValues(prefix) {
@@ -1743,8 +1747,8 @@
       promptCacheEmulationEnabled: $(prefix + 'Enabled').checked,
       promptCacheEmulationMode: mode,
       promptCacheEmulationRatio: ratio,
-      promptCacheCreationEmulationRatio: mode === 'uniform' ? ratio : readRatio('CreationRatio'),
-      promptCacheReadEmulationRatio: mode === 'uniform' ? ratio : readRatio('ReadRatio')
+      promptCacheCreationEmulationRatio: readRatio('CreationRatio'),
+      promptCacheReadEmulationRatio: readRatio('ReadRatio')
     };
   }
   async function savePromptCacheSettings() {
@@ -2120,7 +2124,7 @@
     $('newApiKeyTokenLimit').value = String(key.tokenLimit || 0);
     $('newApiKeyCreditLimit').value = String(key.creditLimit || 0);
     $('apiKeyCacheScope').value = hasApiKeyCacheOverride(key) ? 'independent' : 'inherit';
-    setCacheForm('apiKeyCache', effectiveApiKeyCacheSettings(key));
+    setCacheForm('apiKeyCache', rawApiKeyCacheSettings(key));
     syncApiKeyCacheForm();
     apiKeyCacheDirty = false;
     $('createdApiKeyPanel').classList.add('hidden');
