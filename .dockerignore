@@ -7,3 +7,11 @@ docker-compose.yml
 README.md
 README_CN.md
 *.log
+.env
+.env.*
+config.json
+credentials.json
+data
+state
+.worktrees
+*.tar.gz

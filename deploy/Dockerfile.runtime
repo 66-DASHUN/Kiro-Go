@@ -1,0 +1,17 @@
+# Runtime-only build from binaries validated in the resource-limited Linux builder.
+# BASE_IMAGE must be the exact pre-existing Kiro runtime digest.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG GIT_REVISION
+WORKDIR /app
+RUN rm -rf /app/web
+COPY build/kiro-proxy /app/kiro-proxy
+COPY web /app/web
+ENV DATA_DIR=/app/data
+LABEL org.opencontainers.image.title="Kiro Proxy" \
+      org.opencontainers.image.version="2.1.0" \
+      org.opencontainers.image.source="https://github.com/66-DASHUN/Kiro-Go" \
+      org.opencontainers.image.revision="${GIT_REVISION}" \
+      kiro.upstream.revision="9290b3565528677085ff75d174f996d120e81a6d"
+CMD ["./kiro-proxy"]
+

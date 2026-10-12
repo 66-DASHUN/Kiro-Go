@@ -1,10 +1,23 @@
 .DS_Store
 .vscode/
 *.out
+*.exe
+*.test
 *.db
 *.db-*
 /kiro*
 coverage.txt
+
+# Local state and credentials from legacy deployments
+config.json
+credentials.json
+.env
+.env.*
+data/
+state/
+*.tar.gz
+*.log
+build/
 
 # Local integration worktrees
 .worktrees/

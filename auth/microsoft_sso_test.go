@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"kiro-proxy/config"
+	"kiro-proxy/db"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -774,7 +775,9 @@ func TestParseMicrosoftIssuerAndDiscoveredEndpointValidation(t *testing.T) {
 
 func resetMicrosoftSSOSessionsForTest(t *testing.T) {
 	t.Helper()
-	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+	dir := t.TempDir()
+	t.Cleanup(func() { _ = db.Close() })
+	if err := config.Init(filepath.Join(dir, "config.json")); err != nil {
 		t.Fatalf("initialize test config: %v", err)
 	}
 	clearSessions := func() {

@@ -1,5 +1,5 @@
 {
   "version": "2.1.0",
-  "changelog": "🪟 Kiro accounts can now sign in with Microsoft (Entra ID), with Kiro profiles discovered across regions.\n🔗 Follow-up requests stay on the account that served the conversation. Turn this off in settings to go back to round-robin.\n🤖 Default model mappings now point to Claude Sonnet 5 and Claude Opus 5.\n🔎 Hosted web search results now appear in the reply instead of reaching the client as tool calls.\n🔑 The generated admin password is now 8 digits. An unused 48-character password from an older version is replaced once.\n🛡️ Admin password guesses are limited per client, and a distributed attack slows guessing without locking out the real admin.\n📦 Request bodies are capped at 32 MiB after decompression, and at most eight compressed bodies are decompressed at once.\n💾 Backup restore is now atomic and keeps an active ADMIN_PASSWORD override.",
-  "download": "https://github.com/tanu360/kiro-reverse-api"
+  "changelog": "完整整合 Kiro Proxy 2.1.0（上游 9290b356）：SQLite、新管理界面、Responses、文档与流式完整性兼容；保留账号 API Key 绑定、全局/单 Key 缓存策略与 90% 读取上限，并自动迁移旧 config.json。",
+  "download": "https://github.com/66-DASHUN/Kiro-Go"
 }
