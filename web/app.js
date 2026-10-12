@@ -18,9 +18,14 @@
   let modelMappingDropIndex = null;
   let builderIdSession = '';
   let builderIdPollTimer = null;
+  let builderIdApiKeyId = '';
   let iamSession = '';
+  let iamApiKeyId = '';
+  let pendingApiKeyId = '';
+  let accountModalGeneration = 0;
+  let promptCacheSettings = { enabled: true, mode: 'uniform', ratio: 1, creationRatio: 1, readRatio: 1 };
   // Microsoft SSO: 'kiro' (portal callback) then 'microsoft' (Entra callback), then maybe a profile pick.
-  let ms = { session: '', stage: 'kiro', authorizeUrl: '', selectionId: '', profiles: [], busy: false, generation: 0 };
+  let ms = { session: '', stage: 'kiro', authorizeUrl: '', selectionId: '', profiles: [], busy: false, generation: 0, apiKeyId: '' };
   let exportSelectedIds = new Set();
   let currentVersion = '';
   let testLogs = [];
@@ -46,6 +51,7 @@
   let backupScheduleCache = null;
   let apiKeysCache = [];
   let editingApiKeyId = '';
+  let apiKeyCacheDirty = false;
   const $ = (id) => document.getElementById(id);
   const qsa = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   function escapeHtml(s) {
@@ -158,6 +164,8 @@
     applyTranslations();
     renderVersionBadge();
     renderAccounts();
+    renderApiKeys();
+    refreshApiKeyOwnershipSelects();
     renderPromptRules();
     renderModelMappings();
     renderObserveCached();
@@ -810,6 +818,55 @@
     const res = await api('/accounts');
     accountsData = await res.json();
     renderAccounts();
+    renderApiKeys();
+  }
+  function apiKeyLabel(entry) {
+    return (entry.name || t('apiKeys.unnamed')) + (entry.keyMasked ? ' · ' + entry.keyMasked : '') +
+      (!entry.enabled ? ' · ' + t('apiKeys.disabled') : '');
+  }
+  function apiKeyOptions(selectedId) {
+    let html = '<option value="">' + escapeHtml(t('apiKeys.unbound')) + '</option>';
+    apiKeysCache.forEach(entry => {
+      const selected = entry.id === selectedId;
+      if (!entry.enabled && !selected) return;
+      html += '<option value="' + escapeAttr(entry.id) + '"' + (selected ? ' selected' : '') +
+        (!entry.enabled ? ' disabled' : '') + '>' + escapeHtml(apiKeyLabel(entry)) + '</option>';
+    });
+    if (selectedId && !apiKeysCache.some(entry => entry.id === selectedId)) {
+      html += '<option value="' + escapeAttr(selectedId) + '" selected disabled>' + escapeHtml(t('apiKeys.unavailableKey', selectedId)) + '</option>';
+    }
+    return html;
+  }
+  function renderApiKeyOwnershipField(id, selectedId, locked) {
+    return '<div class="form-group api-key-ownership-field"><label for="' + escapeAttr(id) + '">' + escapeHtml(t('apiKeys.accountBinding')) + '</label>' +
+      '<select id="' + escapeAttr(id) + '"' + (locked ? ' disabled' : '') + '>' + apiKeyOptions(selectedId) + '</select>' +
+      '<small>' + escapeHtml(t(locked ? 'apiKeys.bindingLocked' : 'apiKeys.accountBindingHint')) + '</small></div>';
+  }
+  function renderPendingApiKeyField() {
+    const existing = $('pendingApiKeySelect');
+    if (existing) return;
+    const locked = !!(builderIdSession || iamSession || ms.session || ms.selectionId || ms.busy);
+    const selected = builderIdSession ? builderIdApiKeyId : iamSession ? iamApiKeyId :
+      (ms.session || ms.selectionId || ms.busy) ? ms.apiKeyId : pendingApiKeyId;
+    $('modalBody').insertAdjacentHTML('afterbegin', renderApiKeyOwnershipField('pendingApiKeySelect', selected, locked));
+    enhanceCustomSelects($('modalBody'));
+  }
+  function refreshApiKeyOwnershipSelects() {
+    ['pendingApiKeySelect', 'detailApiKeySelect'].forEach(id => {
+      const select = $(id);
+      if (!select || (select.__customSelect && select.__customSelect.classList.contains('is-open'))) return;
+      const value = select.value;
+      select.innerHTML = apiKeyOptions(value);
+      select.value = value;
+      refreshCustomSelects(select.parentElement);
+      const label = select.parentElement.querySelector('label');
+      if (label) label.textContent = t('apiKeys.accountBinding');
+      const hint = select.parentElement.querySelector('small');
+      if (hint) hint.textContent = t(select.disabled ? 'apiKeys.bindingLocked' : select.dataset.importBinding ? 'apiKeys.importBindingHint' : 'apiKeys.accountBindingHint');
+    });
+  }
+  function withPendingApiKey(payload, apiKeyId = pendingApiKeyId) {
+    return { ...payload, apiKeyId: String(apiKeyId || '').trim() };
   }
   function getFilteredAccounts() {
     return accountsData.filter(a => {
@@ -1024,6 +1081,9 @@
       const idAttr = escapeAttr(a.id);
       const displayEmail = getDisplayEmail(a.email, a.id);
       const selectLabel = t('accounts.selectAccount', displayEmail);
+      const boundKey = apiKeysCache.find(k => k.id === a.apiKeyId);
+      const bindingLabel = a.apiKeyId ? (boundKey ? apiKeyLabel(boundKey) : (a.apiKeyName || a.apiKeyId)) : t('apiKeys.unbound');
+      const bindingBadge = '<span class="badge badge-info" title="' + escapeAttr(t('apiKeys.accountBinding') + ': ' + bindingLabel) + '"><i class="fa-solid fa-key" aria-hidden="true"></i> ' + escapeHtml(bindingLabel) + '</span>';
 
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
@@ -1041,6 +1101,7 @@
         getTrialBadge(a) +
         weightBadge +
         overageBadge +
+        bindingBadge +
         '<span class="badge badge-info">' + escapeHtml(formatAuthMethod(a.provider || a.authMethod)) + '</span>' +
         getStatusBadge(a) +
         '</div>' +
@@ -1119,13 +1180,14 @@
       const jsonPromise = api('/accounts/' + id + '/full').then(async res => {
         if (!res.ok) throw new Error(t('common.failed'));
         const a = await res.json();
-        if (a.authMethod === 'api_key') return JSON.stringify({ kiroApiKey: a.accessToken, region: a.region, authMethod: 'api_key' }, null, 2);
+        const apiKeyId = a.apiKeyId || '';
+        if (a.authMethod === 'api_key') return JSON.stringify({ kiroApiKey: a.accessToken, region: a.region, authMethod: 'api_key', apiKeyId }, null, 2);
         const { clientId, clientSecret, accessToken, refreshToken } = a;
         if (a.authMethod === 'external_idp') {
           const { authMethod, provider, userId, profileArn, tokenEndpoint, issuerUrl, scopes } = a;
-          return JSON.stringify({ clientId, accessToken, refreshToken, authMethod, provider, userId, profileArn, tokenEndpoint, issuerUrl, scopes }, null, 2);
+          return JSON.stringify({ clientId, accessToken, refreshToken, authMethod, provider, userId, profileArn, tokenEndpoint, issuerUrl, scopes, apiKeyId }, null, 2);
         }
-        return JSON.stringify({ clientId, clientSecret, accessToken, refreshToken }, null, 2);
+        return JSON.stringify({ clientId, clientSecret, accessToken, refreshToken, authMethod: a.authMethod, provider: a.provider, region: a.region, userId: a.userId, profileArn: a.profileArn, apiKeyId }, null, 2);
       });
       await copyText(jsonPromise);
       flashCopySuccess(btn);
@@ -1246,6 +1308,10 @@
       detailItem(t('detail.region'), a.region || 'us-east-1') +
       '</div></div>' +
 
+      '<div class="detail-section"><h4>' + escapeHtml(t('apiKeys.accountBinding')) + '</h4>' +
+      renderApiKeyOwnershipField('detailApiKeySelect', a.apiKeyId || '', false) +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveApiKey" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button></div>' +
+
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.machineId')) + '</h4><div class="machine-id-row">' +
       '<input type="text" id="machineIdInput" value="' + escapeAttr(a.machineId || '') + '" placeholder="' + escapeAttr(t('detail.machineIdPlaceholder')) + '" />' +
       '<button class="btn btn-sm btn-outline" id="generateMachineIdBtn" type="button">' + escapeHtml(t('detail.generate')) + '</button>' +
@@ -1304,6 +1370,7 @@
       '<div id="modelsList" class="model-list"></div>' +
       '</div>';
 
+    enhanceCustomSelects($('detailBody'));
     openDialog('detailModal');
   }
   async function loadModels(id) {
@@ -1368,6 +1435,23 @@
   async function saveWeight(id) {
     const weight = parseInt($('weightInput').value, 10) || 0;
     await putAccount(id, { weight }, t('detail.saved'));
+  }
+  async function saveAccountApiKey(id) {
+    const apiKeyId = $('detailApiKeySelect').value;
+    const button = $('detailBody').querySelector('[data-detail-action="saveApiKey"]');
+    if (button) button.disabled = true;
+    try {
+      const res = await api('/accounts/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify({ apiKeyId }) });
+      const d = await res.json();
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.saveFailed'));
+      await loadAccounts();
+      renderApiKeys();
+      toast(t('detail.saved'), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    } finally {
+      if (button) button.disabled = false;
+    }
   }
   function mergeOverageSnapshot(id, d) {
     const a = accountsData.find(x => x.id === id);
@@ -1577,9 +1661,133 @@
     $('allowOverUsage').checked = d.allowOverUsage || false;
     $('lenientStreamIntegrity').checked = d.lenientStreamIntegrity || false;
     $('sessionAffinity').checked = d.sessionAffinity !== false;
+    promptCacheSettings = normalizePromptCacheSettings(d);
+    setCacheForm('promptCache', promptCacheSettings);
+    if (!editingApiKeyId) resetApiKeyCacheEditor();
     await Promise.all([loadApiKeys(), loadThinkingConfig(), loadModelMappings(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter()]);
     syncApiKeyManagementVisibility();
     refreshCustomSelects();
+  }
+  function clampRatio(value, fallback = 1) {
+    if (value === null || value === undefined || value === '') return fallback;
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : fallback;
+  }
+  function ratioToPercent(value) {
+    return (clampRatio(value) * 100).toFixed(1).replace(/\.0$/, '');
+  }
+  function normalizePromptCacheSettings(source) {
+    const mode = source.promptCacheEmulationMode === 'independent' ? 'independent' : 'uniform';
+    const ratio = clampRatio(source.promptCacheEmulationRatio);
+    return {
+      enabled: source.promptCacheEmulationEnabled !== false, mode, ratio,
+      creationRatio: clampRatio(source.promptCacheCreationEmulationRatio),
+      readRatio: clampRatio(source.promptCacheReadEmulationRatio)
+    };
+  }
+  function hasApiKeyCacheOverride(entry) {
+    return ['promptCacheEmulationEnabled', 'promptCacheEmulationMode', 'promptCacheEmulationRatio',
+      'promptCacheCreationEmulationRatio', 'promptCacheReadEmulationRatio']
+      .some(field => entry && entry[field] !== undefined && entry[field] !== null);
+  }
+  function effectiveApiKeyCacheSettings(entry) {
+    const inherited = promptCacheSettings;
+    const mode = entry && ['uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
+    const ratio = clampRatio(entry && entry.promptCacheEmulationRatio, inherited.ratio);
+    return {
+      enabled: entry && entry.promptCacheEmulationEnabled != null ? entry.promptCacheEmulationEnabled : inherited.enabled,
+      mode, ratio,
+      creationRatio: mode === 'uniform' ? ratio : clampRatio(entry && entry.promptCacheCreationEmulationRatio, inherited.creationRatio),
+      readRatio: mode === 'uniform' ? ratio : clampRatio(entry && entry.promptCacheReadEmulationRatio, inherited.readRatio)
+    };
+  }
+  function apiKeyCacheSummary(entry) {
+    const effective = effectiveApiKeyCacheSettings(entry);
+    const scope = t(hasApiKeyCacheOverride(entry) ? 'apiKeys.cacheIndependent' : 'apiKeys.cacheInherited');
+    const policy = !effective.enabled ? t('apiKeys.cacheDisabled') : effective.mode === 'uniform'
+      ? t('apiKeys.cacheUniform', ratioToPercent(effective.ratio))
+      : t('apiKeys.cacheIndependentRatios', ratioToPercent(effective.creationRatio), ratioToPercent(effective.readRatio));
+    return scope + ' · ' + policy;
+  }
+  function setCacheForm(prefix, settings) {
+    $(prefix + 'Enabled').checked = settings.enabled;
+    $(prefix + 'Mode').value = settings.mode;
+    $(prefix + 'Ratio').value = ratioToPercent(settings.ratio);
+    $(prefix + 'CreationRatio').value = ratioToPercent(settings.creationRatio);
+    $(prefix + 'ReadRatio').value = ratioToPercent(settings.readRatio);
+    syncCacheForm(prefix, false);
+  }
+  function syncCacheForm(prefix, inherited) {
+    const uniform = $(prefix + 'Mode').value === 'uniform';
+    $(prefix + 'Enabled').disabled = inherited;
+    $(prefix + 'Mode').disabled = inherited;
+    $(prefix + 'Ratio').disabled = inherited || !uniform;
+    $(prefix + 'CreationRatio').disabled = inherited || uniform;
+    $(prefix + 'ReadRatio').disabled = inherited || uniform;
+    if (uniform) {
+      $(prefix + 'CreationRatio').value = $(prefix + 'Ratio').value;
+      $(prefix + 'ReadRatio').value = $(prefix + 'Ratio').value;
+    }
+    refreshCustomSelects($(prefix + 'Mode').parentElement);
+  }
+  function cacheFormValues(prefix) {
+    const mode = $(prefix + 'Mode').value === 'independent' ? 'independent' : 'uniform';
+    const readRatio = field => {
+      const raw = $(prefix + field).value.trim();
+      const percent = Number(raw);
+      if (!raw || !Number.isFinite(percent) || percent < 0 || percent > 100) throw new Error(t('settings.invalidCacheRatio'));
+      return percent / 100;
+    };
+    const ratio = readRatio('Ratio');
+    return {
+      promptCacheEmulationEnabled: $(prefix + 'Enabled').checked,
+      promptCacheEmulationMode: mode,
+      promptCacheEmulationRatio: ratio,
+      promptCacheCreationEmulationRatio: mode === 'uniform' ? ratio : readRatio('CreationRatio'),
+      promptCacheReadEmulationRatio: mode === 'uniform' ? ratio : readRatio('ReadRatio')
+    };
+  }
+  async function savePromptCacheSettings() {
+    const button = $('savePromptCacheBtn');
+    button.disabled = true;
+    try {
+      const payload = cacheFormValues('promptCache');
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify(payload) });
+      const d = await res.json();
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.saveFailed'));
+      promptCacheSettings = normalizePromptCacheSettings(payload);
+      setCacheForm('promptCache', promptCacheSettings);
+      if ($('apiKeyCacheScope').value === 'inherit') {
+        setCacheForm('apiKeyCache', promptCacheSettings);
+        syncApiKeyCacheForm();
+      }
+      renderApiKeys();
+      toast(t('settings.promptCacheSaved'), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    } finally {
+      button.disabled = false;
+    }
+  }
+  function syncApiKeyCacheForm() {
+    syncCacheForm('apiKeyCache', $('apiKeyCacheScope').value === 'inherit');
+    refreshCustomSelects($('apiKeyCacheScope').parentElement);
+  }
+  function resetApiKeyCacheEditor() {
+    $('apiKeyCacheScope').value = 'inherit';
+    setCacheForm('apiKeyCache', promptCacheSettings);
+    syncApiKeyCacheForm();
+    apiKeyCacheDirty = false;
+  }
+  function getApiKeyCacheEditorValues() {
+    if (editingApiKeyId && !apiKeyCacheDirty) return {};
+    if ($('apiKeyCacheScope').value === 'inherit') return editingApiKeyId ? { clearPromptCacheOverrides: true } : {};
+    try {
+      return cacheFormValues('apiKeyCache');
+    } catch (e) {
+      toast(e.message, 'warning');
+      return null;
+    }
   }
   async function loadThinkingConfig() {
     const res = await api('/thinking');
@@ -1779,6 +1987,8 @@
       const d = await res.json();
       apiKeysCache = d.apiKeys || [];
       renderApiKeys();
+      renderAccounts();
+      refreshApiKeyOwnershipSelects();
     } catch (e) {
       apiKeysCache = [];
       renderApiKeys(t('settings.apiKeysLoadFailed'));
@@ -1811,7 +2021,9 @@
         '<button class="btn btn-outline btn-icon btn-sm api-key-copy-btn" data-api-key-action="copy" data-id="' + escapeAttr(k.id) + '" type="button" title="' + escapeAttr(copyLabel) + '" aria-label="' + escapeAttr(copyLabel) + '"><i class="fa-solid fa-copy" aria-hidden="true"></i></button>' +
         '</span>';
       return '<tr>' +
-        '<td><strong>' + escapeHtml(k.name || t('settings.unnamedApiKey')) + '</strong></td>' +
+        '<td><strong>' + escapeHtml(k.name || t('settings.unnamedApiKey')) + '</strong>' +
+        '<small class="api-key-policy-summary">' + escapeHtml(t('apiKeys.boundAccounts', accountsData.filter(a => a.apiKeyId === k.id).length)) + '</small>' +
+        '<small class="api-key-policy-summary">' + escapeHtml(apiKeyCacheSummary(k)) + '</small></td>' +
         '<td>' + keyCell + '</td>' +
         '<td><span class="api-key-status ' + statusClass + '" title="' + escapeAttr(statusLabel) + '" aria-label="' + escapeAttr(statusLabel) + '"><i class="fa-solid ' + statusIcon + '" aria-hidden="true"></i></span></td>' +
         '<td>' + usage + '</td>' +
@@ -1876,6 +2088,7 @@
     $('newApiKeyValue').value = '';
     $('newApiKeyTokenLimit').value = '0';
     $('newApiKeyCreditLimit').value = '0';
+    resetApiKeyCacheEditor();
     $('createdApiKeyPanel').classList.add('hidden');
     renderApiKeys();
   }
@@ -1889,11 +2102,14 @@
       toast(t('settings.invalidApiKeyLimits'), 'warning');
       return null;
     }
+    const cacheValues = getApiKeyCacheEditorValues();
+    if (!cacheValues) return null;
     return {
       name: $('newApiKeyName').value.trim(),
       key: customKey,
       tokenLimit,
       creditLimit,
+      ...cacheValues,
     };
   }
   function beginEditApiKey(id) {
@@ -1903,6 +2119,10 @@
     $('newApiKeyValue').value = '';
     $('newApiKeyTokenLimit').value = String(key.tokenLimit || 0);
     $('newApiKeyCreditLimit').value = String(key.creditLimit || 0);
+    $('apiKeyCacheScope').value = hasApiKeyCacheOverride(key) ? 'independent' : 'inherit';
+    setCacheForm('apiKeyCache', effectiveApiKeyCacheSettings(key));
+    syncApiKeyCacheForm();
+    apiKeyCacheDirty = false;
     $('createdApiKeyPanel').classList.add('hidden');
     setApiKeyEditorMode(id);
     renderApiKeys();
@@ -1925,16 +2145,12 @@
         $('newApiKeyValue').value = '';
         $('newApiKeyTokenLimit').value = '0';
         $('newApiKeyCreditLimit').value = '0';
+        resetApiKeyCacheEditor();
         await loadApiKeys();
         return;
       }
-      const payload = {
-        name: values.name,
-        enabled: true,
-        tokenLimit: values.tokenLimit,
-        creditLimit: values.creditLimit,
-      };
-      if (values.key) payload.key = values.key;
+      const payload = { ...values, enabled: true };
+      if (!payload.key) delete payload.key;
       const res = await api('/api-keys', {
         method: 'POST',
         body: JSON.stringify(payload)
@@ -1945,6 +2161,7 @@
       $('newApiKeyValue').value = '';
       $('newApiKeyTokenLimit').value = '0';
       $('newApiKeyCreditLimit').value = '0';
+      resetApiKeyCacheEditor();
       if (d.key) {
         $('createdApiKeyPanel').classList.remove('hidden');
         $('createdApiKeyValue').textContent = d.key;
@@ -2502,6 +2719,15 @@
       '</button>';
   }
   function showModal(type) {
+    accountModalGeneration++;
+    if (type === 'add') {
+      resetMicrosoftFlow(true);
+      iamSession = '';
+      iamApiKeyId = '';
+      if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
+      builderIdSession = '';
+      builderIdApiKeyId = '';
+    }
     const modal = $('addModal');
     const title = $('modalTitle');
     const body = $('modalBody');
@@ -2514,15 +2740,24 @@
     else if (type === 'credentials') modalCredentials(title, body);
     else if (type === 'cookie') modalCookie(title, body);
     else if (type === 'apikey') modalApiKey(title, body);
+    renderPendingApiKeyField();
+    if (type === 'credentials') {
+      $('pendingApiKeySelect').dataset.importBinding = 'true';
+      body.querySelector('.api-key-ownership-field small').textContent = t('apiKeys.importBindingHint');
+    }
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
   }
   function closeModal() {
+    accountModalGeneration++;
     closeDialog('addModal');
     resetMicrosoftFlow(true);
     iamSession = '';
+    iamApiKeyId = '';
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
+    builderIdApiKeyId = '';
+    pendingApiKeyId = '';
   }
   function modalAdd(title, body) {
     title.textContent = t('modal.addAccount');
@@ -2602,6 +2837,7 @@
         '<div class="modal-footer">' + back +
         '<button class="btn btn-primary" id="microsoftBtn" type="button">' + escapeHtml(t('microsoft.selectProfile')) + '</button></div>';
       $('microsoftBtn').addEventListener('click', selectMicrosoftProfile);
+      renderPendingApiKeyField();
       return;
     }
     const step = ms.authorizeUrl
@@ -2628,18 +2864,25 @@
       });
     }
     $('microsoftBtn').addEventListener('click', ms.authorizeUrl ? completeMicrosoftLogin : startMicrosoftLogin);
+    renderPendingApiKeyField();
   }
   function resetMicrosoftFlow(notifyServer) {
     if (notifyServer && (ms.session || ms.selectionId)) {
       api('/auth/microsoft-sso/cancel', { method: 'POST', body: JSON.stringify({ sessionId: ms.session, selectionId: ms.selectionId }) }).catch(() => {});
     }
-    ms = { session: '', stage: 'kiro', authorizeUrl: '', selectionId: '', profiles: [], busy: false, generation: ms.generation + 1 };
+    ms = { session: '', stage: 'kiro', authorizeUrl: '', selectionId: '', profiles: [], busy: false, generation: ms.generation + 1, apiKeyId: '' };
   }
   // Runs one Microsoft SSO request. A response that lands after the operator
   // left the flow is dropped, and its server session canceled.
   async function microsoftStep(path, payload, onSuccess) {
     if (ms.busy) return;
     ms.busy = true;
+    const bindingSelect = $('pendingApiKeySelect');
+    if (bindingSelect) {
+      bindingSelect.value = ms.apiKeyId;
+      bindingSelect.disabled = true;
+      refreshApiKeyOwnershipSelects();
+    }
     const btn = $('microsoftBtn');
     if (btn) btn.disabled = true;
     const generation = ms.generation;
@@ -2661,6 +2904,7 @@
         return;
       }
       onSuccess(d);
+      if (d.apiKeyId !== undefined) ms.apiKeyId = String(d.apiKeyId || '');
       renderMicrosoftModal();
     } catch (e) {
       if (generation === ms.generation) toastError(t('common.failed') + ': ' + ((e && e.message) || ''));
@@ -2669,11 +2913,17 @@
         ms.busy = false;
         const b = $('microsoftBtn');
         if (b) b.disabled = false;
+        const binding = $('pendingApiKeySelect');
+        if (binding) {
+          binding.disabled = !!(ms.session || ms.selectionId);
+          refreshApiKeyOwnershipSelects();
+        }
       }
     }
   }
   function startMicrosoftLogin() {
-    return microsoftStep('/auth/microsoft-sso/start', {}, d => {
+    ms.apiKeyId = pendingApiKeyId;
+    return microsoftStep('/auth/microsoft-sso/start', withPendingApiKey({}, ms.apiKeyId), d => {
       ms.session = d.sessionId;
       ms.authorizeUrl = d.authorizeUrl;
       ms.stage = 'kiro';
@@ -2682,7 +2932,7 @@
   function completeMicrosoftLogin() {
     const callbackUrl = ($('microsoftCallback')?.value || '').trim();
     if (!callbackUrl) return toastWarning(t('microsoft.callbackRequired'));
-    return microsoftStep('/auth/microsoft-sso/complete', { sessionId: ms.session, callbackUrl }, d => {
+    return microsoftStep('/auth/microsoft-sso/complete', withPendingApiKey({ sessionId: ms.session, callbackUrl }, ms.apiKeyId), d => {
       if (d.stage === 'profile') {
         ms.selectionId = d.selectionId;
         ms.profiles = d.profiles || [];
@@ -2695,7 +2945,7 @@
   function selectMicrosoftProfile() {
     const picked = document.querySelector('input[name="microsoftProfile"]:checked');
     if (!picked) return toastWarning(t('microsoft.profileRequired'));
-    return microsoftStep('/auth/microsoft-sso/select-profile', { selectionId: ms.selectionId, profileArn: picked.value }, () => {});
+    return microsoftStep('/auth/microsoft-sso/select-profile', withPendingApiKey({ selectionId: ms.selectionId, profileArn: picked.value }, ms.apiKeyId), () => {});
   }
   function modalSso(title, body) {
     title.textContent = t('modal.ssoTitle');
@@ -2820,12 +3070,13 @@
     const keys = $('kiroApiKeys').value.split('\n').map(s => s.trim()).filter(Boolean);
     if (!keys.length) return toastWarning(t('apikey.keyMissing'));
     const region = $('kiroApiKeyRegion').value.trim();
+    const apiKeyId = pendingApiKeyId;
     const btn = $('importApiKeyBtn');
     btn.disabled = true;
     let ok = 0;
     const newIds = [], errs = [];
     for (const key of keys) {
-      const payload = { kiroApiKey: key, authMethod: 'api_key', region: key.includes('|') ? '' : region };
+      const payload = withPendingApiKey({ kiroApiKey: key, authMethod: 'api_key', region: key.includes('|') ? '' : region }, apiKeyId);
       try {
         const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
         const d = await res.json();
@@ -2867,14 +3118,14 @@
       if (!clientData.clientId || !clientData.clientSecret) return toastWarning(t('local.clientSecretMissing'));
     }
     const authMethod = clientData ? 'idc' : 'social';
-    const payload = {
+    const payload = withPendingApiKey({
       refreshToken: tokenData.refreshToken,
       accessToken: tokenData.accessToken || '',
       clientId: clientData?.clientId || '',
       clientSecret: clientData?.clientSecret || '',
       region: tokenData.region || '',
       authMethod, provider
-    };
+    });
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
     const d = await res.json();
     if (d.success) {
@@ -2886,36 +3137,24 @@
   async function importCredentials() {
     try {
       const json = JSON.parse($('credJson').value.trim());
-      let items;
-      if (json.accounts && Array.isArray(json.accounts)) {
-        items = json.accounts.map(a => {
-          const c = a.credentials || {};
-          return {
-            refreshToken: c.refreshToken || a.refreshToken,
-            accessToken: c.accessToken || a.accessToken,
-            kiroApiKey: c.kiroApiKey || a.kiroApiKey,
-            clientId: c.clientId || a.clientId,
-            clientSecret: c.clientSecret || a.clientSecret,
-            region: c.region || a.region,
-            authMethod: c.authMethod || a.authMethod,
-            provider: c.provider || a.provider || a.idp,
-            userId: a.userId,
-            profileArn: a.profileArn,
-            tokenEndpoint: c.tokenEndpoint,
-            issuerUrl: c.issuerUrl,
-            scopes: c.scopes
-          };
+      const sourceItems = Array.isArray(json.accounts) ? json.accounts : Array.isArray(json) ? json : [json];
+      const items = sourceItems.map(source => {
+        const item = { ...source };
+        Object.entries(source.credentials || {}).forEach(([field, value]) => {
+          if (value !== undefined && value !== null && value !== '') item[field] = value;
         });
-      } else {
-        items = Array.isArray(json) ? json : [json];
-      }
+        if (!item.provider) item.provider = item.idp || '';
+        return item;
+      });
+      const selectedApiKeyId = pendingApiKeyId;
       let ok = 0, fail = 0, newIds = [];
       for (const item of items) {
+        const targetApiKeyId = selectedApiKeyId || item.apiKeyId || '';
         const method = String(item.authMethod || '').toLowerCase();
         const apiKey = item.kiroApiKey || ((method === 'api_key' || method === 'apikey' || String(item.accessToken || '').startsWith('ksk_')) && !item.refreshToken ? item.accessToken : '');
         if (apiKey) {
           try {
-            const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify({ kiroApiKey: apiKey, authMethod: 'api_key', region: item.region || '' }) });
+            const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(withPendingApiKey({ kiroApiKey: apiKey, authMethod: 'api_key', region: item.region || '' }, targetApiKeyId)) });
             const d = await res.json();
             if (d.success) { ok++; if (d.account?.id) newIds.push(d.account.id); }
             else fail++;
@@ -2925,12 +3164,12 @@
         if (!item.refreshToken) { fail++; continue; }
         //! Entra credentials go through untouched: the server owns alias detection and endpoint recovery.
         if (isMicrosoftCredential(item)) {
-          const payload = {
+          const payload = withPendingApiKey({
             refreshToken: item.refreshToken, accessToken: item.accessToken || '', clientId: item.clientId || '',
             authMethod: 'external_idp', provider: 'AzureAD', region: item.region || '',
             userId: item.userId || '', profileArn: item.profileArn || '',
             tokenEndpoint: item.tokenEndpoint || '', issuerUrl: item.issuerUrl || '', scopes: item.scopes || ''
-          };
+          }, targetApiKeyId);
           try {
             const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
             const d = await res.json();
@@ -2946,14 +3185,14 @@
         let provider = item.provider || '';
         if (!provider && authMethod === 'social') provider = 'Google';
         if (!provider && authMethod === 'idc') provider = 'BuilderId';
-        const payload = {
+        const payload = withPendingApiKey({
           refreshToken: item.refreshToken,
           accessToken: item.accessToken || '',
           clientId: item.clientId || '',
           clientSecret: item.clientSecret || '',
           authMethod, provider,
           region: item.region || 'us-east-1'
-        };
+        }, targetApiKeyId);
         try {
           const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
           const d = await res.json();
@@ -2980,7 +3219,7 @@
     const refreshToken = $('cookieRefreshToken').value.trim();
     if (!refreshToken) return toastWarning(t('cookie.refreshTokenMissing'));
     const provider = $('cookieProvider').value;
-    const payload = { refreshToken, accessToken: '', clientId: '', clientSecret: '', authMethod: 'social', provider };
+    const payload = withPendingApiKey({ refreshToken, accessToken: '', clientId: '', clientSecret: '', authMethod: 'social', provider });
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
     const d = await res.json();
     if (d.success) {
@@ -2993,7 +3232,8 @@
     const res = await api('/auth/sso-token', {
       method: 'POST', body: JSON.stringify({
         bearerToken: $('ssoToken').value,
-        region: $('ssoRegion').value
+        region: $('ssoRegion').value,
+        apiKeyId: pendingApiKeyId
       })
     });
     const d = await res.json();
@@ -3009,10 +3249,17 @@
   }
   async function startBuilderIdLogin() {
     const region = $('builderIdRegion').value || 'us-east-1';
-    const res = await api('/auth/builderid/start', { method: 'POST', body: JSON.stringify({ region }) });
+    const generation = accountModalGeneration;
+    builderIdApiKeyId = pendingApiKeyId;
+    const res = await api('/auth/builderid/start', { method: 'POST', body: JSON.stringify(withPendingApiKey({ region }, builderIdApiKeyId)) });
     const d = await res.json();
+    if (generation !== accountModalGeneration) return;
     if (d.sessionId) {
       builderIdSession = d.sessionId;
+      if (d.apiKeyId !== undefined) builderIdApiKeyId = String(d.apiKeyId || '');
+      $('pendingApiKeySelect').value = builderIdApiKeyId;
+      $('pendingApiKeySelect').disabled = true;
+      refreshApiKeyOwnershipSelects();
       $('builderIdUserCode').textContent = d.userCode;
       $('builderIdVerifyUrl').textContent = d.verificationUri;
       $('builderIdStep1').classList.add('hidden');
@@ -3028,8 +3275,12 @@
   }
   function pollBuilderIdAuth(interval) {
     builderIdPollTimer = setTimeout(async () => {
-      const res = await api('/auth/builderid/poll', { method: 'POST', body: JSON.stringify({ sessionId: builderIdSession }) });
+      const sessionId = builderIdSession;
+      if (!sessionId) return;
+      const generation = accountModalGeneration;
+      const res = await api('/auth/builderid/poll', { method: 'POST', body: JSON.stringify(withPendingApiKey({ sessionId }, builderIdApiKeyId)) });
       const d = await res.json();
+      if (sessionId !== builderIdSession || generation !== accountModalGeneration) return;
       if (d.completed) {
         closeModal(); loadAccounts(); loadStats();
         toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
@@ -3046,30 +3297,39 @@
   function cancelBuilderIdLogin() {
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
+    builderIdApiKeyId = '';
     showModal('add');
   }
   async function startIamSso() {
+    const generation = accountModalGeneration;
     if (iamSession) {
       const res = await api('/auth/iam-sso/complete', {
         method: 'POST', body: JSON.stringify({
-          sessionId: iamSession, callbackUrl: $('iamCallback').value
+          sessionId: iamSession, callbackUrl: $('iamCallback').value, apiKeyId: iamApiKeyId
         })
       });
       const d = await res.json();
+      if (generation !== accountModalGeneration) return;
       if (d.success) {
         closeModal(); loadAccounts(); loadStats();
         toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
         autoRefreshNewAccount(d.account?.id);
       } else toastError(t('common.failed') + ': ' + localizedError(d.error));
     } else {
+      iamApiKeyId = pendingApiKeyId;
       const res = await api('/auth/iam-sso/start', {
         method: 'POST', body: JSON.stringify({
-          startUrl: $('iamStartUrl').value, region: $('iamRegion').value
+          startUrl: $('iamStartUrl').value, region: $('iamRegion').value, apiKeyId: iamApiKeyId
         })
       });
       const d = await res.json();
+      if (generation !== accountModalGeneration) return;
       if (d.authorizeUrl) {
         iamSession = d.sessionId;
+        if (d.apiKeyId !== undefined) iamApiKeyId = String(d.apiKeyId || '');
+        $('pendingApiKeySelect').value = iamApiKeyId;
+        $('pendingApiKeySelect').disabled = true;
+        refreshApiKeyOwnershipSelects();
         $('iamAuthUrl').textContent = d.authorizeUrl;
         $('iamStep2').classList.remove('hidden');
         $('iamBtn').textContent = t('iam.complete');
@@ -3158,8 +3418,9 @@
       if (!data) throw new Error('no-data');
       const filtered = (data.accounts || []).map(a => {
         const { clientId, clientSecret, accessToken, refreshToken, authMethod, region } = a.credentials || {};
-        if (authMethod === 'api_key') return { kiroApiKey: accessToken, region, authMethod };
-        return { clientId, clientSecret, accessToken, refreshToken };
+        const apiKeyId = a.apiKeyId || a.credentials?.apiKeyId || '';
+        if (authMethod === 'api_key') return { kiroApiKey: accessToken, region, authMethod, apiKeyId };
+        return { ...(a.credentials || {}), clientId, clientSecret, accessToken, refreshToken, apiKeyId, userId: a.userId || '', profileArn: a.profileArn || '' };
       });
       return JSON.stringify(filtered, null, 2);
     });
@@ -3220,7 +3481,7 @@
       if (!currentVersion) await loadVersion();
       const current = currentVersion.replace(/^v/i, '');
       if (!current) throw new Error('Current version missing');
-      const res = await fetch('https://raw.githubusercontent.com/tanu360/kiro-reverse-api/main/version.json?t=' + Date.now());
+      const res = await fetch('https://raw.githubusercontent.com/66-DASHUN/Kiro-Go/main/version.json?t=' + Date.now());
       if (!res.ok) throw new Error('Fetch failed');
       const d = await res.json();
       const latest = (d.version || '').replace(/^v/i, '');
@@ -3370,7 +3631,7 @@
 
     $('exportBtn').addEventListener('click', showExportModal);
     $('refreshAllModelsBtn').addEventListener('click', refreshAllModels);
-    $('addAccountBtn').addEventListener('click', () => showModal('add'));
+    $('addAccountBtn').addEventListener('click', () => { pendingApiKeyId = ''; showModal('add'); });
 
     $('selectAllCheckbox').addEventListener('change', e => toggleSelectAll(e.target.checked));
     qsa('[data-batch]').forEach(b => b.addEventListener('click', () => {
@@ -3404,6 +3665,20 @@
   }
 
   function bindSettingsEvents() {
+    $('savePromptCacheBtn').addEventListener('click', savePromptCacheSettings);
+    $('promptCacheMode').addEventListener('change', () => syncCacheForm('promptCache', false));
+    $('promptCacheRatio').addEventListener('input', () => syncCacheForm('promptCache', false));
+    $('apiKeyCacheScope').addEventListener('change', () => {
+      apiKeyCacheDirty = true;
+      if ($('apiKeyCacheScope').value === 'inherit') setCacheForm('apiKeyCache', promptCacheSettings);
+      syncApiKeyCacheForm();
+    });
+    ['Enabled', 'Mode', 'Ratio', 'CreationRatio', 'ReadRatio'].forEach(field => {
+      $('apiKeyCache' + field).addEventListener(field.endsWith('Ratio') ? 'input' : 'change', () => {
+        apiKeyCacheDirty = true;
+        syncApiKeyCacheForm();
+      });
+    });
     $('requireApiKey').addEventListener('change', syncApiKeyManagementVisibility);
     $('saveApiSettingsBtn').addEventListener('click', saveApiSettings);
     $('refreshApiKeysBtn').addEventListener('click', loadApiKeys);
@@ -3613,6 +3888,9 @@
       if (g) { showModal(g.dataset.modalGoto); return; }
       if (e.target.dataset.closeAdd) closeModal();
     });
+    $('modalBody').addEventListener('change', e => {
+      if (e.target.id === 'pendingApiKeySelect' && !e.target.disabled) pendingApiKeyId = e.target.value;
+    });
   }
 
   function bindDetailEvents() {
@@ -3624,6 +3902,7 @@
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
       else if (a === 'saveWeight') saveWeight(id);
+      else if (a === 'saveApiKey') saveAccountApiKey(id);
       else if (a === 'refreshOverage') refreshOverage(id);
       else if (a === 'saveProxyURL') saveProxyURL(id);
       else if (a === 'loadModels') loadModels(id);
