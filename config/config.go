@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"kiro-proxy/db"
-	"kiro-proxy/logger"
 )
 
 func GenerateMachineId() string {
@@ -29,9 +29,11 @@ type Account struct {
 	Email    string `json:"email,omitempty"`
 	UserId   string `json:"userId,omitempty"`
 	Nickname string `json:"nickname,omitempty"`
+	ApiKeyID string `json:"apiKeyId,omitempty"`
 
-	AccessToken  string `json:"accessToken"`
-	RefreshToken string `json:"refreshToken"`
+	AccessToken             string `json:"accessToken"`
+	RefreshToken            string `json:"refreshToken"`
+	RefreshTokenFingerprint string `json:"refreshTokenFingerprint,omitempty"`
 	//! KiroApiKey (ksk_...) is a headless credential: used as the Bearer token directly, never OAuth-refreshed.
 	KiroApiKey   string `json:"kiroApiKey,omitempty"`
 	ClientID     string `json:"clientId,omitempty"`
@@ -53,12 +55,13 @@ type Account struct {
 
 	Weight int `json:"weight,omitempty"`
 
-	OverageStatus     string  `json:"overageStatus,omitempty"`
-	OverageCapability string  `json:"overageCapability,omitempty"`
-	OverageCap        float64 `json:"overageCap,omitempty"`
-	OverageRate       float64 `json:"overageRate,omitempty"`
-	CurrentOverages   float64 `json:"currentOverages,omitempty"`
-	OverageCheckedAt  int64   `json:"overageCheckedAt,omitempty"`
+	OverageStatus      string  `json:"overageStatus,omitempty"`
+	OverageCapability  string  `json:"overageCapability,omitempty"`
+	OverageCap         float64 `json:"overageCap,omitempty"`
+	OverageRate        float64 `json:"overageRate,omitempty"`
+	CurrentOverages    float64 `json:"currentOverages,omitempty"`
+	OverageCheckedAt   int64   `json:"overageCheckedAt,omitempty"`
+	LegacyAllowOverage bool    `json:"allowOverage,omitempty"`
 
 	Enabled      bool   `json:"enabled"`
 	Silent       bool   `json:"silent,omitempty"`
@@ -105,32 +108,87 @@ type ModelMappingRule struct {
 	Value string `json:"value"`
 }
 
+type AccountPatch struct {
+	ApiKeyID  *string
+	Nickname  *string
+	Enabled   *bool
+	MachineID *string
+	Weight    *int
+	ProxyURL  *string
+}
+
+type PromptCacheSettings struct {
+	Enabled       bool    `json:"promptCacheEmulationEnabled"`
+	Mode          string  `json:"promptCacheEmulationMode"`
+	Ratio         float64 `json:"promptCacheEmulationRatio"`
+	CreationRatio float64 `json:"promptCacheCreationEmulationRatio"`
+	ReadRatio     float64 `json:"promptCacheReadEmulationRatio"`
+}
+
+const (
+	PromptCacheModeUniform     = "uniform"
+	PromptCacheModeIndependent = "independent"
+	promptCacheModeUniform     = PromptCacheModeUniform
+	promptCacheModeIndependent = PromptCacheModeIndependent
+)
+
+func ValidatePromptCacheRatio(r float64) error {
+	if math.IsNaN(r) || math.IsInf(r, 0) || r < 0 || r > 1 {
+		return fmt.Errorf("prompt cache ratio must be finite and within [0,1], got %v", r)
+	}
+	return nil
+}
+func ValidatePromptCacheSettings(s PromptCacheSettings) error {
+	if s.Mode != promptCacheModeUniform && s.Mode != promptCacheModeIndependent {
+		return fmt.Errorf("prompt cache mode must be %q or %q, got %q", promptCacheModeUniform, promptCacheModeIndependent, s.Mode)
+	}
+	for n, v := range map[string]float64{"ratio": s.Ratio, "creation ratio": s.CreationRatio, "read ratio": s.ReadRatio} {
+		if err := ValidatePromptCacheRatio(v); err != nil {
+			return fmt.Errorf("invalid prompt cache %s: %w", n, err)
+		}
+	}
+	return nil
+}
+
 type ApiKeyEntry struct {
 	ID         string `json:"id"`
 	Name       string `json:"name,omitempty"`
 	Key        string `json:"key"`
 	Enabled    bool   `json:"enabled"`
+	Migrated   bool   `json:"migrated,omitempty"`
 	CreatedAt  int64  `json:"createdAt"`
 	LastUsedAt int64  `json:"lastUsedAt,omitempty"`
 
 	TokenLimit  int64   `json:"tokenLimit,omitempty"`
 	CreditLimit float64 `json:"creditLimit,omitempty"`
 
-	TokensUsed    int64   `json:"tokensUsed,omitempty"`
-	CreditsUsed   float64 `json:"creditsUsed,omitempty"`
-	RequestsCount int64   `json:"requestsCount,omitempty"`
+	TokensUsed                        int64    `json:"tokensUsed,omitempty"`
+	CreditsUsed                       float64  `json:"creditsUsed,omitempty"`
+	RequestsCount                     int64    `json:"requestsCount,omitempty"`
+	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled,omitempty"`
+	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode,omitempty"`
+	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio,omitempty"`
+	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio,omitempty"`
+	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio,omitempty"`
 }
 
 type Config struct {
-	Password      string        `json:"password"`
-	Port          int           `json:"port"`
-	Host          string        `json:"host"`
-	RequireApiKey bool          `json:"requireApiKey"`
-	ApiKeys       []ApiKeyEntry `json:"apiKeys,omitempty"`
-	KiroVersion   string        `json:"kiroVersion,omitempty"`
-	SystemVersion string        `json:"systemVersion,omitempty"`
-	NodeVersion   string        `json:"nodeVersion,omitempty"`
-	Accounts      []Account     `json:"accounts"`
+	Password                          string        `json:"password"`
+	Port                              int           `json:"port"`
+	Host                              string        `json:"host"`
+	RequireApiKey                     bool          `json:"requireApiKey"`
+	ApiKey                            string        `json:"apiKey,omitempty"`
+	ApiKeys                           []ApiKeyEntry `json:"apiKeys,omitempty"`
+	KiroVersion                       string        `json:"kiroVersion,omitempty"`
+	SystemVersion                     string        `json:"systemVersion,omitempty"`
+	NodeVersion                       string        `json:"nodeVersion,omitempty"`
+	Accounts                          []Account     `json:"accounts"`
+	ApiKeyAccountMigrationCompleted   bool          `json:"apiKeyAccountMigrationCompleted,omitempty"`
+	PromptCacheEmulationEnabled       bool          `json:"promptCacheEmulationEnabled"`
+	PromptCacheEmulationMode          string        `json:"promptCacheEmulationMode"`
+	PromptCacheEmulationRatio         float64       `json:"promptCacheEmulationRatio"`
+	PromptCacheCreationEmulationRatio float64       `json:"promptCacheCreationEmulationRatio"`
+	PromptCacheReadEmulationRatio     float64       `json:"promptCacheReadEmulationRatio"`
 
 	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`
 	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"`
@@ -150,7 +208,8 @@ type Config struct {
 
 	ProxyURL string `json:"proxyURL,omitempty"`
 
-	FilterClaudeCode bool `json:"filterClaudeCode,omitempty"`
+	FilterClaudeCode         bool `json:"filterClaudeCode,omitempty"`
+	SanitizeClaudeCodePrompt bool `json:"sanitizeClaudeCodePrompt,omitempty"`
 
 	FilterEnvNoise bool `json:"filterEnvNoise,omitempty"`
 
@@ -158,7 +217,7 @@ type Config struct {
 
 	PromptFilterRules []PromptFilterRule `json:"promptFilterRules,omitempty"`
 
-	ModelMappings []ModelMappingRule `json:"modelMappings,omitempty"`
+	ModelMappings []ModelMappingRule `json:"modelMappings"`
 
 	LogLevel string `json:"logLevel,omitempty"`
 
@@ -218,12 +277,26 @@ func Init(path string) error {
 	if err := db.Init(dir); err != nil {
 		return fmt.Errorf("db init: %w", err)
 	}
+	legacyPath := os.Getenv("CONFIG_PATH")
+	if legacyPath == "" {
+		if strings.EqualFold(filepath.Ext(path), ".json") {
+			legacyPath = path
+		} else {
+			legacyPath = filepath.Join(dir, "config.json")
+		}
+	}
+	if err := ImportLegacyJSON(legacyPath); err != nil {
+		return err
+	}
 	if err := Load(); err != nil {
 		return err
 	}
 
 	if err := LoadCredentials(); err != nil {
 		return fmt.Errorf("load credentials: %w", err)
+	}
+	if err := migrateLoadedAccountOwnership(); err != nil {
+		return err
 	}
 
 	return nil
@@ -247,18 +320,20 @@ func Load() error {
 			}
 		}
 		cfg = &Config{
-			Password:                password,
-			FirstRunPasswordPending: generated,
-			Port:                    8080,
-			Host:                    "0.0.0.0",
-			RequireApiKey:           false,
-			Accounts:                []Account{},
+			Password:                          password,
+			FirstRunPasswordPending:           generated,
+			Port:                              8080,
+			Host:                              "0.0.0.0",
+			RequireApiKey:                     false,
+			Accounts:                          []Account{},
+			PromptCacheEmulationEnabled:       true,
+			PromptCacheEmulationMode:          promptCacheModeUniform,
+			PromptCacheEmulationRatio:         1,
+			PromptCacheCreationEmulationRatio: 1,
+			PromptCacheReadEmulationRatio:     1,
 		}
 		if err := saveLocked(); err != nil {
 			return err
-		}
-		if generated {
-			logger.Infof("Generated first-run admin password: %s", password)
 		}
 		return nil
 	}
@@ -267,13 +342,22 @@ func Load() error {
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {
 		return err
 	}
-	cfg = &c
-	shortened, err := shortenPendingAdminPasswordLocked()
-	if err != nil {
+	before, _ := json.Marshal(&c)
+	if err := normalizeCompatibleConfig(&c, []byte(raw)); err != nil {
 		return err
 	}
-	if shortened {
-		logger.Infof("Generated first-run admin password: %s", cfg.Password)
+	after, _ := json.Marshal(&c)
+	previous := cfg
+	cfg = &c
+	if string(before) != string(after) {
+		if err := saveLocked(); err != nil {
+			cfg = previous
+			return err
+		}
+	}
+	_, err = shortenPendingAdminPasswordLocked()
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -311,7 +395,18 @@ func Get() *Config {
 		copyCfg.Accounts = append([]Account(nil), cfg.Accounts...)
 	}
 	if cfg.ApiKeys != nil {
-		copyCfg.ApiKeys = append([]ApiKeyEntry(nil), cfg.ApiKeys...)
+		copyCfg.ApiKeys = make([]ApiKeyEntry, len(cfg.ApiKeys))
+		for i := range cfg.ApiKeys {
+			copyCfg.ApiKeys[i] = cloneApiKeyEntry(cfg.ApiKeys[i])
+		}
+	}
+	if cfg.EndpointFallback != nil {
+		value := *cfg.EndpointFallback
+		copyCfg.EndpointFallback = &value
+	}
+	if cfg.SessionAffinity != nil {
+		value := *cfg.SessionAffinity
+		copyCfg.SessionAffinity = &value
 	}
 	if cfg.PromptFilterRules != nil {
 		copyCfg.PromptFilterRules = append([]PromptFilterRule(nil), cfg.PromptFilterRules...)
@@ -375,43 +470,16 @@ func GetEnabledAccounts() []Account {
 	return accounts
 }
 
-func AddAccount(account Account) error {
-	if IsAPIKeyAccount(&account) {
-		if err := NormalizeAPIKeyAccount(&account); err != nil {
-			return err
-		}
-	}
-
-	if CredentialsLoaded() {
-		return AddCredential(account)
-	}
-
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	//! Checked under the write lock so two concurrent imports of one key cannot both land.
-	if hasKiroAPIKey(cfg.Accounts, account.KiroApiKey) {
-		return ErrDuplicateKiroAPIKey
-	}
-	cfg.Accounts = append(cfg.Accounts, account)
-	return Save()
-}
+func AddAccount(account Account) error { return addAccount(account, false) }
 
 func UpdateAccount(id string, account Account) error {
-
-	if CredentialsLoaded() {
-		return UpdateCredential(account)
-	}
-
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	for i, a := range cfg.Accounts {
-		if a.ID == id {
-			preserveAccountCredentials(&account, a)
-			cfg.Accounts[i] = account
-			return Save()
-		}
-	}
-	return fmt.Errorf("account not found: %s", id)
+	_, err := mutateAccount(id, false, func(current *Account) error {
+		preserveAccountCredentials(&account, *current)
+		account.ID = current.ID
+		*current = account
+		return nil
+	})
+	return err
 }
 
 // AuthMethodExternalIdp marks a Microsoft Enterprise SSO account.
@@ -425,6 +493,11 @@ func IsExternalIdpAccount(account *Account) bool {
 func preserveAccountCredentials(account *Account, current Account) {
 	account.AccessToken = current.AccessToken
 	account.RefreshToken = current.RefreshToken
+	account.RefreshTokenFingerprint = current.RefreshTokenFingerprint
+	if account.RefreshTokenFingerprint == "" {
+		account.RefreshTokenFingerprint = RefreshTokenFingerprint(current.RefreshToken)
+	}
+	account.ApiKeyID = current.ApiKeyID
 	account.KiroApiKey = current.KiroApiKey
 	account.ClientID = current.ClientID
 	account.ClientSecret = current.ClientSecret
@@ -440,150 +513,56 @@ func preserveAccountCredentials(account *Account, current Account) {
 }
 
 func UpdateAccountOverageStatus(id, status, capability string, cap, rate, current float64, checkedAt int64) error {
-
-	if CredentialsLoaded() {
-		return UpdateCredentialOverageStatus(id, status, capability, cap, rate, current, checkedAt)
-	}
-
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	for i, a := range cfg.Accounts {
-		if a.ID == id {
-			if status != "" {
-				cfg.Accounts[i].OverageStatus = status
-			}
-			if capability != "" {
-				cfg.Accounts[i].OverageCapability = capability
-			}
-			cfg.Accounts[i].OverageCap = cap
-			cfg.Accounts[i].OverageRate = rate
-			cfg.Accounts[i].CurrentOverages = current
-			if checkedAt > 0 {
-				cfg.Accounts[i].OverageCheckedAt = checkedAt
-			}
-			return Save()
+	_, err := mutateAccount(id, false, func(account *Account) error {
+		if status != "" {
+			account.OverageStatus = status
 		}
-	}
-	return nil
+		if capability != "" {
+			account.OverageCapability = capability
+		}
+		account.OverageCap = cap
+		account.OverageRate = rate
+		account.CurrentOverages = current
+		if checkedAt > 0 {
+			account.OverageCheckedAt = checkedAt
+		}
+		return nil
+	})
+	return err
 }
-
 func DisableAccountOverage(id string) error {
 	return UpdateAccountOverageStatus(id, "DISABLED", "", 0, 0, 0, time.Now().Unix())
 }
-
 func SetAccountEnabled(id string, enabled bool) error {
-	if CredentialsLoaded() {
-		acc := GetCredentialByID(id)
-		if acc == nil {
-			return nil
-		}
-		acc.Enabled = enabled
+	_, err := mutateAccount(id, false, func(account *Account) error {
+		account.Enabled = enabled
 		if !enabled {
-			acc.BanStatus = "DISABLED"
-			acc.BanTime = time.Now().Unix()
+			account.BanStatus = "DISABLED"
+			account.BanTime = time.Now().Unix()
 		}
-		return UpdateCredential(*acc)
-	}
-
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	for i := range cfg.Accounts {
-		if cfg.Accounts[i].ID == id {
-			cfg.Accounts[i].Enabled = enabled
-			if !enabled {
-				cfg.Accounts[i].BanStatus = "DISABLED"
-				cfg.Accounts[i].BanTime = time.Now().Unix()
-			}
-			return Save()
-		}
-	}
-	return nil
+		return nil
+	})
+	return err
 }
-
 func SetAccountBanStatus(id, status, reason string) error {
-	if CredentialsLoaded() {
-		acc := GetCredentialByID(id)
-		if acc == nil {
-			return nil
-		}
-		acc.BanStatus = status
-		acc.BanReason = reason
-		acc.BanTime = time.Now().Unix()
+	_, err := mutateAccount(id, false, func(account *Account) error {
+		account.BanStatus = status
+		account.BanReason = reason
+		account.BanTime = time.Now().Unix()
 		if status == "BANNED" || status == "DISABLED" {
-			acc.Enabled = false
+			account.Enabled = false
 		}
-		return UpdateCredential(*acc)
-	}
-
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	for i := range cfg.Accounts {
-		if cfg.Accounts[i].ID == id {
-			cfg.Accounts[i].BanStatus = status
-			cfg.Accounts[i].BanReason = reason
-			cfg.Accounts[i].BanTime = time.Now().Unix()
-			if status == "BANNED" || status == "DISABLED" {
-				cfg.Accounts[i].Enabled = false
-			}
-			return Save()
-		}
-	}
-	return nil
+		return nil
+	})
+	return err
 }
-
 func UpdateAccountProfileArn(id, profileArn string) error {
-
-	if CredentialsLoaded() {
-		return UpdateCredentialProfileArn(id, profileArn)
-	}
-
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	for i, a := range cfg.Accounts {
-		if a.ID == id {
-			cfg.Accounts[i].ProfileArn = profileArn
-			return Save()
-		}
-	}
-	return fmt.Errorf("account not found: %s", id)
+	_, err := mutateAccount(id, false, func(account *Account) error { account.ProfileArn = profileArn; return nil })
+	return err
 }
-
-func DeleteAccount(id string) error {
-
-	if CredentialsLoaded() {
-		return RemoveCredential(id)
-	}
-
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	for i, a := range cfg.Accounts {
-		if a.ID == id {
-			cfg.Accounts = append(cfg.Accounts[:i], cfg.Accounts[i+1:]...)
-			return Save()
-		}
-	}
-	return nil
-}
-
+func DeleteAccount(id string) error { return deleteAccount(id, false) }
 func UpdateAccountToken(id, accessToken, refreshToken string, expiresAt int64) error {
-
-	if CredentialsLoaded() {
-		return UpdateCredentialToken(id, accessToken, refreshToken, expiresAt)
-	}
-
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	for i, a := range cfg.Accounts {
-		if a.ID == id {
-			cfg.Accounts[i].AccessToken = accessToken
-			if refreshToken != "" {
-				cfg.Accounts[i].RefreshToken = refreshToken
-			}
-			cfg.Accounts[i].ExpiresAt = expiresAt
-			return Save()
-		}
-	}
-	return fmt.Errorf("account not found: %s", id)
+	return UpdateAccountCredentialState(id, accessToken, refreshToken, expiresAt, "")
 }
 
 func IsApiKeyRequired() bool {

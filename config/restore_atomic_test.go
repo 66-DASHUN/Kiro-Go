@@ -9,7 +9,7 @@ import (
 
 func TestRestoreAndConcurrentUsageSaveKeepRestoredConfig(t *testing.T) {
 	t.Setenv("ADMIN_PASSWORD", "")
-	if err := Init(t.TempDir() + "/kiro.db"); err != nil {
+	if err := Init(configTempDir(t) + "/kiro.db"); err != nil {
 		t.Fatal(err)
 	}
 	cfgLock.Lock()
@@ -68,7 +68,7 @@ func TestRestoreAndConcurrentUsageSaveKeepRestoredConfig(t *testing.T) {
 	}
 }
 func TestRestoreTransactionRollback(t *testing.T) {
-	if err := Init(t.TempDir() + "/kiro.db"); err != nil {
+	if err := Init(configTempDir(t) + "/kiro.db"); err != nil {
 		t.Fatal(err)
 	}
 	old := GetPassword()
@@ -97,7 +97,7 @@ func TestRestoreTransactionRollback(t *testing.T) {
 	}
 }
 func TestRestoreCredentialModes(t *testing.T) {
-	if err := Init(t.TempDir() + "/kiro.db"); err != nil {
+	if err := Init(configTempDir(t) + "/kiro.db"); err != nil {
 		t.Fatal(err)
 	}
 	for _, loaded := range []bool{true, false, true} {

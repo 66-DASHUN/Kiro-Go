@@ -117,19 +117,18 @@ func saveCredentialsLocked() error {
 }
 
 func UpdateCredentialToken(id, accessToken, refreshToken string, expiresAt int64) error {
-	credLock.Lock()
-	defer credLock.Unlock()
-	for i := range credentials {
-		if credentials[i].ID == id {
-			credentials[i].AccessToken = accessToken
-			if refreshToken != "" {
-				credentials[i].RefreshToken = refreshToken
-			}
-			credentials[i].ExpiresAt = expiresAt
-			return saveCredentialsLocked()
+	_, err := mutateAccount(id, true, func(account *Account) error {
+		if account.RefreshTokenFingerprint == "" {
+			account.RefreshTokenFingerprint = RefreshTokenFingerprint(account.RefreshToken)
 		}
-	}
-	return fmt.Errorf("credential not found: %s", id)
+		account.AccessToken = accessToken
+		if refreshToken != "" {
+			account.RefreshToken = refreshToken
+		}
+		account.ExpiresAt = expiresAt
+		return nil
+	})
+	return err
 }
 
 func UpdateCredentialInfo(id string, info AccountInfo) error {
@@ -173,15 +172,8 @@ func UpdateCredentialStats(id string, requestCount, errorCount, totalTokens int,
 }
 
 func UpdateCredentialProfileArn(id, profileArn string) error {
-	credLock.Lock()
-	defer credLock.Unlock()
-	for i := range credentials {
-		if credentials[i].ID == id {
-			credentials[i].ProfileArn = profileArn
-			return saveCredentialsLocked()
-		}
-	}
-	return fmt.Errorf("credential not found: %s", id)
+	_, err := mutateAccount(id, true, func(account *Account) error { account.ProfileArn = profileArn; return nil })
+	return err
 }
 
 func UpdateCredentialOverageStatus(id, status, capability string, cap, rate, current float64, checkedAt int64) error {
@@ -207,43 +199,17 @@ func UpdateCredentialOverageStatus(id, status, capability string, cap, rate, cur
 	return fmt.Errorf("credential not found: %s", id)
 }
 
-func AddCredential(acc Account) error {
-	credLock.Lock()
-	defer credLock.Unlock()
-	if hasKiroAPIKey(credentials, acc.KiroApiKey) {
-		return ErrDuplicateKiroAPIKey
-	}
-	credentials = append(credentials, acc)
-	credLoaded = true
-	if err := setSetting(credentialsLoadedKey, "1"); err != nil {
-		return err
-	}
-	return saveCredentialsLocked()
-}
+func AddCredential(acc Account) error { return addAccount(acc, true) }
 
-func RemoveCredential(id string) error {
-	credLock.Lock()
-	defer credLock.Unlock()
-	for i := range credentials {
-		if credentials[i].ID == id {
-			credentials = append(credentials[:i], credentials[i+1:]...)
-			return saveCredentialsLocked()
-		}
-	}
-	return fmt.Errorf("credential not found: %s", id)
-}
+func RemoveCredential(id string) error { return deleteAccount(id, true) }
 
 func UpdateCredential(acc Account) error {
-	credLock.Lock()
-	defer credLock.Unlock()
-	for i := range credentials {
-		if credentials[i].ID == acc.ID {
-			preserveAccountCredentials(&acc, credentials[i])
-			credentials[i] = acc
-			return saveCredentialsLocked()
-		}
-	}
-	return fmt.Errorf("credential not found: %s", acc.ID)
+	_, err := mutateAccount(acc.ID, true, func(current *Account) error {
+		preserveAccountCredentials(&acc, *current)
+		*current = acc
+		return nil
+	})
+	return err
 }
 
 func CredentialsLoaded() bool {

@@ -12,7 +12,7 @@ func TestStatusUpdatePreservesRotatedCredentialsInBothStores(t *testing.T) {
 			name = "credentials"
 		}
 		t.Run(name, func(t *testing.T) {
-			if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+			if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 				t.Fatal(err)
 			}
 			stale := Account{ID: "one", AccessToken: "old", RefreshToken: "old-refresh"}

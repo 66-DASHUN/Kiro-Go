@@ -8,6 +8,7 @@ import (
 	"time"
 )
 
+// ListApiKeys returns a snapshot of all configured API key entries.
 func ListApiKeys() []ApiKeyEntry {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
@@ -15,10 +16,13 @@ func ListApiKeys() []ApiKeyEntry {
 		return nil
 	}
 	out := make([]ApiKeyEntry, len(cfg.ApiKeys))
-	copy(out, cfg.ApiKeys)
+	for i := range cfg.ApiKeys {
+		out[i] = cloneApiKeyEntry(cfg.ApiKeys[i])
+	}
 	return out
 }
 
+// GetApiKeyEntry returns a copy of the entry with the given ID, or nil if not found.
 func GetApiKeyEntry(id string) *ApiKeyEntry {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
@@ -27,28 +31,39 @@ func GetApiKeyEntry(id string) *ApiKeyEntry {
 	}
 	for i := range cfg.ApiKeys {
 		if cfg.ApiKeys[i].ID == id {
-			cp := cfg.ApiKeys[i]
+			cp := cloneApiKeyEntry(cfg.ApiKeys[i])
 			return &cp
 		}
 	}
 	return nil
 }
 
+// AddApiKey appends a new API key entry. Generates ID and CreatedAt if missing,
+// rejects empty Key values, and refuses duplicates of an existing Key.
 func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	AutoSnapshotBeforeSave()
+	credLock.Lock()
+	defer credLock.Unlock()
 	if cfg == nil {
 		return ApiKeyEntry{}, errors.New("config not initialized")
 	}
-	entry.Name = strings.TrimSpace(entry.Name)
 	entry.Key = strings.TrimSpace(entry.Key)
 	if entry.Key == "" {
 		return ApiKeyEntry{}, errors.New("api key value must not be empty")
 	}
+	if err := validateApiKeyPromptCacheOverrides(entry); err != nil {
+		return ApiKeyEntry{}, err
+	}
 	if err := validateApiKeyLimits(entry.TokenLimit, entry.CreditLimit); err != nil {
 		return ApiKeyEntry{}, err
 	}
+	entry = cloneApiKeyEntry(entry)
 	for _, existing := range cfg.ApiKeys {
+		if entry.ID != "" && existing.ID == entry.ID {
+			return ApiKeyEntry{}, errors.New("api key ID already exists")
+		}
 		if existing.Key == entry.Key {
 			return ApiKeyEntry{}, errors.New("api key already exists")
 		}
@@ -59,17 +74,68 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	if entry.CreatedAt == 0 {
 		entry.CreatedAt = time.Now().Unix()
 	}
+	previousMarker := cfg.ApiKeyAccountMigrationCompleted
+	previousCredentials := append([]Account(nil), credentials...)
+	var previousAccounts []Account
+	if !previousMarker {
+		// The first enabled API key may be added after an old config was loaded
+		// without any usable key. Keep a copy so a failed save can roll back the
+		// one-time account migration together with the API-key append.
+		previousAccounts = append([]Account(nil), cfg.Accounts...)
+	}
 	cfg.ApiKeys = append(cfg.ApiKeys, entry)
-	if err := Save(); err != nil {
+	migrateUnboundAccountsLocked()
+	if err := saveConfigAndCredentialsLocked(); err != nil {
+		// Roll back the in-memory append so we don't leave inconsistent state.
 		cfg.ApiKeys = cfg.ApiKeys[:len(cfg.ApiKeys)-1]
+		if !previousMarker {
+			cfg.ApiKeyAccountMigrationCompleted = previousMarker
+			cfg.Accounts = previousAccounts
+			credentials = previousCredentials
+		}
 		return ApiKeyEntry{}, err
 	}
-	return entry, nil
+	return cloneApiKeyEntry(entry), nil
 }
 
+// UpdateApiKey applies a patch to an existing API key. Patch semantics:
+//   - Name, Key are overwritten when non-empty in patch.
+//   - Enabled, TokenLimit, CreditLimit are always overwritten (zero values are valid).
+//   - Counters (TokensUsed/CreditsUsed/RequestsCount) are not touched here; use
+//     RecordApiKeyUsage or ResetApiKeyUsage instead.
+//   - Migrated stays as-is once true; only flips when explicitly set in patch.
 func UpdateApiKey(id string, patch ApiKeyEntry) error {
+	return updateApiKey(id, func(idx int, candidate *ApiKeyEntry) error {
+		return applyApiKeyPatchLocked(idx, patch, candidate)
+	}, true)
+}
+
+// UpdateApiKeyAndClearPromptCacheOverrides applies an API-key patch and removes
+// all per-key prompt-cache overrides in one locked transaction. The combined
+// operation performs a single persistence write, so a save failure cannot leave
+// ordinary fields updated while cache settings remain partially changed.
+func UpdateApiKeyAndClearPromptCacheOverrides(id string, patch ApiKeyEntry) error {
+	return updateApiKey(id, func(idx int, candidate *ApiKeyEntry) error {
+		if err := applyApiKeyPatchLocked(idx, patch, candidate); err != nil {
+			return err
+		}
+		clearPromptCacheOverrides(candidate)
+		return nil
+	}, true)
+}
+
+// updateApiKey applies mutate and persists the resulting entry atomically. The
+// caller-provided mutation runs while cfgLock is held and must only modify the
+// candidate; the original entry is restored if migration or persistence fails.
+// runMigration preserves the historical behavior of ordinary updates while
+// allowing a clear-only operation to remain side-effect free for legacy
+// account ownership migration.
+func updateApiKey(id string, mutate func(idx int, candidate *ApiKeyEntry) error, runMigration bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	AutoSnapshotBeforeSave()
+	credLock.Lock()
+	defer credLock.Unlock()
 	if cfg == nil {
 		return errors.New("config not initialized")
 	}
@@ -83,31 +149,205 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	if idx < 0 {
 		return errors.New("api key not found")
 	}
-	if err := validateApiKeyLimits(patch.TokenLimit, patch.CreditLimit); err != nil {
+	original := cloneApiKeyEntry(cfg.ApiKeys[idx])
+	candidate := cloneApiKeyEntry(original)
+	if err := mutate(idx, &candidate); err != nil {
 		return err
 	}
-	name := strings.TrimSpace(patch.Name)
-	newKey := ""
+	if err := validateApiKeyPromptCacheOverrides(candidate); err != nil {
+		return err
+	}
+	if err := validateApiKeyLimits(candidate.TokenLimit, candidate.CreditLimit); err != nil {
+		return err
+	}
+	previousMarker := cfg.ApiKeyAccountMigrationCompleted
+	previousCredentials := append([]Account(nil), credentials...)
+	var previousAccounts []Account
+	migrationAttempted := false
+	cfg.ApiKeys[idx] = candidate
+	if runMigration && !previousMarker && candidate.Enabled && strings.TrimSpace(candidate.ID) != "" && strings.TrimSpace(candidate.Key) != "" {
+		previousAccounts = append([]Account(nil), cfg.Accounts...)
+		migrationAttempted = migrateUnboundAccountsLocked()
+	}
+	if err := saveConfigAndCredentialsLocked(); err != nil {
+		cfg.ApiKeys[idx] = original
+		if migrationAttempted {
+			cfg.Accounts = previousAccounts
+			cfg.ApiKeyAccountMigrationCompleted = previousMarker
+			credentials = previousCredentials
+		}
+		return err
+	}
+	return nil
+}
+
+// ClearPromptCacheOverrides removes all per-key prompt-cache overrides so the
+// entry inherits the current global policy.
+func ClearPromptCacheOverrides(id string) error {
+	return updateApiKey(id, func(_ int, candidate *ApiKeyEntry) error {
+		clearPromptCacheOverrides(candidate)
+		return nil
+	}, false)
+}
+
+func applyApiKeyPatchLocked(idx int, patch ApiKeyEntry, candidate *ApiKeyEntry) error {
+	if patch.Name != "" {
+		candidate.Name = patch.Name
+	}
 	if patch.Key != "" {
-		newKey = strings.TrimSpace(patch.Key)
+		newKey := strings.TrimSpace(patch.Key)
 		if newKey == "" {
 			return errors.New("api key value must not be empty")
 		}
+		// Reject duplicates against any other entry.
 		for j := range cfg.ApiKeys {
 			if j != idx && cfg.ApiKeys[j].Key == newKey {
 				return errors.New("api key value collides with existing entry")
 			}
 		}
+		candidate.Key = newKey
 	}
+	candidate.Enabled = patch.Enabled
+	candidate.TokenLimit = patch.TokenLimit
+	candidate.CreditLimit = patch.CreditLimit
+	if patch.PromptCacheEmulationEnabled != nil {
+		value := *patch.PromptCacheEmulationEnabled
+		candidate.PromptCacheEmulationEnabled = &value
+	}
+	if patch.PromptCacheEmulationMode != nil {
+		value := *patch.PromptCacheEmulationMode
+		candidate.PromptCacheEmulationMode = &value
+	}
+	if patch.PromptCacheEmulationRatio != nil {
+		value := *patch.PromptCacheEmulationRatio
+		candidate.PromptCacheEmulationRatio = &value
+	}
+	if patch.PromptCacheCreationEmulationRatio != nil {
+		value := *patch.PromptCacheCreationEmulationRatio
+		candidate.PromptCacheCreationEmulationRatio = &value
+	}
+	if patch.PromptCacheReadEmulationRatio != nil {
+		value := *patch.PromptCacheReadEmulationRatio
+		candidate.PromptCacheReadEmulationRatio = &value
+	}
+	if patch.Migrated {
+		candidate.Migrated = true
+	}
+	return nil
+}
 
-	cfg.ApiKeys[idx].Name = name
-	if newKey != "" {
-		cfg.ApiKeys[idx].Key = newKey
+func clearPromptCacheOverrides(entry *ApiKeyEntry) {
+	entry.PromptCacheEmulationEnabled = nil
+	entry.PromptCacheEmulationMode = nil
+	entry.PromptCacheEmulationRatio = nil
+	entry.PromptCacheCreationEmulationRatio = nil
+	entry.PromptCacheReadEmulationRatio = nil
+}
+
+func cloneApiKeyEntry(entry ApiKeyEntry) ApiKeyEntry {
+	if entry.PromptCacheEmulationEnabled != nil {
+		value := *entry.PromptCacheEmulationEnabled
+		entry.PromptCacheEmulationEnabled = &value
 	}
-	cfg.ApiKeys[idx].Enabled = patch.Enabled
-	cfg.ApiKeys[idx].TokenLimit = patch.TokenLimit
-	cfg.ApiKeys[idx].CreditLimit = patch.CreditLimit
-	return Save()
+	if entry.PromptCacheEmulationMode != nil {
+		value := *entry.PromptCacheEmulationMode
+		entry.PromptCacheEmulationMode = &value
+	}
+	if entry.PromptCacheEmulationRatio != nil {
+		value := *entry.PromptCacheEmulationRatio
+		entry.PromptCacheEmulationRatio = &value
+	}
+	if entry.PromptCacheCreationEmulationRatio != nil {
+		value := *entry.PromptCacheCreationEmulationRatio
+		entry.PromptCacheCreationEmulationRatio = &value
+	}
+	if entry.PromptCacheReadEmulationRatio != nil {
+		value := *entry.PromptCacheReadEmulationRatio
+		entry.PromptCacheReadEmulationRatio = &value
+	}
+	return entry
+}
+
+func validateApiKeyPromptCacheOverrides(entry ApiKeyEntry) error {
+	if entry.PromptCacheEmulationMode != nil && *entry.PromptCacheEmulationMode != promptCacheModeUniform && *entry.PromptCacheEmulationMode != promptCacheModeIndependent {
+		return errors.New("prompt cache mode must be uniform or independent")
+	}
+	for name, value := range map[string]*float64{
+		"ratio":          entry.PromptCacheEmulationRatio,
+		"creation ratio": entry.PromptCacheCreationEmulationRatio,
+		"read ratio":     entry.PromptCacheReadEmulationRatio,
+	} {
+		if value != nil {
+			if err := ValidatePromptCacheRatio(*value); err != nil {
+				return errors.New("invalid prompt cache " + name + ": " + err.Error())
+			}
+		}
+	}
+	return nil
+}
+
+// DeleteApiKey removes the API key entry with the given ID. Returns nil even if
+// the ID is unknown (idempotent), matching the existing DeleteAccount style.
+func DeleteApiKey(id string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	AutoSnapshotBeforeSave()
+	credLock.RLock()
+	defer credLock.RUnlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	for _, account := range cfg.Accounts {
+		if strings.TrimSpace(account.ApiKeyID) == id {
+			return ErrApiKeyInUse
+		}
+	}
+	if credLoaded {
+		for _, account := range credentials {
+			if strings.TrimSpace(account.ApiKeyID) == id {
+				return ErrApiKeyInUse
+			}
+		}
+	}
+	for i, e := range cfg.ApiKeys {
+		if e.ID == id {
+			previous := append([]ApiKeyEntry(nil), cfg.ApiKeys...)
+			cfg.ApiKeys = append(cfg.ApiKeys[:i], cfg.ApiKeys[i+1:]...)
+			if err := saveLocked(); err != nil {
+				cfg.ApiKeys = previous
+				return err
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
+// FindApiKeyByValue returns a copy of the entry whose Key matches the given value,
+// or nil if no match. O(n) linear scan.
+func FindApiKeyByValue(key string) *ApiKeyEntry {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || key == "" {
+		return nil
+	}
+	for i := range cfg.ApiKeys {
+		if cfg.ApiKeys[i].Key == key {
+			cp := cloneApiKeyEntry(cfg.ApiKeys[i])
+			return &cp
+		}
+	}
+	return nil
+}
+
+// HasApiKeys returns true when at least one API key entry is configured.
+func HasApiKeys() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return false
+	}
+	return len(cfg.ApiKeys) > 0
 }
 
 func validateApiKeyLimits(tokenLimit int64, creditLimit float64) error {
@@ -118,42 +358,6 @@ func validateApiKeyLimits(tokenLimit int64, creditLimit float64) error {
 		return errors.New("credit limit must be zero or positive")
 	}
 	return nil
-}
-
-func DeleteApiKey(id string) error {
-	cfgLock.Lock()
-	defer cfgLock.Unlock()
-	if cfg == nil {
-		return errors.New("config not initialized")
-	}
-	for i, entry := range cfg.ApiKeys {
-		if entry.ID == id {
-			cfg.ApiKeys = append(cfg.ApiKeys[:i], cfg.ApiKeys[i+1:]...)
-			return Save()
-		}
-	}
-	return nil
-}
-
-func FindApiKeyByValue(key string) *ApiKeyEntry {
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	if cfg == nil || key == "" {
-		return nil
-	}
-	for i := range cfg.ApiKeys {
-		if cfg.ApiKeys[i].Key == key {
-			cp := cfg.ApiKeys[i]
-			return &cp
-		}
-	}
-	return nil
-}
-
-func HasApiKeys() bool {
-	cfgLock.RLock()
-	defer cfgLock.RUnlock()
-	return cfg != nil && len(cfg.ApiKeys) > 0
 }
 
 func RecordApiKeyUsage(id string, tokens int64, credits float64) error {

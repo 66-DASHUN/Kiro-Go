@@ -6,7 +6,7 @@ import (
 )
 
 func TestApiKeyCRUDAndUsage(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 
@@ -52,7 +52,7 @@ func TestApiKeyCRUDAndUsage(t *testing.T) {
 }
 
 func TestApiKeyValidationRejectsNegativeLimits(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 
@@ -81,7 +81,7 @@ func TestApiKeyValidationRejectsNegativeLimits(t *testing.T) {
 }
 
 func TestApiKeyUpdateRejectsBlankKeyValue(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	created, err := AddApiKey(ApiKeyEntry{Name: "valid", Key: "sk-valid", Enabled: true})
@@ -100,7 +100,7 @@ func TestApiKeyUpdateRejectsBlankKeyValue(t *testing.T) {
 }
 
 func TestApiKeyUsageReservationGuardsTokenLimit(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	created, err := AddApiKey(ApiKeyEntry{Name: "limited", Key: "sk-limited", Enabled: true, TokenLimit: 10})
@@ -131,7 +131,7 @@ func TestApiKeyUsageReservationGuardsTokenLimit(t *testing.T) {
 }
 
 func TestApiKeyRequestReservationChecksCreditLimitWithoutBlockingConcurrentRequests(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	created, err := AddApiKey(ApiKeyEntry{Name: "credit", Key: "sk-credit", Enabled: true, CreditLimit: 2})

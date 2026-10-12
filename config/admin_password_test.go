@@ -10,20 +10,20 @@ import (
 	"kiro-proxy/logger"
 )
 
-func TestFreshAdminPasswordIsRandomPersistedAndPrintedOnce(t *testing.T) {
+func TestFreshAdminPasswordIsRandomPersistedAndNotLogged(t *testing.T) {
 	t.Setenv("ADMIN_PASSWORD", "")
 	var output bytes.Buffer
 	logger.SetOutput(&output)
 	defer logger.ResetOutput()
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatal(err)
 	}
 	first := GetPassword()
 	if !regexp.MustCompile(`^[0-9]{8}$`).MatchString(first) {
 		t.Fatal("fresh password must contain exactly eight ASCII digits")
 	}
-	if !strings.Contains(output.String(), first) {
-		t.Fatal("first-run password was not disclosed")
+	if strings.Contains(output.String(), first) {
+		t.Fatal("first-run password leaked to logs")
 	}
 	output.Reset()
 	if err := Load(); err != nil {
@@ -32,7 +32,7 @@ func TestFreshAdminPasswordIsRandomPersistedAndPrintedOnce(t *testing.T) {
 	if GetPassword() != first || output.Len() != 0 {
 		t.Fatal("reload regenerated or logged password")
 	}
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatal(err)
 	}
 	if GetPassword() == first {
@@ -45,7 +45,7 @@ func TestFreshAdminPasswordUsesExplicitEnvironment(t *testing.T) {
 	var output bytes.Buffer
 	logger.SetOutput(&output)
 	defer logger.ResetOutput()
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatal(err)
 	}
 	if GetPassword() != "chosen-admin-password" || output.Len() != 0 {
@@ -72,7 +72,7 @@ func TestPendingLegacyAdminPasswordIsShortenedOnce(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ADMIN_PASSWORD", "")
-			if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+			if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 				t.Fatal(err)
 			}
 			legacy := strings.Repeat("ab", 24)

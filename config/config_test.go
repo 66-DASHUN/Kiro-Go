@@ -8,7 +8,7 @@ import (
 )
 
 func TestUpdateSettingsPatchPreservesOmittedAuthFields(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	requireAPIKey := true
@@ -29,7 +29,7 @@ func TestUpdateSettingsPatchPreservesOmittedAuthFields(t *testing.T) {
 }
 
 func TestUpdateSettingsPatchCanExplicitlyDisableAPIKeyRequirement(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	requireAPIKey := true
@@ -51,7 +51,7 @@ func TestUpdateSettingsPatchCanExplicitlyDisableAPIKeyRequirement(t *testing.T) 
 }
 
 func TestModelMappingsDefaultAndUpdate(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 
@@ -86,7 +86,7 @@ func TestModelMappingsDefaultAndUpdate(t *testing.T) {
 }
 
 func TestUpdateBackupSchedulePreservesLastRun(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	if err := UpdateBackupSchedule(BackupSchedule{
@@ -119,7 +119,7 @@ func TestUpdateBackupSchedulePreservesLastRun(t *testing.T) {
 }
 
 func TestBackupRestoreIncludesCredentialsData(t *testing.T) {
-	dir := t.TempDir()
+	dir := configTempDir(t)
 	if err := Init(filepath.Join(dir, "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestBackupRestoreIncludesCredentialsData(t *testing.T) {
 }
 
 func TestCreateBackupAllowsSamePayloadInSameSecond(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestCreateBackupAllowsSamePayloadInSameSecond(t *testing.T) {
 }
 
 func TestRestoreRejectsEmptyJSON(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	if err := RestoreFromBytes([]byte(`{}`), "bad"); err == nil {
@@ -203,7 +203,7 @@ func TestRestoreRejectsEmptyJSON(t *testing.T) {
 }
 
 func TestRestoreRejectsConfigOnlyBackup(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	rawConfig := []byte(`{"password":"changeme","port":8080,"host":"0.0.0.0","requireApiKey":false,"accounts":[]}`)
@@ -308,7 +308,7 @@ func TestLooksLikeKiroAPIKey(t *testing.T) {
 }
 
 func TestAddAccountRejectsDuplicateAPIKey(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	first := Account{ID: "api-1", KiroApiKey: "ksk_dup", AuthMethod: AuthMethodAPIKey, Enabled: true}
@@ -329,7 +329,7 @@ func TestAddAccountRejectsDuplicateAPIKey(t *testing.T) {
 }
 
 func TestAddCredentialRejectsDuplicateAPIKey(t *testing.T) {
-	if err := Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+	if err := Init(filepath.Join(configTempDir(t), "kiro.db")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	first := Account{ID: "api-1", KiroApiKey: "ksk_cred_dup", AuthMethod: AuthMethodAPIKey, Enabled: true}

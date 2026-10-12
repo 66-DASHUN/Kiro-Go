@@ -15,10 +15,7 @@ import (
 
 func main() {
 
-	dataDir := "."
-	if envDir := os.Getenv("DATA_DIR"); envDir != "" {
-		dataDir = envDir
-	}
+	dataDir := config.ResolveDataDir(os.Getenv("DATA_DIR"), os.Getenv("CONFIG_PATH"))
 
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		log.Fatalf("Failed to create database directory: %v", err)
