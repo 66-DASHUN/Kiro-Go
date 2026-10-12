@@ -193,6 +193,24 @@ func UpdateAccountPatch(id string, patch AccountPatch) (Account, error) {
 		if patch.ProxyURL != nil {
 			updated.ProxyURL = *patch.ProxyURL
 		}
+		if patch.Silent != nil {
+			updated.Silent = *patch.Silent
+		}
+		if patch.SilentReason != nil {
+			updated.SilentReason = *patch.SilentReason
+		}
+		if patch.SilentTime != nil {
+			updated.SilentTime = *patch.SilentTime
+		}
+		if patch.BanStatus != nil {
+			updated.BanStatus = *patch.BanStatus
+		}
+		if patch.BanReason != nil {
+			updated.BanReason = *patch.BanReason
+		}
+		if patch.BanTime != nil {
+			updated.BanTime = *patch.BanTime
+		}
 		return nil
 	})
 }

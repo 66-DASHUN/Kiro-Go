@@ -27,7 +27,24 @@ func ResolveDataDir(dataDir, configPath string) string {
 // ImportLegacyJSON imports only into a database without configuration. The
 // original file is never changed, and existing database settings take priority.
 func ImportLegacyJSON(path string) error {
-	if _, ok, err := getSetting("config"); err != nil || ok {
+	d, err := db.Get()
+	if err != nil {
+		return err
+	}
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var existing string
+	err = tx.QueryRow(`SELECT value FROM settings WHERE key='config'`).Scan(&existing)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err := ensureEmptyLegacyImportDatabase(tx); err != nil {
 		return err
 	}
 	raw, err := os.ReadFile(path)
@@ -79,27 +96,45 @@ func ImportLegacyJSON(path string) error {
 	if err != nil {
 		return err
 	}
-	d, err := db.Get()
-	if err != nil {
-		return err
-	}
-	tx, err := d.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var existing string
-	err = tx.QueryRow(`SELECT value FROM settings WHERE key='config'`).Scan(&existing)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
 	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES('config',?)`, string(data)); err != nil {
 		return fmt.Errorf("import legacy configuration: %w", err)
 	}
 	return tx.Commit()
+}
+
+// A missing configuration alongside any native data is inconsistent state,
+// not an empty database. Check every application table in the same transaction
+// as the import, preserving existing credentials, history and backup data.
+func ensureEmptyLegacyImportDatabase(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		return err
+	}
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			rows.Close()
+			return err
+		}
+		tables = append(tables, table)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, table := range tables {
+		quoted := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
+		var populated bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM ` + quoted + ` LIMIT 1)`).Scan(&populated); err != nil {
+			return err
+		}
+		if populated {
+			return fmt.Errorf("database configuration is missing while native %s data exists; refusing legacy import", table)
+		}
+	}
+	return nil
 }
 
 func normalizeCompatibleConfig(c *Config, raw []byte) error {

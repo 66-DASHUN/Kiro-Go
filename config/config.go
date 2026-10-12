@@ -109,12 +109,18 @@ type ModelMappingRule struct {
 }
 
 type AccountPatch struct {
-	ApiKeyID  *string
-	Nickname  *string
-	Enabled   *bool
-	MachineID *string
-	Weight    *int
-	ProxyURL  *string
+	ApiKeyID     *string
+	Nickname     *string
+	Enabled      *bool
+	MachineID    *string
+	Weight       *int
+	ProxyURL     *string
+	Silent       *bool
+	SilentReason *string
+	SilentTime   *int64
+	BanStatus    *string
+	BanReason    *string
+	BanTime      *int64
 }
 
 type PromptCacheSettings struct {
@@ -412,7 +418,7 @@ func Get() *Config {
 		copyCfg.PromptFilterRules = append([]PromptFilterRule(nil), cfg.PromptFilterRules...)
 	}
 	if cfg.ModelMappings != nil {
-		copyCfg.ModelMappings = append([]ModelMappingRule(nil), cfg.ModelMappings...)
+		copyCfg.ModelMappings = copyModelMappings(cfg.ModelMappings)
 	}
 	return &copyCfg
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,7 +114,7 @@ func currentBackupData() ([]byte, int, string, bool, int, error) {
 	}
 	configSnapshot.ApiKeys = append([]ApiKeyEntry(nil), cfg.ApiKeys...)
 	configSnapshot.PromptFilterRules = append([]PromptFilterRule(nil), cfg.PromptFilterRules...)
-	configSnapshot.ModelMappings = append([]ModelMappingRule(nil), cfg.ModelMappings...)
+	configSnapshot.ModelMappings = copyModelMappings(cfg.ModelMappings)
 	autoKeep := maxAutoKeep
 	if cfg.Backup.AutoKeep > 0 {
 		autoKeep = cfg.Backup.AutoKeep
@@ -389,7 +390,8 @@ func parseBackupData(data []byte) (*parsedBackup, error) {
 	}
 
 	var envelope struct {
-		Format string `json:"format"`
+		Format string          `json:"format"`
+		Config json.RawMessage `json:"config"`
 	}
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return nil, fmt.Errorf("backup JSON parse failed: %w", err)
@@ -409,6 +411,21 @@ func parseBackupData(data []byte) (*parsedBackup, error) {
 	if payload.Config.Accounts == nil {
 		payload.Config.Accounts = []Account{}
 	}
+	if err := normalizeCompatibleConfig(&payload.Config, envelope.Config); err != nil {
+		return nil, fmt.Errorf("invalid backup configuration: %w", err)
+	}
+	for i := range payload.Credentials {
+		normalizeLegacyAccount(&payload.Credentials[i])
+	}
+	if !payload.Config.ApiKeyAccountMigrationCompleted {
+		if keyID := firstEnabledApiKeyID(&payload.Config); keyID != "" {
+			migrateAccountOwnership(payload.Config.Accounts, keyID)
+			if payload.CredentialsLoaded {
+				migrateAccountOwnership(payload.Credentials, keyID)
+			}
+			payload.Config.ApiKeyAccountMigrationCompleted = true
+		}
+	}
 	if err := validateRestoredConfig(payload.Config); err != nil {
 		return nil, err
 	}
@@ -417,6 +434,9 @@ func parseBackupData(data []byte) (*parsedBackup, error) {
 			if acc.ID == "" {
 				return nil, fmt.Errorf("credential %d missing id", i)
 			}
+		}
+		if err := validateRestoredOwnership(payload.Config, payload.Credentials); err != nil {
+			return nil, err
 		}
 	}
 	return &parsedBackup{
@@ -439,11 +459,49 @@ func validateRestoredConfig(c Config) error {
 	if c.Accounts == nil {
 		return fmt.Errorf("backup schema mismatch: missing accounts")
 	}
+	if err := ValidatePromptCacheSettings(PromptCacheSettings{Enabled: c.PromptCacheEmulationEnabled, Mode: c.PromptCacheEmulationMode, Ratio: c.PromptCacheEmulationRatio, CreationRatio: c.PromptCacheCreationEmulationRatio, ReadRatio: c.PromptCacheReadEmulationRatio}); err != nil {
+		return err
+	}
+	for _, entry := range c.ApiKeys {
+		if err := validateApiKeyPromptCacheOverrides(entry); err != nil {
+			return err
+		}
+		if err := validateApiKeyLimits(entry.TokenLimit, entry.CreditLimit); err != nil {
+			return err
+		}
+	}
+	return validateRestoredOwnership(c, c.Accounts)
+}
+
+// Existing disabled keys may still own accounts in a valid snapshot. Reject
+// dangling IDs without clearing or replacing historical explicit ownership.
+func validateRestoredOwnership(c Config, accounts []Account) error {
+	known := make(map[string]bool, len(c.ApiKeys))
+	for _, key := range c.ApiKeys {
+		known[key.ID] = true
+	}
+	for _, account := range accounts {
+		id := strings.TrimSpace(account.ApiKeyID)
+		if id != "" && !known[id] {
+			return fmt.Errorf("backup account %s references an unknown API key", account.ID)
+		}
+	}
 	return nil
 }
 
 func writeRestoredConfig(parsed *parsedBackup) error {
 	restored := parsed.config
+	if restored.Accounts == nil {
+		restored.Accounts = []Account{}
+	}
+	if err := validateRestoredConfig(restored); err != nil {
+		return err
+	}
+	if parsed.credentialsLoaded {
+		if err := validateRestoredOwnership(restored, parsed.credentials); err != nil {
+			return err
+		}
+	}
 	restored.FirstRunPasswordPending = false
 	if password := os.Getenv("ADMIN_PASSWORD"); password != "" {
 		restored.Password = password
@@ -609,7 +667,7 @@ func AutoSnapshotBeforeSave() {
 	}
 	configSnapshot.ApiKeys = append([]ApiKeyEntry(nil), cfg.ApiKeys...)
 	configSnapshot.PromptFilterRules = append([]PromptFilterRule(nil), cfg.PromptFilterRules...)
-	configSnapshot.ModelMappings = append([]ModelMappingRule(nil), cfg.ModelMappings...)
+	configSnapshot.ModelMappings = copyModelMappings(cfg.ModelMappings)
 	autoKeep := cfg.Backup.AutoKeep
 	credentialsLoaded, credentialsSnapshot := CredentialsSnapshot()
 	data, accountCnt, version, includesCredentials, err := backupDataFromSnapshot(configSnapshot, credentialsLoaded, credentialsSnapshot, time.Now().Unix())
