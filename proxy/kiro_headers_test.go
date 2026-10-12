@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"kiro-go/config"
+	"kiro-proxy/config"
 	"net/http"
 	"strings"
 	"testing"
@@ -43,41 +43,6 @@ func TestBuildRuntimeHeaderValuesUsesRuntimeAPIFormat(t *testing.T) {
 	}
 }
 
-func TestApplyKiroBaseHeadersMarksExternalIdentityProviderTokens(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "https://q.us-east-1.amazonaws.com/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	account := &config.Account{
-		AccessToken: "external-access",
-		AuthMethod:  " External_IDP ",
-	}
-
-	applyKiroBaseHeaders(req, account, buildRuntimeHeaderValues(account, req.URL.Host))
-
-	if got := req.Header.Get("Authorization"); got != "Bearer external-access" {
-		t.Fatalf("expected bearer authorization, got %q", got)
-	}
-	if got := req.Header.Get("TokenType"); got != "EXTERNAL_IDP" {
-		t.Fatalf("expected EXTERNAL_IDP token type, got %q", got)
-	}
-}
-
-func TestApplyKiroBaseHeadersOmitsTokenTypeForAWSAuthentication(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "https://q.us-east-1.amazonaws.com/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("TokenType", "stale")
-	account := &config.Account{AccessToken: "aws-access", AuthMethod: "idc"}
-
-	applyKiroBaseHeaders(req, account, buildRuntimeHeaderValues(account, req.URL.Host))
-
-	if got := req.Header.Get("TokenType"); got != "" {
-		t.Fatalf("expected no token type for AWS auth, got %q", got)
-	}
-}
-
 func TestApplyKiroBaseHeadersMarksAPIKeyCredentials(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://runtime.us-east-1.kiro.dev/", nil)
 	if err != nil {
@@ -86,7 +51,7 @@ func TestApplyKiroBaseHeadersMarksAPIKeyCredentials(t *testing.T) {
 	account := &config.Account{
 		KiroApiKey:  "ksk_test_key",
 		AccessToken: "should-not-win",
-		AuthMethod:  "api_key",
+		AuthMethod:  config.AuthMethodAPIKey,
 	}
 
 	applyKiroBaseHeaders(req, account, buildStreamingHeaderValues(account, req.URL.Host))
@@ -94,11 +59,43 @@ func TestApplyKiroBaseHeadersMarksAPIKeyCredentials(t *testing.T) {
 	if got := req.Header.Get("Authorization"); got != "Bearer ksk_test_key" {
 		t.Fatalf("expected API key bearer, got %q", got)
 	}
-	// net/http.Header is case-insensitive; either casing maps to the same entry.
 	if got := req.Header.Get("tokentype"); got != "API_KEY" {
 		t.Fatalf("expected tokentype API_KEY, got %q", got)
 	}
-	if got := req.Header.Get("TokenType"); got != "API_KEY" {
-		t.Fatalf("expected TokenType/tokentype API_KEY, got %q", got)
+}
+
+func TestApplyKiroBaseHeadersClearsTokenTypeForOAuth(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://q.us-east-1.amazonaws.com/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	//! Headers are set on a reused request per retry; a leftover marker must not leak onto an OAuth token.
+	req.Header.Set("TokenType", "API_KEY")
+	account := &config.Account{AccessToken: "oauth-access", AuthMethod: "social"}
+
+	applyKiroBaseHeaders(req, account, buildStreamingHeaderValues(account, req.URL.Host))
+
+	if got := req.Header.Get("Authorization"); got != "Bearer oauth-access" {
+		t.Fatalf("expected OAuth bearer, got %q", got)
+	}
+	if got := req.Header.Get("tokentype"); got != "" {
+		t.Fatalf("expected no tokentype for OAuth, got %q", got)
+	}
+}
+
+func TestApplyKiroBaseHeadersMarksExternalIdpTokens(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://q.us-east-1.amazonaws.com/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := &config.Account{AccessToken: "entra-access", AuthMethod: " External_IDP "}
+
+	applyKiroBaseHeaders(req, account, buildRuntimeHeaderValues(account, req.URL.Host))
+
+	if got := req.Header.Get("Authorization"); got != "Bearer entra-access" {
+		t.Fatalf("expected Entra bearer, got %q", got)
+	}
+	if got := req.Header.Get("tokentype"); got != "EXTERNAL_IDP" {
+		t.Fatalf("expected tokentype EXTERNAL_IDP, got %q", got)
 	}
 }

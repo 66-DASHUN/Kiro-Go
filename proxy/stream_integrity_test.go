@@ -1,271 +1,623 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
-	"kiro-go/config"
+	"kiro-proxy/config"
+	accountpool "kiro-proxy/pool"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// classifyStreamIntegrity is the completeness rule: a stream that returned no
-// transport error is still incomplete when it carries no terminal signal.
-// A stopReason of any value, or a delivered tool call, means complete.
-//
-// The reasoning-only case deliberately differs from Kiro IDE, which treats it
-// as complete. See classifyStreamIntegrity's doc comment for why this proxy is
-// stricter.
-func TestClassifyStreamIntegrity(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		content      int
-		tools        int
-		stopReason   string
-		sawReasoning bool
-		wantErr      error
-	}{
-		{"complete with stop", 12, 0, "end_turn", false, nil},
-		{"complete with tools", 0, 1, "", false, nil},
-		{"complete with tools despite content", 12, 1, "", false, nil},
-		{"truncated content", 8, 0, "", false, errUpstreamTruncatedResponse},
-		{"reasoning only stricter than ide", 0, 0, "", true, errUpstreamTruncatedResponse},
-		{"no signal at all", 0, 0, "", false, errUpstreamTruncatedResponse},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := classifyStreamIntegrity(tc.content, tc.tools, tc.stopReason, tc.sawReasoning)
-			if tc.wantErr == nil {
-				if got != nil {
-					t.Fatalf("got %v, want nil", got)
-				}
-				return
-			}
-			if got == nil || got.Error() != tc.wantErr.Error() {
-				t.Fatalf("got %v, want %v", got, tc.wantErr)
-			}
-			if !isStreamIntegrityError(got) {
-				t.Fatalf("%v must be recognized as a stream integrity error", got)
+func parseFrames(t *testing.T, callback *KiroStreamCallback, frames ...[]byte) error {
+	t.Helper()
+	return parseEventStream(bytes.NewReader(bytes.Join(frames, nil)), callback)
+}
+
+func TestParseEventStreamRejectsAnswerWithoutEndSignal(t *testing.T) {
+	var completed bool
+	err := parseFrames(t, &KiroStreamCallback{OnComplete: func(_, _ int) { completed = true }},
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "half an ans"}),
+	)
+	if !errors.Is(err, errUpstreamTruncatedResponse) {
+		t.Fatalf("expected truncated response error, got %v", err)
+	}
+	if completed {
+		t.Fatalf("OnComplete must not run for a truncated stream")
+	}
+}
+
+func TestParseEventStreamAcceptsStopReasonWithoutTrailer(t *testing.T) {
+	var stopReason string
+	err := parseFrames(t, &KiroStreamCallback{OnStopReason: func(reason string) { stopReason = reason }},
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "done"}),
+		awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "max_tokens"}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if stopReason != "max_tokens" {
+		t.Fatalf("stop reason = %q, want max_tokens", stopReason)
+	}
+}
+
+func TestParseEventStreamAcceptsTrailerWithoutStopReason(t *testing.T) {
+	//! IdC / Enterprise accounts never send metadataEvent (upstream Kiro-Go #147, #158).
+	for _, trailer := range []string{"meteringEvent"} {
+		t.Run(trailer, func(t *testing.T) {
+			err := parseFrames(t, &KiroStreamCallback{},
+				awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "done"}),
+				awsEventStreamFrame(t, trailer, map[string]interface{}{"usage": 0.01, "contextUsagePercentage": 1.0}),
+			)
+			if err != nil {
+				t.Fatalf("expected %s to end the turn, got %v", trailer, err)
 			}
 		})
 	}
 }
 
-// setupIntegrityTestUpstream points the Kiro endpoint list at a fake upstream
-// and returns a restore func. Mirrors the fixture used by handler tests.
-func setupIntegrityTestUpstream(t *testing.T, server *httptest.Server) func() {
+func TestParseEventStreamReasoningWithoutAnswerIsTruncated(t *testing.T) {
+	err := parseFrames(t, &KiroStreamCallback{},
+		awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "thinking..."}),
+		meteringFrame(t),
+	)
+	if !errors.Is(err, errUpstreamTruncatedResponse) {
+		t.Fatalf("expected truncated response error, got %v", err)
+	}
+}
+
+func TestParseEventStreamWithoutOutputIsEmpty(t *testing.T) {
+	for name, frames := range map[string][][]byte{
+		"no frames":    nil,
+		"trailer only": {meteringFrame(t)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := parseFrames(t, &KiroStreamCallback{}, frames...); !errors.Is(err, errEmptyKiroStream) {
+				t.Fatalf("expected empty stream error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestParseEventStreamRejectsCorruptFrame(t *testing.T) {
+	frame := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"})
+	frame[len(frame)-6] ^= 0xff
+
+	var gotText bool
+	err := parseFrames(t, &KiroStreamCallback{OnText: func(string, bool) { gotText = true }}, frame)
+	if !errors.Is(err, errInvalidKiroEventStream) {
+		t.Fatalf("expected invalid event stream error, got %v", err)
+	}
+	if gotText {
+		t.Fatalf("a corrupt frame must not reach the caller")
+	}
+}
+
+func TestParseEventStreamCutInsideFrameIsTruncation(t *testing.T) {
+	complete := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"})
+	next := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": " world"})
+	for name, cut := range map[string][]byte{
+		"inside prelude": next[:5],
+		"inside message": next[:len(next)-3],
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := parseFrames(t, &KiroStreamCallback{}, complete, cut)
+			if !errors.Is(err, errUpstreamTruncatedResponse) || !isStreamIntegrityError(err) {
+				t.Fatalf("expected a retryable truncation error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestParseEventStreamSurfacesExceptionFrame(t *testing.T) {
+	err := parseFrames(t, &KiroStreamCallback{},
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "partial"}),
+		awsEventStreamFrameWithHeaders(t, map[string]string{
+			":message-type":   "exception",
+			":exception-type": "ThrottlingException",
+		}, map[string]interface{}{"message": "Too many requests"}),
+	)
+	if !errors.Is(err, errKiroEventStreamUpstream) {
+		t.Fatalf("expected upstream event stream error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "ThrottlingException: Too many requests") {
+		t.Fatalf("expected exception type and message in error, got %q", err)
+	}
+	if isStreamIntegrityError(err) {
+		t.Fatalf("an upstream exception is an account signal, not a stream hiccup")
+	}
+}
+
+func TestParseEventStreamRejectsIncompleteToolInput(t *testing.T) {
+	var toolUses []KiroToolUse
+	err := parseFrames(t, &KiroStreamCallback{OnToolUse: func(tu KiroToolUse) { toolUses = append(toolUses, tu) }},
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_write",
+			"name":      "write_file",
+			"input":     `{"path":"/tmp/a","content":"unfinish`,
+		}),
+		meteringFrame(t),
+	)
+	if !errors.Is(err, errIncompleteKiroToolInput) {
+		t.Fatalf("expected incomplete tool input error, got %v", err)
+	}
+	if len(toolUses) != 0 {
+		t.Fatalf("a tool with cut-off arguments must never be emitted, got %#v", toolUses)
+	}
+}
+
+func TestParseEventStreamKeepsInterleavedParallelTools(t *testing.T) {
+	var toolUses []KiroToolUse
+	err := parseFrames(t, &KiroStreamCallback{OnToolUse: func(tu KiroToolUse) { toolUses = append(toolUses, tu) }},
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "toolu_a", "name": "read", "input": `{"path":`}),
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "toolu_b", "name": "grep", "input": `{"pattern":`}),
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "toolu_b", "input": `"TODO"}`, "stop": true}),
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "toolu_a", "input": `"a.go"}`, "stop": true}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if len(toolUses) != 2 {
+		t.Fatalf("expected two tool uses, got %#v", toolUses)
+	}
+	if toolUses[0].ToolUseID != "toolu_b" || toolUses[0].Input["pattern"] != "TODO" {
+		t.Fatalf("unexpected first finished tool: %#v", toolUses[0])
+	}
+	if toolUses[1].ToolUseID != "toolu_a" || toolUses[1].Input["path"] != "a.go" {
+		t.Fatalf("unexpected second finished tool: %#v", toolUses[1])
+	}
+}
+
+func TestParseEventStreamFlushesUnstoppedToolsInArrivalOrder(t *testing.T) {
+	var ids []string
+	err := parseFrames(t, &KiroStreamCallback{OnToolUse: func(tu KiroToolUse) { ids = append(ids, tu.ToolUseID) }},
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "toolu_3", "name": "c", "input": `{}`}),
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "toolu_1", "name": "a", "input": `{}`}),
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "toolu_2", "name": "b", "input": `{}`}),
+	)
+	if err != nil {
+		t.Fatalf("unexpected parse error: %v", err)
+	}
+	if strings.Join(ids, ",") != "toolu_3,toolu_1,toolu_2" {
+		t.Fatalf("tool order = %v, want arrival order", ids)
+	}
+}
+
+func TestStopReasonMapping(t *testing.T) {
+	cases := []struct {
+		reason            string
+		toolCount         int
+		claude, openai    string
+		responsesStatus   string
+		responsesIncomplt string
+	}{
+		{"", 0, "end_turn", "stop", "completed", ""},
+		{"end_turn", 0, "end_turn", "stop", "completed", ""},
+		{"MAX_TOKENS", 0, "max_tokens", "length", "incomplete", "max_output_tokens"},
+		{"model_context_window_exceeded", 0, "model_context_window_exceeded", "length", "incomplete", "max_output_tokens"},
+		{"content_filtered", 0, "refusal", "content_filter", "incomplete", "content_filter"},
+		{"tool_use", 2, "tool_use", "tool_calls", "completed", ""},
+		{"max_tokens", 1, "tool_use", "tool_calls", "incomplete", "max_output_tokens"},
+	}
+	for _, tc := range cases {
+		if got := mapClaudeStopReason(tc.reason, tc.toolCount); got != tc.claude {
+			t.Errorf("mapClaudeStopReason(%q, %d) = %q, want %q", tc.reason, tc.toolCount, got, tc.claude)
+		}
+		if got := mapOpenAIFinishReason(tc.reason, tc.toolCount); got != tc.openai {
+			t.Errorf("mapOpenAIFinishReason(%q, %d) = %q, want %q", tc.reason, tc.toolCount, got, tc.openai)
+		}
+		status, incomplete := mapResponsesCompletion(tc.reason)
+		if status != tc.responsesStatus || incomplete != tc.responsesIncomplt {
+			t.Errorf("mapResponsesCompletion(%q) = %q/%q, want %q/%q", tc.reason, status, incomplete, tc.responsesStatus, tc.responsesIncomplt)
+		}
+	}
+}
+
+func TestApplyResponsesStopReasonMarksIncomplete(t *testing.T) {
+	response := map[string]interface{}{"status": "completed"}
+	if event := applyResponsesStopReason(response, "max_tokens"); event != "response.incomplete" {
+		t.Fatalf("terminal event = %q, want response.incomplete", event)
+	}
+	if response["status"] != "incomplete" {
+		t.Fatalf("status = %v, want incomplete", response["status"])
+	}
+	details, _ := response["incomplete_details"].(map[string]string)
+	if details["reason"] != "max_output_tokens" {
+		t.Fatalf("incomplete_details = %#v", response["incomplete_details"])
+	}
+}
+
+func newStreamTestHandler(t *testing.T, upstream http.HandlerFunc) *Handler {
+	//! newStreamTestHandler points the proxy at upstream with one account and no endpoint fallback.
 	t.Helper()
-	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+	resetObservePersistenceForTest(t)
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
+	if err := config.AddAccount(config.Account{
+		ID:          "only",
+		Enabled:     true,
+		AccessToken: "token-only",
+		ProfileArn:  "arn:aws:codewhisperer:profile/only",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
 	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
-		t.Fatalf("set endpoint: %v", err)
+		t.Fatalf("set preferred endpoint: %v", err)
 	}
 	if err := config.UpdateEndpointFallback(false); err != nil {
-		t.Fatalf("disable fallback: %v", err)
+		t.Fatalf("disable endpoint fallback: %v", err)
 	}
+
+	server := httptest.NewServer(upstream)
+	t.Cleanup(server.Close)
 
 	oldEndpoints := kiroEndpoints
 	kiroEndpoints = []kiroEndpoint{{URL: server.URL, Origin: "AI_EDITOR", Name: "test"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
 	oldClient := kiroHttpStore.Load()
-	kiroHttpStore.Store(&http.Client{Timeout: time.Second, Transport: &http.Transport{}})
-	return func() {
-		kiroEndpoints = oldEndpoints
-		kiroHttpStore.Store(oldClient)
-	}
+	kiroHttpStore.Store(&http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}})
+	t.Cleanup(func() { kiroHttpStore.Store(oldClient) })
+
+	oldWait := streamRetryWait
+	streamRetryWait = func(context.Context, time.Duration) error { return nil }
+	t.Cleanup(func() { streamRetryWait = oldWait })
+
+	p := accountpool.GetPool()
+	p.Reload()
+	return &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
 }
 
-func integrityTestAccount() *config.Account {
-	return &config.Account{
-		ID:          "acc",
-		Email:       "acc@test",
-		AccessToken: "token",
-		ProfileArn:  "arn:aws:codewhisperer:profile/test",
+func testAccount(t *testing.T) *config.Account {
+	t.Helper()
+	accounts := config.GetAccounts()
+	if len(accounts) == 0 {
+		t.Fatalf("expected a configured account")
 	}
+	return &accounts[0]
 }
 
-func integrityTestPayload() *KiroPayload {
+func testKiroPayload() *KiroPayload {
 	payload := &KiroPayload{}
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
-		Content: "hi",
+		Content: "hello",
+		ModelID: "claude-sonnet-4.5",
 		Origin:  "AI_EDITOR",
 	}
 	return payload
 }
 
-// A stream that delivered content but no stopReason is truncated, not failed:
-// the transport layer sees success and returns nil. The helper must catch that,
-// reset the caller's accumulators, and retry on the same account.
-//
-// Note the fully-empty case is deliberately NOT used here: parseEventStreamTracked
-// already returns errEmptyKiroStream when nothing was output, and
-// CallKiroAPIContext retries it internally, so it never surfaces as a
-// transport-successful call.
-func TestRunKiroWithIntegrityRetryRecoversTruncatedThenComplete(t *testing.T) {
-	var hits atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-		if n == 1 {
-			// Content but no metadataEvent => transport-successful truncation.
-			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-				"content": "partial",
-			}))
+func writeFrames(w http.ResponseWriter, frames ...[]byte) {
+	w.WriteHeader(http.StatusOK)
+	for _, frame := range frames {
+		_, _ = w.Write(frame)
+	}
+}
+
+func TestCallKiroAPIRetriesEmptyStreamBeforeOutput(t *testing.T) {
+	var calls atomic.Int32
+	newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			writeFrames(w)
 			return
 		}
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "recovered",
-		}))
-		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
-			"stopReason": "end_turn",
-		}))
-	}))
-	defer server.Close()
-	defer setupIntegrityTestUpstream(t, server)()
+		writeFrames(w,
+			awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "second try"}),
+			meteringFrame(t),
+		)
+	})
 
-	var content string
-	var stopReason string
-	var resets int
-	err := runKiroWithIntegrityRetry(context.Background(), integrityTestAccount(), integrityTestPayload(),
-		&KiroStreamCallback{
-			OnText:       func(s string, _ bool) { content += s },
-			OnStopReason: func(r string) { stopReason = r },
-		},
-		func() (int, int, string, bool) {
-			return len(content), 0, stopReason, false
-		},
-		func() {
-			resets++
-			content = ""
-			stopReason = ""
-		},
-		nil,
-	)
+	var text string
+	err := CallKiroAPIContext(context.Background(), testAccount(t), testKiroPayload(), &KiroStreamCallback{
+		OnText: func(s string, _ bool) { text += s },
+	})
 	if err != nil {
-		t.Fatalf("expected recovery, got %v", err)
+		t.Fatalf("expected retry to recover, got %v", err)
 	}
-	if got := hits.Load(); got != 2 {
-		t.Fatalf("expected exactly one retry (2 upstream hits), got %d", got)
-	}
-	if resets < 1 {
-		t.Fatalf("expected reset before retry, got %d", resets)
-	}
-	// "partial" from the first attempt must not survive into the final result.
-	if content != "recovered" || stopReason != "end_turn" {
-		t.Fatalf("content=%q stopReason=%q", content, stopReason)
+	if calls.Load() != 2 || text != "second try" {
+		t.Fatalf("calls=%d text=%q, want 2 calls and only the second answer", calls.Load(), text)
 	}
 }
 
-// Once the client has already been flushed, an incomplete stream must not be
-// retried (would duplicate output). Helper returns the integrity error so the
-// caller can emit an error event instead of forging a normal completion.
-func TestRunKiroWithIntegrityRetrySkipsRetryAfterClientFlush(t *testing.T) {
-	var hits atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "partial",
-		}))
-		// no metadataEvent/stopReason => truncated
-	}))
-	defer server.Close()
-	defer setupIntegrityTestUpstream(t, server)()
-
-	var content string
-	flushed := true
-	err := runKiroWithIntegrityRetry(context.Background(), integrityTestAccount(), integrityTestPayload(),
-		&KiroStreamCallback{
-			OnText: func(s string, _ bool) { content += s },
-		},
-		func() (int, int, string, bool) { return len(content), 0, "", false },
-		func() { content = "" },
-		func() bool { return !flushed },
-	)
-	if !isStreamIntegrityError(err) {
-		t.Fatalf("expected integrity error after flush, got %v", err)
-	}
-	if hits.Load() != 1 {
-		t.Fatalf("must not retry after flush, hits=%d", hits.Load())
-	}
-	if content != "partial" {
-		t.Fatalf("content=%q", content)
-	}
-}
-
-// A canceled client context must not drive an integrity retry. The turn is over,
-// so reissuing it would only burn upstream quota.
-//
-// The upstream here returns content with no stopReason, which classifies as
-// truncated and would otherwise be retried; cancellation must suppress that.
-func TestRunKiroWithIntegrityRetryStopsOnCanceledContext(t *testing.T) {
-	var hits atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "partial",
-		}))
-	}))
-	defer server.Close()
-	defer setupIntegrityTestUpstream(t, server)()
+func TestCallKiroAPIStopsOnCanceledContext(t *testing.T) {
+	var calls atomic.Int32
+	newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) { calls.Add(1) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-
-	var content string
-	var resets int
-	err := runKiroWithIntegrityRetry(ctx, integrityTestAccount(), integrityTestPayload(),
-		&KiroStreamCallback{OnText: func(s string, _ bool) { content += s }},
-		func() (int, int, string, bool) { return len(content), 0, "", false },
-		func() { resets++ },
-		nil,
-	)
+	err := CallKiroAPIContext(ctx, testAccount(t), testKiroPayload(), &KiroStreamCallback{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	if isStreamIntegrityError(err) {
-		t.Fatalf("cancellation must not be reported as an integrity failure: %v", err)
-	}
-	if resets != 0 {
-		t.Fatalf("cancellation must not trigger a retry reset, got %d", resets)
-	}
-	if got := hits.Load(); got > 1 {
-		t.Fatalf("canceled context must not drive retries, hits=%d", got)
+	if calls.Load() != 0 {
+		t.Fatalf("a canceled request must not reach upstream, got %d calls", calls.Load())
 	}
 }
 
-// The truncation retry budget must stay bounded and must be spent, not silently
-// widened. Truncation never reaches the endpoint fallback (CallKiroAPIContext
-// returns nil for it), so the only multiplier is account rotation; see
-// maxSameAccountStreamRetries for the cost arithmetic.
-func TestRunKiroWithIntegrityRetryStopsAfterBudgetExhausted(t *testing.T) {
-	var hits atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-		// Always truncated: content with no terminal signal.
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "partial",
-		}))
-	}))
-	defer server.Close()
-	defer setupIntegrityTestUpstream(t, server)()
+func TestClaudeNonStreamRetriesTruncatedAnswerWithoutCoolingAccount(t *testing.T) {
+	var calls atomic.Int32
+	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "cut off"}))
+	})
 
-	var content string
-	err := runKiroWithIntegrityRetry(context.Background(), integrityTestAccount(), integrityTestPayload(),
-		&KiroStreamCallback{OnText: func(s string, _ bool) { content += s }},
-		func() (int, int, string, bool) { return len(content), 0, "", false },
-		func() { content = "" },
-		nil,
-	)
-	if !isStreamIntegrityError(err) {
-		t.Fatalf("expected integrity error once the budget is spent, got %v", err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	h.handleClaudeNonStream(rec, req, testKiroPayload(), "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, nil)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("a truncated answer must fail, status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if got := hits.Load(); got != int32(maxSameAccountStreamRetries+1) {
-		t.Fatalf("upstream hits=%d, want %d (initial attempt plus %d retry)",
-			got, maxSameAccountStreamRetries+1, maxSameAccountStreamRetries)
+	if calls.Load() != 3 {
+		t.Fatalf("expected three same-account attempts, got %d", calls.Load())
+	}
+	//! Three ordinary errors would cool the account down for a minute.
+	if h.pool.GetNextForModelExcluding("claude-sonnet-4.5", map[string]bool{}) == nil {
+		t.Fatalf("stream hiccups must not cool the account down")
+	}
+}
+
+func TestClaudeNonStreamMapsUpstreamStopReason(t *testing.T) {
+	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeFrames(w,
+			awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "long answer"}),
+			awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "MAX_TOKENS"}),
+		)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	h.handleClaudeNonStream(rec, req, testKiroPayload(), "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, nil)
+
+	var resp ClaudeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
+	}
+	if resp.StopReason != "max_tokens" {
+		t.Fatalf("stop_reason = %q, want max_tokens", resp.StopReason)
+	}
+}
+
+func TestClaudeStreamFlushesHeldTextBeforeError(t *testing.T) {
+	const answer = "This answer is long enough to leave the stream buffer, and then it stops"
+	var calls atomic.Int32
+	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": answer}))
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	h.handleClaudeStream(rec, req, testKiroPayload(), "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, nil)
+
+	body := rec.Body.String()
+	if calls.Load() != 1 {
+		t.Fatalf("output already reached the client, so no retry is allowed; got %d calls", calls.Load())
+	}
+	if got := collectClaudeTextDeltas(t, body); got != answer {
+		t.Fatalf("client text = %q, want full upstream text %q", got, answer)
+	}
+	if !strings.Contains(body, "event: error") || strings.Contains(body, "event: message_stop") {
+		t.Fatalf("expected an error event and no message_stop, body=%s", body)
+	}
+}
+
+func TestOpenAIStreamReportsTruncationAsError(t *testing.T) {
+	const answer = "This answer is long enough to leave the stream buffer, and then it stops"
+	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": answer}))
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	h.handleOpenAIStream(rec, req, testKiroPayload(), "claude-sonnet-4.5", false, 1, nil)
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"error":{`) {
+		t.Fatalf("expected an error chunk, body=%s", body)
+	}
+	if strings.Contains(body, "[DONE]") {
+		t.Fatalf("a truncated stream must not end with [DONE], body=%s", body)
+	}
+	if got := collectOpenAIContentDeltas(t, body); got != answer {
+		t.Fatalf("client text = %q, want full upstream text %q", got, answer)
+	}
+}
+
+func TestClaudeNonStreamClientDisconnectSkipsUpstream(t *testing.T) {
+	var calls atomic.Int32
+	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) { calls.Add(1) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+	h.handleClaudeNonStream(rec, req, testKiroPayload(), "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, nil)
+
+	if calls.Load() != 0 {
+		t.Fatalf("a gone client must not reach upstream, got %d calls", calls.Load())
+	}
+	if rec.Body.Len() != 0 {
+		t.Fatalf("nothing should be written to a gone client, body=%s", rec.Body.String())
+	}
+	page := getObserveStore().RequestPage(requestQuery{Page: 1, PageSize: 10, Status: "failed"})
+	if page.Total != 1 || page.Requests[0].Status != 499 {
+		t.Fatalf("expected one 499 request row, got %#v", page.Requests)
+	}
+}
+
+func collectClaudeTextDeltas(t *testing.T, body string) string {
+	t.Helper()
+	var text strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var event struct {
+			Type  string `json:"type"`
+			Delta struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"delta"`
+		}
+		if json.Unmarshal([]byte(data), &event) == nil && event.Type == "content_block_delta" && event.Delta.Type == "text_delta" {
+			text.WriteString(event.Delta.Text)
+		}
+	}
+	return text.String()
+}
+
+func collectOpenAIContentDeltas(t *testing.T, body string) string {
+	t.Helper()
+	var text strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Choices) > 0 {
+			text.WriteString(chunk.Choices[0].Delta.Content)
+		}
+	}
+	return text.String()
+}
+
+// Kiro-Go #158: IdC accounts end every turn with contextUsageEvent + meteringEvent
+// and never send metadataEvent. Frames mirror the probe dump in that issue.
+func TestIssue158MeteringWithoutMetadataEventCompletesEveryEndpoint(t *testing.T) {
+	frames := func(t *testing.T) [][]byte {
+		return [][]byte{
+			awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "你", "modelId": "claude-sonnet-4.6"}),
+			awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "好！有", "modelId": "claude-sonnet-4.6"}),
+			awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "什么我可以帮你", "modelId": "claude-sonnet-4.6"}),
+			awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "的吗？", "modelId": "claude-sonnet-4.6"}),
+			awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 0.4122999906539917}),
+			awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"unit": "credit", "unitPlural": "credits", "usage": 0.01967914129353234}),
+		}
+	}
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
+		for _, model := range []string{"claude-sonnet-4.6", "claude-sonnet-4.6-thinking"} {
+			for _, stream := range []bool{false, true} {
+				t.Run(path+"/"+model+map[bool]string{false: "/json", true: "/sse"}[stream], func(t *testing.T) {
+					var calls atomic.Int32
+					h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+						calls.Add(1)
+						writeFrames(w, frames(t)...)
+					})
+					body := map[string]interface{}{"model": model, "max_tokens": 512, "stream": stream, "store": false, "input": "hi",
+						"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}}}
+					raw, _ := json.Marshal(body)
+					rec := httptest.NewRecorder()
+					h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(raw))))
+
+					got := rec.Body.String()
+					if rec.Code != http.StatusOK || strings.Contains(got, errUpstreamTruncatedResponse.Error()) {
+						t.Fatalf("status=%d body=%s", rec.Code, got)
+					}
+					for _, piece := range []string{"你", "好！有", "什么我可以帮你", "的吗？"} {
+						if !strings.Contains(got, piece) {
+							t.Fatalf("answer piece %q missing: %s", piece, got)
+						}
+					}
+					if n := calls.Load(); n != 1 {
+						t.Fatalf("upstream called %d times; a complete turn must not be retried and re-billed", n)
+					}
+				})
+			}
+		}
+	}
+}
+
+// Thinking-mode turns carry reasoning inline as <thinking>...</thinking> inside
+// assistantResponseEvent. Metering bills that reasoning even when the turn died
+// before the answer, so tagged text alone must not count as an answer.
+func TestParseEventStreamInlineThinkingWithoutAnswerIsTruncated(t *testing.T) {
+	for name, chunks := range map[string][]string{
+		"closed block":       {"<thinking>plan the answer</thinking>"},
+		"closed then blank":  {"<thinking>plan</thinking>", "\n\n"},
+		"tags split":         {"<thin", "king>plan the ", "answer</thin", "king>\n"},
+		"unterminated block": {"<thinking>plan the ans"},
+		"leading whitespace": {"\n", "<thinking>plan</thinking>"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			frames := make([][]byte, 0, len(chunks)+1)
+			for _, chunk := range chunks {
+				frames = append(frames, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": chunk}))
+			}
+			frames = append(frames, meteringFrame(t))
+			if err := parseFrames(t, &KiroStreamCallback{}, frames...); !errors.Is(err, errUpstreamTruncatedResponse) {
+				t.Fatalf("expected truncated response error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestParseEventStreamInlineThinkingWithAnswerCompletes(t *testing.T) {
+	chunks := []string{"<thin", "king>plan</thinking>\n\n", "The answer."}
+	for name, content := range map[string][]string{
+		"answer after block":    chunks,
+		"literal tag in answer": {"Wrap it in a <thinking> tag"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			frames := make([][]byte, 0, len(content)+1)
+			for _, chunk := range content {
+				frames = append(frames, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": chunk}))
+			}
+			frames = append(frames, meteringFrame(t))
+			var text string
+			err := parseFrames(t, &KiroStreamCallback{OnText: func(s string, _ bool) { text += s }}, frames...)
+			if err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			//! Classification must not rewrite what handlers receive; they split tags themselves.
+			if want := strings.Join(content, ""); text != want {
+				t.Fatalf("OnText got %q, want raw %q", text, want)
+			}
+		})
+	}
+}
+
+func TestIssueInlineThinkingOnlyTurnIsRetriedOnEveryEndpoint(t *testing.T) {
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(path+map[bool]string{false: "/json", true: "/sse"}[stream], func(t *testing.T) {
+				var calls atomic.Int32
+				h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+					calls.Add(1)
+					writeFrames(w,
+						awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "<thinking>plan the answer</thinking>"}),
+						meteringFrame(t),
+					)
+				})
+				body := map[string]interface{}{"model": "claude-sonnet-4.6-thinking", "max_tokens": 512, "stream": stream, "store": false, "input": "hi",
+					"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}}}
+				raw, _ := json.Marshal(body)
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(raw))))
+
+				if !strings.Contains(rec.Body.String(), errUpstreamTruncatedResponse.Error()) {
+					t.Fatalf("thinking-only turn served as complete: status=%d body=%s", rec.Code, rec.Body.String())
+				}
+				//! SSE already streamed the reasoning, so it can only end with an error event; JSON can still retry.
+				if !stream && calls.Load() < 2 {
+					t.Fatalf("upstream called %d times; a truncated turn must be retried", calls.Load())
+				}
+			})
+		}
 	}
 }

@@ -1,11 +1,11 @@
 package proxy
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
-	"kiro-go/config"
-	accountpool "kiro-go/pool"
+	"kiro-proxy/config"
+	"kiro-proxy/db"
+	accountpool "kiro-proxy/pool"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,249 +27,9 @@ func TestThinkingSourceReasoningFirst(t *testing.T) {
 	}
 }
 
-func TestAdminAccountsExposeApiKeyID(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
-	if err != nil {
-		t.Fatalf("add key: %v", err)
-	}
-	if err := config.AddAccount(config.Account{ID: "account-owner", ApiKeyID: key.ID, Enabled: true, AccessToken: "token-owner"}); err != nil {
-		t.Fatalf("add account: %v", err)
-	}
-	p := accountpool.GetPool()
-	p.Reload()
-	h := &Handler{pool: p}
-	rec := httptest.NewRecorder()
-	h.apiGetAccounts(rec, httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("accounts status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var accounts []map[string]interface{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &accounts); err != nil {
-		t.Fatalf("decode accounts: %v", err)
-	}
-	if len(accounts) != 1 || accounts[0]["apiKeyId"] != key.ID {
-		t.Fatalf("expected apiKeyId %q, got %+v", key.ID, accounts)
-	}
-}
-
-func TestAdminAddAccountRejectsInvalidOrDisabledApiKeyID(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	disabled, err := config.AddApiKey(config.ApiKeyEntry{Name: "disabled", Key: "sk-disabled", Enabled: false})
-	if err != nil {
-		t.Fatalf("add key: %v", err)
-	}
-	h := &Handler{pool: accountpool.GetPool()}
-	for _, tc := range []struct {
-		name string
-		id   string
-	}{
-		{name: "unknown", id: "missing-key"},
-		{name: "disabled", id: disabled.ID},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			body := strings.NewReader(`{"id":"reject-` + tc.name + `","apiKeyId":"` + tc.id + `","enabled":true,"accessToken":"token-` + tc.name + `"}`)
-			rec := httptest.NewRecorder()
-			h.apiAddAccount(rec, httptest.NewRequest(http.MethodPost, "/admin/api/accounts", body))
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
-			}
-		})
-	}
-	if got := config.GetAccounts(); len(got) != 0 {
-		t.Fatalf("invalid bindings should not be saved, got %+v", got)
-	}
-}
-
-func TestAdminAccountCreateAndUpdateRoundTripApiKeyID(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
-	if err != nil {
-		t.Fatalf("add key: %v", err)
-	}
-	h := &Handler{pool: accountpool.GetPool()}
-	createRec := httptest.NewRecorder()
-	h.apiAddAccount(createRec, httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(`{"id":"roundtrip","apiKeyId":"`+key.ID+`","enabled":true,"accessToken":"token-roundtrip"}`)))
-	if createRec.Code != http.StatusOK {
-		t.Fatalf("create status=%d body=%s", createRec.Code, createRec.Body.String())
-	}
-	var createPayload map[string]interface{}
-	if err := json.Unmarshal(createRec.Body.Bytes(), &createPayload); err != nil || createPayload["apiKeyId"] != key.ID {
-		t.Fatalf("create response apiKeyId=%v body=%s", createPayload["apiKeyId"], createRec.Body.String())
-	}
-	updateRec := httptest.NewRecorder()
-	h.apiUpdateAccount(updateRec, httptest.NewRequest(http.MethodPut, "/admin/api/accounts/roundtrip", strings.NewReader(`{"apiKeyId":""}`)), "roundtrip")
-	if updateRec.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", updateRec.Code, updateRec.Body.String())
-	}
-	var updatePayload map[string]interface{}
-	if err := json.Unmarshal(updateRec.Body.Bytes(), &updatePayload); err != nil || updatePayload["apiKeyId"] != "" {
-		t.Fatalf("update response apiKeyId=%v body=%s", updatePayload["apiKeyId"], updateRec.Body.String())
-	}
-}
-
-func TestAdminAccountApiKeyIDIsTrimmedOnCreateAndUpdate(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
-	if err != nil {
-		t.Fatalf("add key: %v", err)
-	}
-	h := &Handler{pool: accountpool.GetPool()}
-	createBody := `{"id":"trimmed","apiKeyId":"  ` + key.ID + `  ","enabled":true,"accessToken":"token-trimmed"}`
-	createRec := httptest.NewRecorder()
-	h.apiAddAccount(createRec, httptest.NewRequest(http.MethodPost, "/admin/api/accounts", strings.NewReader(createBody)))
-	if createRec.Code != http.StatusOK {
-		t.Fatalf("create status=%d body=%s", createRec.Code, createRec.Body.String())
-	}
-	accounts := config.GetAccounts()
-	if len(accounts) != 1 || accounts[0].ApiKeyID != key.ID {
-		t.Fatalf("create did not normalize apiKeyId: %+v", accounts)
-	}
-	updateRec := httptest.NewRecorder()
-	h.apiUpdateAccount(updateRec, httptest.NewRequest(http.MethodPut, "/admin/api/accounts/trimmed", strings.NewReader(`{"apiKeyId":"  `+key.ID+`  "}`)), "trimmed")
-	if updateRec.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", updateRec.Code, updateRec.Body.String())
-	}
-	if got := config.GetAccounts()[0].ApiKeyID; got != key.ID {
-		t.Fatalf("update did not normalize apiKeyId: %q", got)
-	}
-}
-
-func TestAdminUpdateAccountPreservesBindingWhenApiKeyIDOmitted(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
-	if err != nil {
-		t.Fatalf("add key: %v", err)
-	}
-	if err := config.AddAccount(config.Account{ID: "preserve-binding", ApiKeyID: key.ID, Enabled: true, AccessToken: "token-preserve"}); err != nil {
-		t.Fatalf("add account: %v", err)
-	}
-	h := &Handler{pool: accountpool.GetPool()}
-	rec := httptest.NewRecorder()
-	h.apiUpdateAccount(rec, httptest.NewRequest(http.MethodPut, "/admin/api/accounts/preserve-binding", strings.NewReader(`{"nickname":"updated"}`)), "preserve-binding")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	got := config.GetAccounts()
-	if len(got) != 1 || got[0].ApiKeyID != key.ID || got[0].Nickname != "updated" {
-		t.Fatalf("binding was lost during unrelated update: %+v", got)
-	}
-}
-
-func TestAdminUpdateAccountRejectsInvalidApiKeyIDWithoutChangingAccount(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	key, err := config.AddApiKey(config.ApiKeyEntry{Name: "owner", Key: "sk-owner", Enabled: true})
-	if err != nil {
-		t.Fatalf("add key: %v", err)
-	}
-	if err := config.AddAccount(config.Account{ID: "account-owner", ApiKeyID: key.ID, Enabled: true, AccessToken: "token-owner"}); err != nil {
-		t.Fatalf("add account: %v", err)
-	}
-	h := &Handler{pool: accountpool.GetPool()}
-	rec := httptest.NewRecorder()
-	body := strings.NewReader(`{"apiKeyId":"missing-key","nickname":"changed"}`)
-	h.apiUpdateAccount(rec, httptest.NewRequest(http.MethodPut, "/admin/api/accounts/account-owner", body), "account-owner")
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
-	}
-	got := config.GetAccounts()
-	if len(got) != 1 || got[0].ApiKeyID != key.ID || got[0].Nickname != "" {
-		t.Fatalf("account changed after rejected update: %+v", got)
-	}
-}
-
-func TestAdminSettingsExposePromptCacheConfig(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	h := &Handler{pool: accountpool.GetPool()}
-	rec := httptest.NewRecorder()
-	h.apiGetSettings(rec, httptest.NewRequest(http.MethodGet, "/admin/api/settings", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("settings status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	var payload map[string]interface{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("decode settings: %v", err)
-	}
-	if payload["promptCacheEmulationEnabled"] != true || payload["promptCacheEmulationMode"] != config.PromptCacheModeUniform {
-		t.Fatalf("missing/default prompt cache fields: %+v", payload)
-	}
-	for _, field := range []string{
-		"promptCacheEmulationRatio",
-		"promptCacheCreationEmulationRatio",
-		"promptCacheReadEmulationRatio",
-	} {
-		if _, ok := payload[field]; !ok {
-			t.Fatalf("settings response missing %q: %+v", field, payload)
-		}
-	}
-}
-
-func TestAdminSettingsUpdatePromptCacheConfigRoundTripAndPatch(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	h := &Handler{pool: accountpool.GetPool()}
-	body := strings.NewReader(`{"promptCacheEmulationEnabled":true,"promptCacheEmulationMode":"independent","promptCacheEmulationRatio":0.8,"promptCacheCreationEmulationRatio":0.6,"promptCacheReadEmulationRatio":0.4}`)
-	rec := httptest.NewRecorder()
-	h.apiUpdateSettings(rec, httptest.NewRequest(http.MethodPost, "/admin/api/settings", body))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("update status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	got := config.EffectivePromptCacheSettings("")
-	want := config.PromptCacheSettings{Enabled: true, Mode: config.PromptCacheModeIndependent, Ratio: 0.8, CreationRatio: 0.6, ReadRatio: 0.4}
-	if got != want {
-		t.Fatalf("settings=%+v, want %+v", got, want)
-	}
-
-	patchRec := httptest.NewRecorder()
-	h.apiUpdateSettings(patchRec, httptest.NewRequest(http.MethodPost, "/admin/api/settings", strings.NewReader(`{"promptCacheReadEmulationRatio":0.2}`)))
-	if patchRec.Code != http.StatusOK {
-		t.Fatalf("patch status=%d body=%s", patchRec.Code, patchRec.Body.String())
-	}
-	got = config.EffectivePromptCacheSettings("")
-	if got.Enabled != want.Enabled || got.Mode != want.Mode || got.Ratio != want.Ratio || got.CreationRatio != want.CreationRatio || got.ReadRatio != 0.2 {
-		t.Fatalf("partial patch changed unexpected fields: %+v", got)
-	}
-}
-
-func TestAdminSettingsRejectInvalidPromptCacheConfigWithoutChangingIt(t *testing.T) {
-	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	h := &Handler{pool: accountpool.GetPool()}
-	original := config.EffectivePromptCacheSettings("")
-	for _, body := range []string{
-		`{"promptCacheEmulationMode":"unsupported"}`,
-		`{"promptCacheEmulationRatio":1.01}`,
-		`{"promptCacheReadEmulationRatio":-0.01}`,
-	} {
-		rec := httptest.NewRecorder()
-		h.apiUpdateSettings(rec, httptest.NewRequest(http.MethodPost, "/admin/api/settings", strings.NewReader(body)))
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("body=%s status=%d response=%s, want 400", body, rec.Code, rec.Body.String())
-		}
-		if got := config.EffectivePromptCacheSettings(""); got != original {
-			t.Fatalf("invalid update changed settings: got=%+v want=%+v", got, original)
-		}
-	}
-}
-
 func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) {
-	cfgFile := t.TempDir() + "/config.json"
+	resetObservePersistenceForTest(t)
+	cfgFile := t.TempDir() + "/kiro.db"
 	if err := config.Init(cfgFile); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
@@ -301,9 +61,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		requestTokens = append(requestTokens, token)
-		// Fail the first attempted account (whichever it is) so the handler
-		// is forced to add it to `excluded` and retry the other one.
-		if len(requestTokens) == 1 {
+		if token == "token-first" {
 			http.Error(w, "temporary upstream failure", http.StatusInternalServerError)
 			return
 		}
@@ -311,9 +69,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "retried successfully",
 		}))
-		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
-			"stopReason": "end_turn",
-		}))
+		_, _ = w.Write(meteringFrame(t))
 	}))
 	defer server.Close()
 
@@ -344,20 +100,17 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	}
 
 	rec := httptest.NewRecorder()
-	h.handleClaudeNonStream(context.Background(), rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	h.handleClaudeNonStream(rec, req, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, nil)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected retry to succeed, status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if len(requestTokens) != 2 {
-		t.Fatalf("expected two account attempts, got %v", requestTokens)
+	if len(requestTokens) != 4 {
+		t.Fatalf("expected four account attempts, got %v", requestTokens)
 	}
-	if requestTokens[0] == requestTokens[1] {
+	if requestTokens[0] != "token-first" || requestTokens[1] != "token-first" || requestTokens[2] != "token-first" || requestTokens[3] != "token-second" {
 		t.Fatalf("expected first account to be excluded before retry, got %v", requestTokens)
-	}
-	tokenSet := map[string]bool{requestTokens[0]: true, requestTokens[1]: true}
-	if !tokenSet["token-first"] || !tokenSet["token-second"] {
-		t.Fatalf("expected both accounts to be tried, got %v", requestTokens)
 	}
 
 	var resp ClaudeResponse
@@ -367,50 +120,298 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	if len(resp.Content) == 0 || resp.Content[0].Text != "retried successfully" {
 		t.Fatalf("expected retried response content, got %#v", resp.Content)
 	}
+
+	stats, err := queryPersistedRequestStats()
+	if err != nil {
+		t.Fatalf("query request stats: %v", err)
+	}
+	if stats.TotalRequests != 1 || stats.SuccessRequests != 1 || stats.FailedRequests != 0 {
+		t.Fatalf("expected one final successful request row, got %#v", stats)
+	}
+	errors, err := loadRecentErrorsFromDB(10)
+	if err != nil {
+		t.Fatalf("load errors: %v", err)
+	}
+	if len(errors) != 3 {
+		t.Fatalf("expected three retry error rows, got %d", len(errors))
+	}
 }
 
-func TestOpenAIHandlerPropagatesClientCancellation(t *testing.T) {
-	cfgFile := t.TempDir() + "/config.json"
+func TestClaudeNonStreamNoAccountsRecordsOneFailedRequest(t *testing.T) {
+	resetObservePersistenceForTest(t)
+	cfgFile := t.TempDir() + "/kiro.db"
 	if err := config.Init(cfgFile); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), "request-id", "client-cancel"))
-	defer cancel()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{
+		pool:        p,
+		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+	}
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "hello",
+		ModelID: "claude-sonnet-4.5",
+		Origin:  "AI_EDITOR",
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	h.handleClaudeNonStream(rec, req, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, nil)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected no-account failure, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stats, err := queryPersistedRequestStats()
+	if err != nil {
+		t.Fatalf("query request stats: %v", err)
+	}
+	if stats.TotalRequests != 1 || stats.SuccessRequests != 0 || stats.FailedRequests != 1 {
+		t.Fatalf("expected one final failed request row, got %#v", stats)
+	}
+	page := getObserveStore().RequestPage(requestQuery{Page: 1, PageSize: 10, Status: "failed"})
+	if page.Total != 1 || len(page.Requests) != 1 || page.Requests[0].Status != http.StatusServiceUnavailable {
+		t.Fatalf("unexpected failed request page: total=%d rows=%#v", page.Total, page.Requests)
+	}
+}
+
+func TestClaudeAuthFailureRecordsOneFailedRequest(t *testing.T) {
+	resetObservePersistenceForTest(t)
+	cfgFile := t.TempDir() + "/kiro.db"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	require := true
+	if err := config.UpdateSettingsPatch(&require, ""); err != nil {
+		t.Fatalf("enable auth: %v", err)
+	}
+
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"hello"}],"max_tokens":16}`))
+	req.Header.Set("Authorization", "Bearer sk-missing")
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected auth failure, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stats, err := queryPersistedRequestStats()
+	if err != nil {
+		t.Fatalf("query request stats: %v", err)
+	}
+	if stats.TotalRequests != 1 || stats.SuccessRequests != 0 || stats.FailedRequests != 1 {
+		t.Fatalf("expected one auth-failed request row, got %#v", stats)
+	}
+	page := getObserveStore().RequestPage(requestQuery{Page: 1, PageSize: 10, Status: "failed"})
+	if page.Total != 1 || len(page.Requests) != 1 || page.Requests[0].APIKeyMasked != "sk-missing" {
+		t.Fatalf("unexpected failed auth request page: total=%d rows=%#v", page.Total, page.Requests)
+	}
+}
+
+func TestAccountCreditTotalsSumsServerUsage(t *testing.T) {
+	used, limit := accountCreditTotals([]config.Account{
+		{UsageCurrent: 66, UsageLimit: 1000},
+		{UsageCurrent: 2, UsageLimit: 1000},
+		{UsageCurrent: 745, UsageLimit: 1000},
+	})
+	if used != 813 || limit != 3000 {
+		t.Fatalf("expected 813/3000, got %.1f/%.1f", used, limit)
+	}
+}
+
+func TestStatusPayloadUsesRequestDBAndAccountCredits(t *testing.T) {
+	resetObservePersistenceForTest(t)
+	cfgFile := t.TempDir() + "/kiro.db"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	for _, account := range []config.Account{
+		{ID: "acc-1", Enabled: true, UsageCurrent: 66, UsageLimit: 1000},
+		{ID: "acc-2", Enabled: true, UsageCurrent: 2, UsageLimit: 1000},
+	} {
+		if err := config.AddAccount(account); err != nil {
+			t.Fatalf("add account: %v", err)
+		}
+	}
+	s := getObserveStore()
+	defer s.Reset()
+	s.RecordRequest("acc-1", "one@example.com", "claude-sonnet", 10, 20, 0.30, true, http.StatusOK, "")
+	s.RecordRequest("acc-2", "two@example.com", "claude-opus", 0, 0, 0, false, http.StatusInternalServerError, "boom")
+	s.RecordError("acc-2", "two@example.com", "claude-opus", http.StatusInternalServerError, "boom")
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, startTime: time.Now().Unix()}
+	rec := httptest.NewRecorder()
+	h.apiGetStatus(rec, httptest.NewRequest(http.MethodGet, "/admin/api/status", nil))
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if body["accounts"].(float64) != 2 || body["totalRequests"].(float64) != 2 || body["successRequests"].(float64) != 1 || body["failedRequests"].(float64) != 1 {
+		t.Fatalf("unexpected status counts: %#v", body)
+	}
+	if body["totalTokens"].(float64) != 30 {
+		t.Fatalf("expected 30 app tokens, got %#v", body["totalTokens"])
+	}
+	if math.Abs(body["totalCredits"].(float64)-0.30) > 0.000001 {
+		t.Fatalf("expected 0.30 app credits, got %#v", body["totalCredits"])
+	}
+	if body["successTokens"].(float64) != 30 {
+		t.Fatalf("expected 30 success tokens, got %#v", body["successTokens"])
+	}
+	if body["successInTokens"].(float64) != 10 {
+		t.Fatalf("expected 10 success input tokens, got %#v", body["successInTokens"])
+	}
+	if body["successOutTokens"].(float64) != 20 {
+		t.Fatalf("expected 20 success output tokens, got %#v", body["successOutTokens"])
+	}
+	if math.Abs(body["successCredits"].(float64)-0.30) > 0.000001 {
+		t.Fatalf("expected 0.30 success credits, got %#v", body["successCredits"])
+	}
+	if body["totalErrorEvents"].(float64) != 1 {
+		t.Fatalf("expected 1 error event, got %#v", body["totalErrorEvents"])
+	}
+	if body["accountCreditsUsed"].(float64) != 68 || body["accountCreditsLimit"].(float64) != 2000 {
+		t.Fatalf("unexpected account credits: used=%#v limit=%#v", body["accountCreditsUsed"], body["accountCreditsLimit"])
+	}
+}
+
+func TestUpdateSettingsReloadsPoolAfterAllowOverUsageChange(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
 	if err := config.AddAccount(config.Account{
-		ID: "cancel-test", Enabled: true, AuthMethod: "api_key", KiroApiKey: "ksk_test", ProxyURL: kiroRetryTestProxyURL,
+		ID:           "over",
+		Enabled:      true,
+		UsageCurrent: 10,
+		UsageLimit:   10,
 	}); err != nil {
 		t.Fatalf("add account: %v", err)
 	}
 
-	var calls int
-	oldClient, hadOldClient := proxyClientCache.Load(kiroRetryTestProxyURL)
-	proxyClientCache.Store(kiroRetryTestProxyURL, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		if got := req.Context().Value("request-id"); got != "client-cancel" {
-			t.Fatalf("upstream request context value = %v, want client-cancel", got)
+	p := accountpool.GetPool()
+	p.Reload()
+	if got := p.GetNext(); got != nil {
+		t.Fatalf("expected over-quota account to be unavailable before enabling allowOverUsage, got %#v", got)
+	}
+
+	h := &Handler{pool: p}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/settings", strings.NewReader(`{"allowOverUsage":true}`))
+	h.apiUpdateSettings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected settings update to succeed, status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := p.GetNext(); got == nil || got.ID != "over" {
+		t.Fatalf("expected pool reload to make over-quota account routable, got %#v", got)
+	}
+}
+
+func TestAdminModelMappingsSaveAndApply(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	config.SetPassword("admin-password")
+	h := newHandlerWithoutBackgroundForTest(t)
+
+	body := strings.NewReader(`{"mappings":[{"key":"my-real-life-model","value":"claude-haiku-4.5"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/model-mappings", body)
+	req.Header.Set("X-Admin-Password", "admin-password")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save mappings status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/model-mappings", nil)
+	req.Header.Set("X-Admin-Password", "admin-password")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get mappings status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Mappings []config.ModelMappingRule `json:"mappings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode mappings: %v", err)
+	}
+	if len(got.Mappings) != 1 || got.Mappings[0].Key != "my-real-life-model" || got.Mappings[0].Value != "claude-haiku-4.5" {
+		t.Fatalf("unexpected saved mappings: %#v", got.Mappings)
+	}
+
+	gotModel, gotThinking := ParseModelAndThinking("vendor/my-real-life-model-thinking", "-thinking")
+	if gotModel != "claude-haiku-4.5" || !gotThinking {
+		t.Fatalf("custom mapping parse = (%q, %v), want (%q, %v)", gotModel, gotThinking, "claude-haiku-4.5", true)
+	}
+}
+
+func TestAdminAPIDoesNotAcceptPasswordCookie(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	config.SetPassword("admin-password")
+	h := newHandlerWithoutBackgroundForTest(t)
+
+	cookieReq := httptest.NewRequest(http.MethodGet, "/admin/api/status", nil)
+	cookieReq.AddCookie(&http.Cookie{Name: "admin_password", Value: "admin-password"})
+	cookieRec := httptest.NewRecorder()
+	h.ServeHTTP(cookieRec, cookieReq)
+	if cookieRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected cookie fallback to be rejected, got %d body=%s", cookieRec.Code, cookieRec.Body.String())
+	}
+
+	headerReq := httptest.NewRequest(http.MethodGet, "/admin/api/status", nil)
+	headerReq.Header.Set("X-Admin-Password", "admin-password")
+	headerRec := httptest.NewRecorder()
+	h.ServeHTTP(headerRec, headerReq)
+	if headerRec.Code != http.StatusOK {
+		t.Fatalf("expected header password to pass, got %d body=%s", headerRec.Code, headerRec.Body.String())
+	}
+}
+
+func TestBatchDeleteAccounts(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	for _, account := range []config.Account{
+		{ID: "keep", Enabled: true},
+		{ID: "delete-a", Enabled: true},
+		{ID: "delete-b", Enabled: true},
+	} {
+		if err := config.AddAccount(account); err != nil {
+			t.Fatalf("add account %s: %v", account.ID, err)
 		}
-		cancel()
-		return kiroStreamTestResponse(bytes.NewReader(nil)), nil
-	})})
-	t.Cleanup(func() {
-		if hadOldClient {
-			proxyClientCache.Store(kiroRetryTestProxyURL, oldClient)
-		} else {
-			proxyClientCache.Delete(kiroRetryTestProxyURL)
-		}
-	})
+	}
 
 	p := accountpool.GetPool()
 	p.Reload()
-	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"hello"}]}`)).WithContext(ctx)
+	h := &Handler{pool: p}
 	rec := httptest.NewRecorder()
-	h.handleOpenAIChat(rec, req)
-	if calls != 1 {
-		t.Fatalf("upstream calls=%d, want 1 after cancellation", calls)
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/batch", strings.NewReader(`{"ids":["delete-a","delete-b","missing"],"action":"delete"}`))
+	h.apiBatchAccounts(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected batch delete to succeed, status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if rec.Body.Len() != 0 {
-		t.Fatalf("canceled request must not write a proxy response, got %s", rec.Body.String())
+	var body map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode batch response: %v", err)
+	}
+	if body["deleted"].(float64) != 2 || body["failed"].(float64) != 1 {
+		t.Fatalf("unexpected delete counts: %#v", body)
+	}
+	accounts := config.GetAccounts()
+	if len(accounts) != 1 || accounts[0].ID != "keep" {
+		t.Fatalf("expected only keep account to remain, got %#v", accounts)
+	}
+	if got := p.GetNext(); got == nil || got.ID != "keep" {
+		t.Fatalf("expected pool reload to keep only remaining account, got %#v", got)
 	}
 }
 
@@ -481,6 +482,257 @@ func TestValidateOpenAIRequestShapeAllowsToolResultFinalTurn(t *testing.T) {
 
 	if msg := validateOpenAIRequestShape(req); msg != "" {
 		t.Fatalf("expected tool-result final turn to be valid, got %q", msg)
+	}
+}
+
+func TestAuthenticateMultiApiKeyAndLimits(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	require := true
+	if err := config.UpdateSettingsPatch(&require, ""); err != nil {
+		t.Fatalf("enable auth: %v", err)
+	}
+	h := &Handler{}
+
+	missing := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	if _, err := h.authenticate(missing); err == nil {
+		t.Fatalf("expected fail-closed error when auth is enabled without keys")
+	}
+
+	entry, err := config.AddApiKey(config.ApiKeyEntry{Name: "limited", Key: "sk-limited", Enabled: true, TokenLimit: 10})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	okReq := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	okReq.Header.Set("Authorization", "Bearer sk-limited")
+	got, err := h.authenticate(okReq)
+	if err != nil {
+		t.Fatalf("authenticate valid key: %v", err)
+	}
+	if got == nil || got.ID != entry.ID {
+		t.Fatalf("expected matched key in auth result, got %#v", got)
+	}
+
+	if err := config.RecordApiKeyUsage(entry.ID, 10, 0); err != nil {
+		t.Fatalf("record key usage: %v", err)
+	}
+	if _, err := h.authenticate(okReq); err == nil || !strings.Contains(err.Error(), "token limit exceeded") {
+		t.Fatalf("expected token limit error, got %v", err)
+	}
+}
+
+func TestApiKeyListMasksAndDetailReturnsCopyableKey(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	entry, err := config.AddApiKey(config.ApiKeyEntry{Name: "client", Key: "sk-copyable", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	h := &Handler{}
+
+	listRec := httptest.NewRecorder()
+	h.apiListApiKeys(listRec, httptest.NewRequest(http.MethodGet, "/admin/api/api-keys", nil))
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", listRec.Code, listRec.Body.String())
+	}
+	var listBody struct {
+		ApiKeys []map[string]interface{} `json:"apiKeys"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listBody); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listBody.ApiKeys) != 1 {
+		t.Fatalf("expected one key, got %#v", listBody.ApiKeys)
+	}
+	if _, ok := listBody.ApiKeys[0]["key"]; ok {
+		t.Fatalf("list response must not expose raw key")
+	}
+	if listBody.ApiKeys[0]["keyMasked"] == "" {
+		t.Fatalf("expected masked key in list response")
+	}
+
+	getRec := httptest.NewRecorder()
+	h.apiGetApiKey(getRec, httptest.NewRequest(http.MethodGet, "/admin/api/api-keys/"+entry.ID, nil), entry.ID)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get status = %d body=%s", getRec.Code, getRec.Body.String())
+	}
+	var detail map[string]interface{}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detail["key"] != "sk-copyable" {
+		t.Fatalf("expected detail response to include copyable key, got %#v", detail["key"])
+	}
+}
+
+func TestModelsEndpointRequiresManagedApiKey(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	require := true
+	if err := config.UpdateSettingsPatch(&require, ""); err != nil {
+		t.Fatalf("enable auth: %v", err)
+	}
+	if _, err := config.AddApiKey(config.ApiKeyEntry{Name: "models", Key: "sk-models", Enabled: true}); err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	h := &Handler{
+		cachedModels: []ModelInfo{{ModelId: "claude-sonnet-4.5", InputTypes: []string{"TEXT"}}},
+	}
+
+	missing := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, missing)
+	if missingRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing key to fail, got %d", missingRec.Code)
+	}
+
+	okReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	okReq.Header.Set("Authorization", "Bearer sk-models")
+	okRec := httptest.NewRecorder()
+	h.ServeHTTP(okRec, okReq)
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("expected valid key to pass, got %d body=%s", okRec.Code, okRec.Body.String())
+	}
+}
+
+func TestCodexModelsEndpointReturnsManifest(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	require := true
+	if err := config.UpdateSettingsPatch(&require, ""); err != nil {
+		t.Fatalf("enable auth: %v", err)
+	}
+	if _, err := config.AddApiKey(config.ApiKeyEntry{Name: "codex-models", Key: "sk-codex-models", Enabled: true}); err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	tokenLimits := &struct {
+		MaxInputTokens  int `json:"maxInputTokens"`
+		MaxOutputTokens int `json:"maxOutputTokens"`
+	}{MaxInputTokens: 1000000, MaxOutputTokens: 64000}
+	h := &Handler{
+		cachedModels: []ModelInfo{{
+			ModelId:     "claude-opus-4.8",
+			ModelName:   "Claude Opus 4.8",
+			Description: "Preview model",
+			InputTypes:  []string{"TEXT", "IMAGE"},
+			TokenLimits: tokenLimits,
+		}},
+	}
+
+	missing := httptest.NewRequest(http.MethodGet, "/v1/codex/models", nil)
+	missingRec := httptest.NewRecorder()
+	h.ServeHTTP(missingRec, missing)
+	if missingRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing key to fail, got %d", missingRec.Code)
+	}
+
+	okReq := httptest.NewRequest(http.MethodGet, "/v1/codex/models", nil)
+	okReq.Header.Set("Authorization", "Bearer sk-codex-models")
+	okRec := httptest.NewRecorder()
+	h.ServeHTTP(okRec, okReq)
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("expected valid key to pass, got %d body=%s", okRec.Code, okRec.Body.String())
+	}
+
+	var body codexModelsResponse
+	if err := json.NewDecoder(okRec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Models) < 2 {
+		t.Fatalf("expected base and thinking entries, got %#v", body.Models)
+	}
+	if body.Models[0].Slug != "claude-opus-4.8" || body.Models[0].ContextWindow != 1000000 {
+		t.Fatalf("unexpected base model entry: %#v", body.Models[0])
+	}
+	if !body.Models[0].SupportsSearchTool {
+		t.Fatalf("expected Codex manifest to expose hosted web search support")
+	}
+	if body.Models[1].Slug != "claude-opus-4.8-thinking" || body.Models[1].DefaultReasoningLevel != "high" {
+		t.Fatalf("unexpected thinking model entry: %#v", body.Models[1])
+	}
+}
+
+func TestUnknownManagedApiKeyDoesNotAuthenticate(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	require := true
+	if err := config.UpdateSettingsPatch(&require, ""); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+	if keys := config.ListApiKeys(); len(keys) != 0 {
+		t.Fatalf("expected no managed keys, got %#v", keys)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer sk-unknown")
+	if _, err := (&Handler{}).authenticate(req); err == nil {
+		t.Fatalf("expected unknown key to stay invalid")
+	}
+}
+
+func TestApiKeyReservationRejectsProjectedTokenOverrun(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	entry, err := config.AddApiKey(config.ApiKeyEntry{Name: "limited", Key: "sk-limited", Enabled: true, TokenLimit: 10})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+
+	if _, err := reserveApiKeyUsage(entry.ID, entry.Key, 11); err == nil {
+		t.Fatalf("expected projected token budget to fail")
+	}
+	got := config.GetApiKeyEntry(entry.ID)
+	if got == nil || got.TokensUsed != 0 || got.RequestsCount != 0 {
+		t.Fatalf("failed reservation changed usage: %#v", got)
+	}
+}
+
+func TestRecordSuccessForApiKeyAttributesUsage(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	entry, err := config.AddApiKey(config.ApiKeyEntry{Name: "usage", Key: "sk-usage", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	h := &Handler{}
+	reservation, err := reserveApiKeyUsage(entry.ID, entry.Key, 10)
+	if err != nil {
+		t.Fatalf("reserve key usage: %v", err)
+	}
+	h.recordSuccessForApiKey(reservation, 7, 3, 1.25)
+
+	got := config.GetApiKeyEntry(entry.ID)
+	if got == nil || got.TokensUsed != 10 || got.CreditsUsed != 1.25 || got.RequestsCount != 1 {
+		t.Fatalf("usage not attributed: %#v", got)
+	}
+}
+
+func TestFinalizeUsageTokensPrefersProviderUsage(t *testing.T) {
+	in, out := finalizeUsageTokens(120, 34, 999, 5000, 88)
+	if in != 120 || out != 34 {
+		t.Fatalf("expected provider usage to win, got input=%d output=%d", in, out)
+	}
+}
+
+func TestFinalizeUsageTokensFallsBackWhenProviderUsageMissing(t *testing.T) {
+	in, out := finalizeUsageTokens(0, 0, 999, 5000, 88)
+	if in != 5000 || out != 88 {
+		t.Fatalf("expected context input and estimated output fallback, got input=%d output=%d", in, out)
+	}
+
+	in, out = finalizeUsageTokens(0, 0, 999, 0, 88)
+	if in != 999 || out != 88 {
+		t.Fatalf("expected estimated input fallback, got input=%d output=%d", in, out)
 	}
 }
 
@@ -772,176 +1024,77 @@ func TestBuildAnthropicModelsResponseGeneratesThinkingVariants(t *testing.T) {
 	}
 }
 
-func TestOpenAIStreamReportsPostOutputUpstreamFailure(t *testing.T) {
-	cfgFile := t.TempDir() + "/config.json"
-	if err := config.Init(cfgFile); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	if err := config.AddAccount(config.Account{
-		ID:          "test-account",
-		Enabled:     true,
-		AccessToken: "token-test",
-		ProfileArn:  "arn:aws:codewhisperer:profile/test",
-	}); err != nil {
-		t.Fatalf("add account: %v", err)
-	}
-	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
-		t.Fatalf("set preferred endpoint: %v", err)
-	}
-	if err := config.UpdateEndpointFallback(false); err != nil {
-		t.Fatalf("disable endpoint fallback: %v", err)
-	}
+func TestBuildCodexModelsResponseUsesKiroModelMetadata(t *testing.T) {
+	tokenLimits := &struct {
+		MaxInputTokens  int `json:"maxInputTokens"`
+		MaxOutputTokens int `json:"maxOutputTokens"`
+	}{MaxInputTokens: 1000000, MaxOutputTokens: 128000}
+	models := buildCodexModelsResponse([]ModelInfo{{
+		ModelId:        "claude-opus-4.8",
+		ModelName:      "Claude Opus 4.8",
+		Description:    "Experimental preview",
+		InputTypes:     []string{"TEXT", "IMAGE"},
+		RateMultiplier: 2.2,
+		TokenLimits:    tokenLimits,
+	}}, "-thinking")
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": strings.Repeat("partial answer ", 8),
-		}))
-		_, _ = w.Write([]byte{0, 0, 1})
-	}))
-	defer server.Close()
-	defer swapKiroEndpointsForTest(t, server)()
-
-	p := accountpool.GetPool()
-	p.Reload()
-	h := &Handler{
-		pool:        p,
-		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+	if len(models) != 6 {
+		t.Fatalf("expected base, thinking, and compatibility aliases, got %d", len(models))
 	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
-		"model":"claude-sonnet-4.5",
-		"messages":[{"role":"user","content":"hello"}],
-		"stream":true
-	}`))
-	rec := httptest.NewRecorder()
-	h.handleOpenAIChat(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected stream status 200, got %d body=%s", rec.Code, rec.Body.String())
+	if models[0].Slug != "claude-opus-4.8" || models[0].DisplayName != "Claude Opus 4.8" {
+		t.Fatalf("unexpected base model identity: %#v", models[0])
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "partial answer") {
-		t.Fatalf("expected partial content before failure, got %s", body)
+	if strings.ContainsAny(models[0].ModelMessages.InstructionsTemplate, "{}") || !strings.Contains(models[0].ModelMessages.InstructionsTemplate, "claude-opus-4.8") {
+		t.Fatalf("expected direct model name in instructions template, got %q", models[0].ModelMessages.InstructionsTemplate)
 	}
-	if !strings.Contains(body, `"error"`) || !strings.Contains(body, `"message"`) {
-		t.Fatalf("expected an SSE error after partial content, got %s", body)
+	for _, model := range models {
+		if strings.ContainsAny(model.ModelMessages.InstructionsTemplate, "{}") {
+			t.Fatalf("expected direct model instructions for %s: %q", model.Slug, model.ModelMessages.InstructionsTemplate)
+		}
+		if len(model.ModelMessages.InstructionsVariables) != 0 {
+			t.Fatalf("expected no instruction variables for %s, got %#v", model.Slug, model.ModelMessages.InstructionsVariables)
+		}
 	}
-	if strings.Contains(body, "[DONE]") {
-		t.Fatalf("a failed stream must not report completion, got %s", body)
+	if models[0].ContextWindow != 1000000 || models[0].TruncationPolicy.Limit != 320000 {
+		t.Fatalf("expected Kiro token limits to drive Codex limits, got %#v", models[0])
+	}
+	if models[1].Slug != "claude-opus-4.8-thinking" || models[1].DefaultReasoningLevel != "high" {
+		t.Fatalf("unexpected thinking variant: %#v", models[1])
+	}
+	if !models[0].SupportsImageDetailOriginal || len(models[0].InputModalities) != 2 {
+		t.Fatalf("expected image capability to be preserved, got %#v", models[0])
+	}
+	if models[2].Slug != "gpt-5.4-mini" || models[3].Slug != "gpt-5" || models[4].Slug != "gpt-4o" || models[5].Slug != "gpt-4" {
+		t.Fatalf("expected compatibility aliases at the end, got %#v %#v %#v %#v", models[2], models[3], models[4], models[5])
 	}
 }
 
-func TestClaudeResponsePreservesUpstreamMaxTokensStopReason(t *testing.T) {
-	cfgFile := t.TempDir() + "/config.json"
-	if err := config.Init(cfgFile); err != nil {
+func TestAdminPasswordChangeRequiresEightCharacters(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
-	if err := config.AddAccount(config.Account{
-		ID:          "test-account",
-		Enabled:     true,
-		AccessToken: "token-test",
-		ProfileArn:  "arn:aws:codewhisperer:profile/test",
-	}); err != nil {
-		t.Fatalf("add account: %v", err)
-	}
-	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
-		t.Fatalf("set preferred endpoint: %v", err)
-	}
-	if err := config.UpdateEndpointFallback(false); err != nil {
-		t.Fatalf("disable endpoint fallback: %v", err)
+	config.SetPassword("admin-password")
+	h := newHandlerWithoutBackgroundForTest(t)
+
+	change := func(password string) int {
+		body := strings.NewReader(`{"password":"` + password + `"}`)
+		req := httptest.NewRequest(http.MethodPost, "/admin/api/settings", body)
+		req.Header.Set("X-Admin-Password", config.GetPassword())
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "partial answer",
-		}))
-		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
-			"stopReason": "MAX_TOKENS",
-		}))
-	}))
-	defer server.Close()
-	defer swapKiroEndpointsForTest(t, server)()
-
-	p := accountpool.GetPool()
-	p.Reload()
-	h := &Handler{
-		pool:        p,
-		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+	if code := change("1234567"); code != http.StatusBadRequest {
+		t.Fatalf("7-character password: got %d, want 400", code)
 	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
-		"model":"claude-sonnet-4.5",
-		"max_tokens":100,
-		"messages":[{"role":"user","content":"hello"}]
-	}`))
-	rec := httptest.NewRecorder()
-	h.handleClaudeMessages(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d body=%s", rec.Code, rec.Body.String())
+	if config.GetPassword() != "admin-password" {
+		t.Fatal("a rejected password was still saved")
 	}
-	var response ClaudeResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
+	if code := change("12345678"); code != http.StatusOK {
+		t.Fatalf("8-character password: got %d, want 200", code)
 	}
-	if response.StopReason != "max_tokens" {
-		t.Fatalf("stop_reason=%q, want max_tokens", response.StopReason)
-	}
-}
-
-func TestOpenAIStreamPreservesUpstreamMaxTokensFinishReason(t *testing.T) {
-	cfgFile := t.TempDir() + "/config.json"
-	if err := config.Init(cfgFile); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	if err := config.AddAccount(config.Account{
-		ID:          "test-account",
-		Enabled:     true,
-		AccessToken: "token-test",
-		ProfileArn:  "arn:aws:codewhisperer:profile/test",
-	}); err != nil {
-		t.Fatalf("add account: %v", err)
-	}
-	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
-		t.Fatalf("set preferred endpoint: %v", err)
-	}
-	if err := config.UpdateEndpointFallback(false); err != nil {
-		t.Fatalf("disable endpoint fallback: %v", err)
-	}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "partial answer",
-		}))
-		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{
-			"stopReason": "MAX_TOKENS",
-		}))
-	}))
-	defer server.Close()
-	defer swapKiroEndpointsForTest(t, server)()
-
-	p := accountpool.GetPool()
-	p.Reload()
-	h := &Handler{
-		pool:        p,
-		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{
-		"model":"claude-sonnet-4.5",
-		"messages":[{"role":"user","content":"hello"}],
-		"stream":true
-	}`))
-	rec := httptest.NewRecorder()
-	h.handleOpenAIChat(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected stream status 200, got %d body=%s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"finish_reason":"length"`) {
-		t.Fatalf("expected finish_reason=length, got %s", rec.Body.String())
+	if config.GetPassword() != "12345678" {
+		t.Fatal("an accepted password was not saved")
 	}
 }

@@ -5,13 +5,8 @@ import (
 	"testing"
 )
 
-// TestClaudeToKiroFlattensHistoryToolCyclesForCompaction reproduces the context
-// compaction scenario that triggered upstream HTTP 400 "Improperly formed
-// request": a long conversation whose history contains completed tool cycles
-// (assistant tool_use + user tool_result), followed by a plain-text instruction.
-// The generated payload must NOT carry any structured toolUses/toolResults in
-// history, since Kiro's upstream rejects those.
 func TestClaudeToKiroFlattensHistoryToolCyclesForCompaction(t *testing.T) {
+	//! Regression from upstream #104: Kiro answers 400 "Improperly formed request" to structured tool history.
 	req := &ClaudeRequest{
 		Model: "claude-opus-4.8",
 		Messages: []ClaudeMessage{
@@ -29,14 +24,12 @@ func TestClaudeToKiroFlattensHistoryToolCyclesForCompaction(t *testing.T) {
 			{Role: "user", Content: []interface{}{
 				map[string]interface{}{"type": "tool_result", "tool_use_id": "t2", "content": "tests pass"},
 			}},
-			// Final plain-text instruction (the compaction request).
 			{Role: "user", Content: "Summarize everything that happened above."},
 		},
 	}
 
 	payload := ClaudeToKiro(req, false)
 
-	// No history entry may carry structured tool calls or tool results.
 	for i, h := range payload.ConversationState.History {
 		if h.AssistantResponseMessage != nil && len(h.AssistantResponseMessage.ToolUses) > 0 {
 			t.Fatalf("history[%d] still has structured toolUses; upstream rejects this", i)
@@ -48,7 +41,6 @@ func TestClaudeToKiroFlattensHistoryToolCyclesForCompaction(t *testing.T) {
 		}
 	}
 
-	// Current message is plain text, so it must not carry structured tool results.
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage
 	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.ToolResults) > 0 {
 		t.Fatalf("current message should not carry structured toolResults for a plain instruction")
@@ -57,7 +49,6 @@ func TestClaudeToKiroFlattensHistoryToolCyclesForCompaction(t *testing.T) {
 		t.Fatalf("expected current content to be the compaction instruction, got %q", cur.Content)
 	}
 
-	// The narrated tool activity should survive somewhere in history as text.
 	var historyText strings.Builder
 	for _, h := range payload.ConversationState.History {
 		if h.AssistantResponseMessage != nil {
@@ -77,8 +68,6 @@ func TestClaudeToKiroFlattensHistoryToolCyclesForCompaction(t *testing.T) {
 		t.Fatalf("expected narrated tool results to retain output, got:\n%s", combined)
 	}
 
-	// Regression guard: assistant turns must NOT contain tool-invocation-looking
-	// text. Such text trains the model to emit it instead of real tool calls.
 	for i, h := range payload.ConversationState.History {
 		if a := h.AssistantResponseMessage; a != nil {
 			if strings.Contains(a.Content, "[Called tool") {
@@ -86,18 +75,13 @@ func TestClaudeToKiroFlattensHistoryToolCyclesForCompaction(t *testing.T) {
 			}
 		}
 	}
-	// Tool identity must be attributed on the user (result) side, never authored
-	// by the assistant.
 	if !strings.Contains(combined, "[exec_command]") {
 		t.Fatalf("expected tool results to be attributed to exec_command on the user side, got:\n%s", combined)
 	}
 }
 
-// TestClaudeToKiroKeepsActiveToolTurnStructured verifies the in-progress tool
-// case still works: the last assistant turn issues a tool_use and the final user
-// message delivers the matching tool_result. That single active turn must remain
-// structured (last history assistant keeps toolUses, current keeps toolResults).
 func TestClaudeToKiroKeepsActiveToolTurnStructured(t *testing.T) {
+	//! Only the in-flight pair (last assistant toolUses + current toolResults) stays structured.
 	req := &ClaudeRequest{
 		Model: "claude-opus-4.8",
 		Tools: []ClaudeTool{{Name: "exec_command", Description: "run", InputSchema: map[string]interface{}{"type": "object"}}},

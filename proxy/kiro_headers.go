@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"fmt"
-	"kiro-go/config"
+	"kiro-proxy/config"
 	"net/http"
 	"strings"
 )
@@ -57,22 +57,15 @@ func buildKiroHeaderValues(account *config.Account, host, apiName, sdkVersion, m
 }
 
 func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kiroHeaderValues) {
-	token := accountBearerToken(account)
-	if token != "" {
+	if token := accountBearerToken(account); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	// Kiro requires external identity-provider access tokens and API keys to be
-	// identified explicitly. Keep this in the shared header path so streaming
-	// and REST requests cannot drift apart.
-	req.Header.Del("TokenType")
+	//! Kiro rejects an API key or a Microsoft Entra token sent as a plain Bearer token; the tokentype header marks it. Kiro CLI sends it lowercase.
 	req.Header.Del("tokentype")
-	if account != nil {
-		if config.IsAPIKeyAccount(account) {
-			// Upstream accepts either casing; CLI captures use lowercase "tokentype".
-			req.Header.Set("tokentype", "API_KEY")
-		} else if strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp") {
-			req.Header.Set("TokenType", "EXTERNAL_IDP")
-		}
+	if config.IsAPIKeyAccount(account) {
+		req.Header.Set("tokentype", "API_KEY")
+	} else if config.IsExternalIdpAccount(account) {
+		req.Header.Set("tokentype", "EXTERNAL_IDP")
 	}
 	req.Header.Set("User-Agent", values.UserAgent)
 	req.Header.Set("x-amz-user-agent", values.AmzUserAgent)
@@ -82,8 +75,6 @@ func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kir
 	}
 }
 
-// accountBearerToken returns the token used for Authorization: Bearer.
-// API Key accounts prefer KiroApiKey; OAuth accounts use AccessToken.
 func accountBearerToken(account *config.Account) string {
 	if account == nil {
 		return ""

@@ -2,60 +2,17 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"kiro-go/auth"
-	"kiro-go/config"
+	"kiro-proxy/auth"
+	"kiro-proxy/config"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
-
-func TestExternalIdpJSONImportRejectsDuplicateIDBeforeRefresh(t *testing.T) {
-	h := newMicrosoftHandlerForTest(t)
-
-	const existingID = "12345678-1234-4123-8123-123456789012"
-	if err := config.AddAccount(config.Account{
-		ID:           existingID,
-		RefreshToken: "already-persisted-refresh-token",
-		Enabled:      true,
-	}); err != nil {
-		t.Fatalf("seed existing account: %v", err)
-	}
-
-	var outboundRequests int
-	authClient := &http.Client{
-		Transport: handlerMicrosoftRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-			outboundRequests++
-			return nil, fmt.Errorf("duplicate ID must be rejected before outbound request: %s", request.URL)
-		}),
-	}
-	previousAuthClient := auth.SetGlobalAuthClientForTest(authClient)
-	t.Cleanup(func() { auth.SetGlobalAuthClientForTest(previousAuthClient) })
-
-	recorder := callImportCredentialsHandler(t, h, map[string]interface{}{
-		"id":            existingID,
-		"refreshToken":  "different-refresh-token",
-		"clientId":      handlerMicrosoftClientID,
-		"authMethod":    auth.MicrosoftSSOAuthMethod,
-		"tokenEndpoint": handlerMicrosoftTokenEndpoint(),
-		"issuerUrl":     handlerMicrosoftIssuerURL(),
-		"scopes":        handlerMicrosoftScopes(),
-	})
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf("duplicate ID status = %d, want 409; body=%s", recorder.Code, recorder.Body.String())
-	}
-	if outboundRequests != 0 {
-		t.Fatalf("outbound refresh requests = %d, want zero", outboundRequests)
-	}
-	if accounts := config.GetAccounts(); len(accounts) != 1 || accounts[0].ID != existingID {
-		t.Fatalf("duplicate ID import changed persisted accounts: %+v", accounts)
-	}
-}
 
 func TestBareMicrosoftCredentialBlobIsDetectedAndImported(t *testing.T) {
 	h := newMicrosoftHandlerForTest(t)
@@ -147,183 +104,88 @@ func TestBareMicrosoftCredentialBlobIsDetectedAndImported(t *testing.T) {
 		got.UserId != issuerURL+"."+handlerMicrosoftObjectID {
 		t.Fatalf("refreshed identity mismatch: email=%q userId=%q", got.Email, got.UserId)
 	}
-	if got.RefreshTokenFingerprint != config.RefreshTokenFingerprint("bare-refresh-token") {
-		t.Fatalf("original refresh-token fingerprint = %q, want source credential fingerprint",
-			got.RefreshTokenFingerprint)
-	}
 }
 
-func TestMicrosoftPendingProfileSelectionCancelErasesCredential(t *testing.T) {
+func TestMicrosoftSelectionCancelBlocksSave(t *testing.T) {
 	h := newMicrosoftHandlerForTest(t)
-
-	account := config.Account{
-		ID:           "12345678-1234-4123-8123-123456789012",
-		AccessToken:  "pending-access-token",
-		RefreshToken: "pending-refresh-token",
-		ClientSecret: "pending-client-secret",
-		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
-	}
 	profiles := []KiroProfile{{
 		ARN:    "arn:aws:codewhisperer:us-east-1:123456789012:profile/pending",
 		Name:   "Pending profile",
 		Region: "us-east-1",
 	}}
-	selectionID, expired, err := h.storeMicrosoftProfileSelection("pending-session", account, profiles)
-	discardDetachedMicrosoftProfileSelections(expired)
+	flows := microsoftSSOFlows
+	flows.mu.Lock()
+	selectionID, err := flows.storeSelectionLocked("pending-session", config.Account{
+		ID:           "pending-account",
+		AccessToken:  "pending-access-token",
+		RefreshToken: "pending-refresh-token",
+		AuthMethod:   auth.MicrosoftSSOAuthMethod,
+	}, profiles, time.Now())
+	flows.mu.Unlock()
 	if err != nil {
-		t.Fatalf("store pending profile selection: %v", err)
-	}
-	selection := h.getMicrosoftProfileSelection(selectionID)
-	if selection == nil {
-		t.Fatal("pending profile selection was not stored")
+		t.Fatalf("storeSelectionLocked: %v", err)
 	}
 
+	// The browser only knows the selection ID at this point; that alone must
+	// drop the credential and block the parent session from saving later.
 	cancelRecorder := httptest.NewRecorder()
-	h.apiCancelMicrosoftSSO(
-		cancelRecorder,
-		httptest.NewRequest(
-			http.MethodPost,
-			"/auth/microsoft-sso/cancel",
-			strings.NewReader(fmt.Sprintf(`{"selectionId":%q}`, selectionID)),
-		),
-	)
+	h.apiCancelMicrosoftSSO(cancelRecorder, httptest.NewRequest(http.MethodPost, "/auth/microsoft-sso/cancel",
+		strings.NewReader(fmt.Sprintf(`{"selectionId":%q}`, selectionID))))
 	if cancelRecorder.Code != http.StatusOK {
 		t.Fatalf("cancel status = %d, body=%s", cancelRecorder.Code, cancelRecorder.Body.String())
 	}
-	if h.getMicrosoftProfileSelection(selectionID) != nil {
-		t.Fatal("canceled profile selection remained addressable")
+	if pendingMicrosoftSelection(selectionID) != nil {
+		t.Fatal("canceled selection still holds the credential")
 	}
-	if !selection.canceled.Load() {
-		t.Fatal("canceled profile selection was not marked canceled")
+	flows.mu.Lock()
+	canceled := flows.canceledLocked("pending-session", time.Now())
+	addErr := flows.addAccountLocked("pending-session", config.Account{ID: "late"})
+	flows.mu.Unlock()
+	if !canceled {
+		t.Fatal("canceling by selection ID did not mark the parent session canceled")
 	}
-	if !h.microsoftSessionCanceled("pending-session") {
-		t.Fatal("selection-only cancellation did not mark the parent login session canceled")
+	if !errors.Is(addErr, errMicrosoftSSOCanceled) {
+		t.Fatalf("save after cancel returned %v, want errMicrosoftSSOCanceled", addErr)
 	}
-
-	selection.mu.Lock()
-	if selection.Account.AccessToken != "" ||
-		selection.Account.RefreshToken != "" ||
-		selection.Account.ClientSecret != "" {
-		t.Errorf("canceled selection retained credential material: %+v", selection.Account)
-	}
-	if len(selection.Profiles) != 0 {
-		t.Errorf("canceled selection retained offered profiles: %+v", selection.Profiles)
-	}
-	selection.mu.Unlock()
 
 	selectRecorder := callMicrosoftProfileSelectionHandler(t, h, selectionID, profiles[0].ARN)
 	if selectRecorder.Code != http.StatusBadRequest {
-		t.Fatalf("select-after-cancel status = %d, want 400; body=%s",
-			selectRecorder.Code, selectRecorder.Body.String())
+		t.Fatalf("select-after-cancel status = %d, want 400; body=%s", selectRecorder.Code, selectRecorder.Body.String())
 	}
 	if accounts := config.GetAccounts(); len(accounts) != 0 {
 		t.Fatalf("select-after-cancel persisted accounts: %+v", accounts)
 	}
 }
 
-func TestMicrosoftPendingProfileSelectionCapacityLimit(t *testing.T) {
-	h := newMicrosoftHandlerForTest(t)
-	account := config.Account{
-		AccessToken:  "pending-access-token",
-		RefreshToken: "pending-refresh-token",
-		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
-	}
-	profiles := []KiroProfile{{
-		ARN:    "arn:aws:codewhisperer:us-east-1:123456789012:profile/pending",
-		Name:   "Pending profile",
-		Region: "us-east-1",
-	}}
+func TestMicrosoftSelectionCapacityLimit(t *testing.T) {
+	newMicrosoftHandlerForTest(t)
+	flows := microsoftSSOFlows
+	now := time.Now()
+	flows.mu.Lock()
+	defer flows.mu.Unlock()
 
-	selectionIDs := make([]string, 0, microsoftMaxPendingProfileSelections+1)
-	t.Cleanup(func() {
-		for _, selectionID := range selectionIDs {
-			h.removeMicrosoftProfileSelection(selectionID, nil)
-		}
-	})
-	for i := 0; i < microsoftMaxPendingProfileSelections; i++ {
-		selectionID, expired, err := h.storeMicrosoftProfileSelection(
-			fmt.Sprintf("pending-session-%d", i),
-			account,
-			profiles,
-		)
-		discardDetachedMicrosoftProfileSelections(expired)
+	var first string
+	for i := 0; i < microsoftMaxSelections; i++ {
+		id, err := flows.storeSelectionLocked(fmt.Sprintf("session-%d", i), config.Account{}, nil, now)
 		if err != nil {
-			t.Fatalf("store selection %d/%d: %v", i+1, microsoftMaxPendingProfileSelections, err)
+			t.Fatalf("store %d/%d: %v", i+1, microsoftMaxSelections, err)
 		}
-		selectionIDs = append(selectionIDs, selectionID)
+		if first == "" {
+			first = id
+		}
+	}
+	if _, err := flows.storeSelectionLocked("over-capacity", config.Account{}, nil, now); err == nil {
+		t.Fatalf("selection %d bypassed the cap", microsoftMaxSelections+1)
 	}
 
-	if _, expired, err := h.storeMicrosoftProfileSelection("over-capacity", account, profiles); err == nil {
-		t.Fatalf("selection %d unexpectedly bypassed capacity limit", microsoftMaxPendingProfileSelections+1)
-	} else {
-		discardDetachedMicrosoftProfileSelections(expired)
+	// Expired entries free their slot on the next store.
+	flows.selections[first].expiresAt = now.Add(-time.Second)
+	if _, err := flows.storeSelectionLocked("replacement", config.Account{}, nil, now); err != nil {
+		t.Fatalf("store after one selection expired: %v", err)
 	}
-	h.microsoftSelectionsMu.Lock()
-	pendingCount := len(h.microsoftSelections)
-	h.microsoftSelectionsMu.Unlock()
-	if pendingCount != microsoftMaxPendingProfileSelections {
-		t.Fatalf("pending selections = %d, want capped at %d",
-			pendingCount, microsoftMaxPendingProfileSelections)
+	if len(flows.selections) != microsoftMaxSelections {
+		t.Fatalf("selections = %d, want %d", len(flows.selections), microsoftMaxSelections)
 	}
-
-	h.removeMicrosoftProfileSelection(selectionIDs[0], nil)
-	replacementID, expired, err := h.storeMicrosoftProfileSelection("replacement-session", account, profiles)
-	discardDetachedMicrosoftProfileSelections(expired)
-	if err != nil {
-		t.Fatalf("store replacement after cancellation: %v", err)
-	}
-	selectionIDs = append(selectionIDs, replacementID)
-}
-
-func TestStoreMicrosoftProfileSelectionDoesNotWaitOnExpiredSelectionLock(t *testing.T) {
-	h := newMicrosoftHandlerForTest(t)
-	account := config.Account{
-		AccessToken:  "pending-access-token",
-		RefreshToken: "pending-refresh-token",
-		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
-	}
-	profiles := []KiroProfile{{
-		ARN:    "arn:aws:codewhisperer:us-east-1:123456789012:profile/pending",
-		Name:   "Pending profile",
-		Region: "us-east-1",
-	}}
-
-	oldID, expired, err := h.storeMicrosoftProfileSelection("old-session", account, profiles)
-	discardDetachedMicrosoftProfileSelections(expired)
-	if err != nil {
-		t.Fatalf("store old selection: %v", err)
-	}
-	old := h.getMicrosoftProfileSelection(oldID)
-	if old == nil {
-		t.Fatal("old selection was not stored")
-	}
-	old.ExpiresAt = time.Now().Add(-time.Second)
-	old.mu.Lock()
-
-	type storeResult struct {
-		id      string
-		expired []*microsoftProfileSelection
-		err     error
-	}
-	resultChannel := make(chan storeResult, 1)
-	go func() {
-		id, expired, err := h.storeMicrosoftProfileSelection("new-session", account, profiles)
-		resultChannel <- storeResult{id: id, expired: expired, err: err}
-	}()
-
-	var result storeResult
-	select {
-	case result = <-resultChannel:
-	case <-time.After(time.Second):
-		old.mu.Unlock()
-		t.Fatal("store blocked while trying to scrub an expired selection")
-	}
-	old.mu.Unlock()
-	discardDetachedMicrosoftProfileSelections(result.expired)
-	if result.err != nil {
-		t.Fatalf("store new selection: %v", result.err)
-	}
-	h.removeMicrosoftProfileSelection(result.id, nil)
 }
 
 func TestMicrosoftSSOCancelDuringProfileDiscoveryDoesNotPersist(t *testing.T) {
@@ -484,9 +346,9 @@ func TestMicrosoftSSOCancelDuringProfileDiscoveryDoesNotPersist(t *testing.T) {
 	if accounts := config.GetAccounts(); len(accounts) != 0 {
 		t.Fatalf("canceled login persisted accounts: %+v", accounts)
 	}
-	h.microsoftSelectionsMu.Lock()
-	pendingSelections := len(h.microsoftSelections)
-	h.microsoftSelectionsMu.Unlock()
+	microsoftSSOFlows.mu.Lock()
+	pendingSelections := len(microsoftSSOFlows.selections)
+	microsoftSSOFlows.mu.Unlock()
 	if pendingSelections != 0 {
 		t.Fatalf("canceled login retained %d pending profile selections", pendingSelections)
 	}
@@ -558,79 +420,6 @@ func TestExternalIdpImportRejectsUnofferedProfileArn(t *testing.T) {
 	}
 	if accounts := config.GetAccounts(); len(accounts) != 0 {
 		t.Fatalf("unoffered profileArn import persisted accounts: %+v", accounts)
-	}
-}
-
-func TestExternalIdpImportReturnsRotatedRefreshTokenWhenPersistFails(t *testing.T) {
-	h := newMicrosoftHandlerForTest(t)
-
-	issuerURL := handlerMicrosoftIssuerURL()
-	tokenEndpoint := handlerMicrosoftTokenEndpoint()
-	scopes := handlerMicrosoftScopes()
-	refreshedAccessToken := handlerMicrosoftJWT(t, map[string]interface{}{
-		"iss":   issuerURL,
-		"oid":   handlerMicrosoftObjectID,
-		"email": "persist-fail@example.com",
-		"exp":   time.Now().Add(time.Hour).Unix(),
-	})
-
-	authClient := &http.Client{
-		Timeout: time.Second,
-		Transport: handlerMicrosoftRoundTripFunc(func(request *http.Request) (*http.Response, error) {
-			if request.Method != http.MethodPost || request.URL.String() != tokenEndpoint {
-				return nil, fmt.Errorf("unexpected auth request: %s %s", request.Method, request.URL)
-			}
-			return handlerMicrosoftJSONResponse(request, http.StatusOK, map[string]interface{}{
-				"access_token":  refreshedAccessToken,
-				"refresh_token": "rotated-after-refresh",
-				"expires_in":    3600,
-				"token_type":    "Bearer",
-			}), nil
-		}),
-	}
-	previousAuthClient := auth.SetGlobalAuthClientForTest(authClient)
-	t.Cleanup(func() { auth.SetGlobalAuthClientForTest(previousAuthClient) })
-
-	// Force Save to fail after refresh by replacing the config path with a directory.
-	cfgPath := filepath.Join(t.TempDir(), "config.json")
-	// config.Init was already called by newMicrosoftHandlerForTest on another path;
-	// reopen against a path we can sabotage after first successful seed isn't needed.
-	// Instead sabotage the active config file by making it unwritable via a directory
-	// collision on the path returned by re-init.
-	// Simplest reliable approach: re-init into a temp file, then replace it with a directory.
-	if err := config.Init(cfgPath); err != nil {
-		t.Fatalf("re-init config: %v", err)
-	}
-	if err := os.Remove(cfgPath); err != nil {
-		t.Fatalf("remove config file: %v", err)
-	}
-	if err := os.Mkdir(cfgPath, 0o700); err != nil {
-		t.Fatalf("replace config file with directory: %v", err)
-	}
-
-	recorder := callImportCredentialsHandler(t, h, map[string]interface{}{
-		"refreshToken":  "persist-fail-refresh",
-		"clientId":      handlerMicrosoftClientID,
-		"authMethod":    auth.MicrosoftSSOAuthMethod,
-		"tokenEndpoint": tokenEndpoint,
-		"issuerUrl":     issuerURL,
-		"scopes":        scopes,
-	})
-	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500; body=%s", recorder.Code, recorder.Body.String())
-	}
-	var body map[string]string
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	if body["rotatedRefreshToken"] != "rotated-after-refresh" {
-		t.Fatalf("rotatedRefreshToken = %q, want rotated-after-refresh; body=%v", body["rotatedRefreshToken"], body)
-	}
-	if body["error"] == "" {
-		t.Fatal("expected persistence error message")
-	}
-	if accounts := config.GetAccounts(); len(accounts) != 0 {
-		t.Fatalf("failed import persisted accounts: %+v", accounts)
 	}
 }
 

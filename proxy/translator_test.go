@@ -1,8 +1,12 @@
 package proxy
 
 import (
+	"encoding/json"
+	"kiro-proxy/config"
+	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestExtractOpenAIMessageTextStructured(t *testing.T) {
@@ -20,6 +24,58 @@ func TestExtractOpenAIMessageTextStructured(t *testing.T) {
 	}
 	if got := extractOpenAIMessageText(nested); got != "nested" {
 		t.Fatalf("expected nested content extraction, got %q", got)
+	}
+}
+
+// Live on 8080 a developer message never reached upstream: no effect on the
+// reply and 142 fewer prompt tokens than the same text sent as system.
+func TestOpenAIToKiroKeepsDeveloperMessages(t *testing.T) {
+	payload := OpenAIToKiro(&OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "developer", Content: "DEVELOPER-RULE-7"},
+			{Role: "user", Content: "hello"},
+		},
+	}, false)
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "DEVELOPER-RULE-7") {
+		t.Fatalf("developer message dropped from payload: %s", raw)
+	}
+	if got := payload.ConversationState.CurrentMessage.UserInputMessage.Content; strings.Contains(got, "DEVELOPER-RULE-7") {
+		t.Fatalf("developer message leaked into user turn: %q", got)
+	}
+}
+
+// Live: with a partially answered parallel batch the narrated text is the only
+// carrier of tool output, and the model saw lines 0000-0159 of 300 (the 4000-byte cap).
+func TestPartialToolBatchKeepsFullToolOutput(t *testing.T) {
+	output := strings.Repeat("line of build output\n", 400) + "FINAL_MARKER=ZEBRA"
+	payload := OpenAIToKiro(&OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "run both"},
+			{Role: "assistant", ToolCalls: []ToolCall{testToolCall("call_1", "run_a", `{}`), testToolCall("call_2", "run_b", `{}`)}},
+			{Role: "tool", ToolCallID: "call_1", Content: output},
+		},
+	}, false)
+
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	if ctx := current.UserInputMessageContext; ctx != nil && len(ctx.ToolResults) > 0 {
+		t.Fatalf("partial batch should travel as text, got structured results")
+	}
+	if !strings.Contains(current.Content, "FINAL_MARKER=ZEBRA") {
+		t.Fatalf("tool output cut: %d bytes, tail %q", len(current.Content), current.Content[len(current.Content)-40:])
+	}
+}
+
+func TestToolResultsSummaryCapKeepsValidUTF8(t *testing.T) {
+	got := buildToolResultsContinuation([]KiroToolResult{{Content: []KiroResultContent{{Text: strings.Repeat("é", 3000)}}}})
+	if len(got) > 4000 || !utf8.ValidString(got) {
+		t.Fatalf("summary len=%d valid=%v", len(got), utf8.ValidString(got))
 	}
 }
 
@@ -53,12 +109,10 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 
 	payload := OpenAIToKiro(req, false)
 
-	// History starts with a priming pair.
 	if len(payload.ConversationState.History) != 4 {
 		t.Fatalf("expected 4 history items (2 priming + 2 conversation), got %d", len(payload.ConversationState.History))
 	}
 
-	// history[0]: priming user
 	primingUser := payload.ConversationState.History[0].UserInputMessage
 	if primingUser == nil {
 		t.Fatalf("expected history[0] to be priming user message")
@@ -70,7 +124,6 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 		t.Fatalf("expected system prompt priming not to contain user question, got %q", primingUser.Content)
 	}
 
-	// history[1]: priming assistant
 	primingAssistant := payload.ConversationState.History[1].AssistantResponseMessage
 	if primingAssistant == nil {
 		t.Fatalf("expected history[1] to be priming assistant message")
@@ -79,7 +132,6 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 		t.Fatalf("expected priming assistant ack, got %q", primingAssistant.Content)
 	}
 
-	// history[2]: first user turn
 	firstConvUser := payload.ConversationState.History[2].UserInputMessage
 	if firstConvUser == nil {
 		t.Fatalf("expected history[2] to be first conversation user message")
@@ -88,7 +140,6 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 		t.Fatalf("expected history[2] to contain first-question, got %q", firstConvUser.Content)
 	}
 
-	// history[3]: assistant reply
 	historyAssistant := payload.ConversationState.History[3].AssistantResponseMessage
 	if historyAssistant == nil {
 		t.Fatalf("expected history[3] to be assistant message")
@@ -97,11 +148,6 @@ func TestOpenAIToKiroPreservesStructuredAssistantAndToolContent(t *testing.T) {
 		t.Fatalf("expected assistant structured content to be preserved, got %q", historyAssistant.Content)
 	}
 
-	// The tool result answers call_1, but the last history assistant has no
-	// matching structured tool call (it is text-only), so the tool result is an
-	// orphan. Kiro's upstream rejects structured tool results that do not answer
-	// the immediately preceding assistant tool call, so it must be narrated into
-	// the current message text rather than kept structured.
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage
 	if !strings.Contains(cur.Content, "tool-result-structured") {
 		t.Fatalf("expected tool-result continuation content, got %q", cur.Content)
@@ -157,12 +203,6 @@ func TestOpenAIToKiroAssistantToolCallsDoNotInjectPlaceholder(t *testing.T) {
 	}
 
 	payload := OpenAIToKiro(req, false)
-
-	// The mid-history assistant turn carried ONLY a tool call (no text) and is
-	// not the active tool turn, so its structured toolUses are cleared. That
-	// leaves it hollow, and a hollow assistant turn is dropped entirely rather
-	// than backfilled with a "." placeholder (which the model would imitate).
-	// No surviving turn may contain tool-invocation text or structured toolUses.
 	for i, h := range payload.ConversationState.History {
 		a := h.AssistantResponseMessage
 		if a == nil {
@@ -268,7 +308,7 @@ func TestClaudeToKiroDropsLeadingAssistantHistory(t *testing.T) {
 }
 
 func TestKiroToClaudeResponseCanEmitEmptyThinkingBlock(t *testing.T) {
-	resp := KiroToClaudeResponse("final answer", "", true, nil, 10, 20, "claude-sonnet-4.6", "")
+	resp := KiroToClaudeResponse("final answer", "", true, nil, 10, 20, "claude-sonnet-4.6")
 
 	if len(resp.Content) != 2 {
 		t.Fatalf("expected empty thinking block plus text block, got %d blocks", len(resp.Content))
@@ -281,71 +321,6 @@ func TestKiroToClaudeResponseCanEmitEmptyThinkingBlock(t *testing.T) {
 	}
 	if resp.Content[1].Type != "text" || resp.Content[1].Text != "final answer" {
 		t.Fatalf("expected text block to be preserved, got %#v", resp.Content[1])
-	}
-}
-
-func TestMapClaudeStopReason(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		reason    string
-		toolCount int
-		want      string
-	}{
-		{name: "max tokens", reason: "MAX_TOKENS", want: "max_tokens"},
-		{name: "max output tokens alias", reason: "max_output_tokens", want: "max_tokens"},
-		{name: "length alias", reason: "length", want: "max_tokens"},
-		{name: "context limit", reason: "CONTEXT_WINDOW_EXCEEDED", want: "model_context_window_exceeded"},
-		{name: "model context limit alias", reason: "model_context_window_exceeded", want: "model_context_window_exceeded"},
-		{name: "content filter", reason: "CONTENT_FILTERED", want: "refusal"},
-		{name: "refusal alias", reason: "refusal", want: "refusal"},
-		{name: "guardrail alias", reason: "guardrail_intervened", want: "refusal"},
-		{name: "stop sequence", reason: "STOP_SEQUENCE", want: "stop_sequence"},
-		{name: "pause", reason: "PAUSE_TURN", want: "pause_turn"},
-		// END_TURN is the only stopReason literal the Kiro IDE bundle compares
-		// against, so it is the realistic "finished normally" input.
-		{name: "end turn", reason: "END_TURN", want: "end_turn"},
-		// Absent metadataEvent leaves the reason empty. Mapping it to end_turn is
-		// the deliberate fallback for clients that require a terminal reason; the
-		// truncation itself is caught by the stream integrity layer, not here.
-		{name: "empty falls back to end turn", reason: "", want: "end_turn"},
-		{name: "unknown defaults to end turn", reason: "COMPLETE", want: "end_turn"},
-		{name: "tool use takes priority", reason: "MAX_TOKENS", toolCount: 1, want: "tool_use"},
-		{name: "tool use wins over empty reason", reason: "", toolCount: 2, want: "tool_use"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := mapClaudeStopReason(tc.reason, tc.toolCount); got != tc.want {
-				t.Fatalf("mapClaudeStopReason(%q, %d) = %q, want %q", tc.reason, tc.toolCount, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestMapOpenAIFinishReason(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		reason    string
-		toolCount int
-		want      string
-	}{
-		{name: "max tokens", reason: "MAX_TOKENS", want: "length"},
-		{name: "max output tokens alias", reason: "max_output_tokens", want: "length"},
-		{name: "length alias", reason: "length", want: "length"},
-		{name: "context limit", reason: "CONTEXT_WINDOW_EXCEEDED", want: "length"},
-		{name: "model context limit alias", reason: "model_context_window_exceeded", want: "length"},
-		{name: "content filter", reason: "CONTENT_FILTERED", want: "content_filter"},
-		{name: "refusal alias", reason: "refusal", want: "content_filter"},
-		{name: "guardrail alias", reason: "guardrail_intervened", want: "content_filter"},
-		{name: "end turn", reason: "END_TURN", want: "stop"},
-		{name: "empty falls back to stop", reason: "", want: "stop"},
-		{name: "unknown defaults to stop", reason: "COMPLETE", want: "stop"},
-		{name: "tool calls take priority", reason: "MAX_TOKENS", toolCount: 1, want: "tool_calls"},
-		{name: "tool calls win over empty reason", reason: "", toolCount: 2, want: "tool_calls"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := mapOpenAIFinishReason(tc.reason, tc.toolCount); got != tc.want {
-				t.Fatalf("mapOpenAIFinishReason(%q, %d) = %q, want %q", tc.reason, tc.toolCount, got, tc.want)
-			}
-		})
 	}
 }
 
@@ -374,17 +349,6 @@ func TestToolResultsContinuationIncludesInstructionPrefix(t *testing.T) {
 	}
 	if !strings.Contains(content, "result-1") {
 		t.Fatalf("expected tool result text in continuation content, got %q", content)
-	}
-}
-
-func TestKiroToOpenAIResponseWithReasoningPreservesFinishReason(t *testing.T) {
-	response := KiroToOpenAIResponseWithReasoning("partial answer", "", nil, 10, 20, "claude-sonnet-4.5", "reasoning_content", "MAX_TOKENS")
-	choices, ok := response["choices"].([]map[string]interface{})
-	if !ok || len(choices) != 1 {
-		t.Fatalf("unexpected choices: %#v", response["choices"])
-	}
-	if got := choices[0]["finish_reason"]; got != "length" {
-		t.Fatalf("finish_reason=%#v, want length", got)
 	}
 }
 
@@ -428,6 +392,45 @@ func TestEnsureObjectSchemaRemovesKiroRejectedFieldsRecursively(t *testing.T) {
 	}
 }
 
+func TestEnsureObjectSchemaFlattensTopLevelComposition(t *testing.T) {
+	input := map[string]interface{}{
+		"oneOf": []interface{}{
+			map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"command": map[string]interface{}{"type": "string"},
+				},
+			},
+			map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"patch": map[string]interface{}{"type": "string"},
+				},
+			},
+		},
+	}
+
+	got := ensureObjectSchema(input).(map[string]interface{})
+	for _, kw := range []string{"oneOf", "anyOf", "allOf"} {
+		if _, present := got[kw]; present {
+			t.Fatalf("expected %s removed from top level, got %#v", kw, got)
+		}
+	}
+	if got["type"] != "object" {
+		t.Fatalf("expected type object, got %#v", got["type"])
+	}
+	props, ok := got["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected merged properties, got %#v", got)
+	}
+	if _, ok := props["command"]; !ok {
+		t.Fatalf("expected command property lifted, got %#v", props)
+	}
+	if _, ok := props["patch"]; !ok {
+		t.Fatalf("expected patch property lifted, got %#v", props)
+	}
+}
+
 func TestConvertOpenAIToolsSanitizesSchemaAndDescription(t *testing.T) {
 	var tool OpenAITool
 	tool.Type = "function"
@@ -438,7 +441,7 @@ func TestConvertOpenAIToolsSanitizesSchemaAndDescription(t *testing.T) {
 		"additionalProperties": false,
 	}
 
-	tools := convertOpenAITools([]OpenAITool{tool})
+	tools, _ := convertOpenAITools([]OpenAITool{tool})
 	if len(tools) != 1 {
 		t.Fatalf("expected one converted tool, got %d", len(tools))
 	}
@@ -451,6 +454,34 @@ func TestConvertOpenAIToolsSanitizesSchemaAndDescription(t *testing.T) {
 	}
 	if schemaContainsKey(schema, "required") {
 		t.Fatalf("expected empty required field to be removed, got %#v", schema)
+	}
+}
+
+func TestConvertOpenAIToolsSanitizesDuplicateNamesAndMapsBack(t *testing.T) {
+	var first OpenAITool
+	first.Type = "function"
+	first.Function.Name = "mcp__computer_use__click"
+	first.Function.Parameters = map[string]interface{}{"type": "object"}
+
+	var second OpenAITool
+	second.Type = "function"
+	second.Function.Name = "mcp__lightpanda__click"
+	second.Function.Parameters = map[string]interface{}{"type": "object"}
+
+	tools, nameMap := convertOpenAITools([]OpenAITool{first, second})
+	if len(tools) != 2 {
+		t.Fatalf("expected two converted tools, got %d", len(tools))
+	}
+	firstName := tools[0].ToolSpecification.Name
+	secondName := tools[1].ToolSpecification.Name
+	if firstName == first.Function.Name || secondName == second.Function.Name {
+		t.Fatalf("expected namespaced tool names to be sanitized, got %q and %q", firstName, secondName)
+	}
+	if firstName == secondName {
+		t.Fatalf("expected sanitized tool names to be unique, got %q", firstName)
+	}
+	if nameMap[firstName] != first.Function.Name || nameMap[secondName] != second.Function.Name {
+		t.Fatalf("expected sanitized names to map back, got %#v", nameMap)
 	}
 }
 
@@ -475,252 +506,112 @@ func schemaContainsKey(value interface{}, key string) bool {
 	return false
 }
 
-func TestParseModelAndThinking(t *testing.T) {
+func TestParseModelAndThinkingNormalizesClaudeDashVersions(t *testing.T) {
 	tests := []struct {
 		name         string
 		input        string
 		wantModel    string
 		wantThinking bool
 	}{
-		// Format normalization: dash → dot for new versions without code changes.
-		{"new opus dash form", "claude-opus-4-8", "claude-opus-4.8", false},
-		{"new opus dot form", "claude-opus-4.8", "claude-opus-4.8", false},
-		{"existing opus dash form", "claude-opus-4-7", "claude-opus-4.7", false},
-		{"existing opus dot form", "claude-opus-4.7", "claude-opus-4.7", false},
-		{"sonnet dash form", "claude-sonnet-4-6", "claude-sonnet-4.6", false},
-		{"sonnet dot form", "claude-sonnet-4.6", "claude-sonnet-4.6", false},
-		{"haiku dash form", "claude-haiku-4-5", "claude-haiku-4.5", false},
-		{"haiku dot form", "claude-haiku-4.5", "claude-haiku-4.5", false},
-		{"future major bump", "claude-sonnet-5-0", "claude-sonnet-5.0", false},
-
-		// Bare family name passes through (no minor to normalize).
-		{"bare sonnet 4", "claude-sonnet-4", "claude-sonnet-4", false},
-
-		// Dated snapshot must hit the alias before the regex rewrites it.
-		{"dated sonnet snapshot", "claude-sonnet-4-20250514", "claude-sonnet-4", false},
-
-		// Cross-family legacy IDs.
-		{"claude 3.5 sonnet", "claude-3-5-sonnet", "claude-sonnet-4.5", false},
-		{"claude 3 opus", "claude-3-opus", "claude-sonnet-4.5", false},
-		{"claude 3 sonnet", "claude-3-sonnet", "claude-sonnet-4", false},
-		{"claude 3 haiku", "claude-3-haiku", "claude-haiku-4.5", false},
-
-		// Non-Anthropic fallbacks.
-		{"gpt-4-turbo", "gpt-4-turbo", "claude-sonnet-4.5", false},
-		{"gpt-4o", "gpt-4o", "claude-sonnet-4.5", false},
-		{"gpt-4", "gpt-4", "claude-sonnet-4.5", false},
-		{"gpt-3.5-turbo", "gpt-3.5-turbo", "claude-sonnet-4.5", false},
-
-		// Thinking suffix is stripped before mapping.
-		{"thinking suffix on dash form", "claude-opus-4-8-thinking", "claude-opus-4.8", true},
-		{"thinking suffix on dot form", "claude-sonnet-4.5-thinking", "claude-sonnet-4.5", true},
-		{"thinking suffix on legacy alias", "claude-3-5-sonnet-thinking", "claude-sonnet-4.5", true},
-
-		// Unknown models pass through unchanged.
-		{"unknown model", "some-other-model", "some-other-model", false},
-		{"misspelled claude family", "claude-opux-4-8", "claude-opux-4-8", false},
+		{"future opus dash form", "claude-opus-4-8", "claude-opus-4.8", false},
+		{"future opus dot form", "claude-opus-4.8", "claude-opus-4.8", false},
+		{"future sonnet major", "claude-sonnet-5-0", "claude-sonnet-5.0", false},
+		{"thinking suffix", "claude-opus-4-8-thinking", "claude-opus-4.8", true},
+		{"dated snapshot alias", "claude-sonnet-4-20250514", "claude-sonnet-5", false},
+		{"legacy alias", "claude-3-5-sonnet", "claude-sonnet-5", false},
+		{"gpt 5 compatibility alias", "gpt-5.4-mini", "claude-haiku-4.5", false},
+		{"kiro listed gpt 4o stays direct", "gpt-4o", "gpt-4o", false},
+		{"kiro listed gpt 4 stays direct", "gpt-4", "gpt-4", false},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			gotModel, gotThinking := ParseModelAndThinking(tc.input, "-thinking")
-			if gotModel != tc.wantModel {
-				t.Errorf("model: got %q, want %q", gotModel, tc.wantModel)
-			}
-			if gotThinking != tc.wantThinking {
-				t.Errorf("thinking: got %v, want %v", gotThinking, tc.wantThinking)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotModel, gotThinking := ParseModelAndThinking(tt.input, "-thinking")
+			if gotModel != tt.wantModel || gotThinking != tt.wantThinking {
+				t.Fatalf("ParseModelAndThinking(%q) = (%q, %v), want (%q, %v)", tt.input, gotModel, gotThinking, tt.wantModel, tt.wantThinking)
 			}
 		})
 	}
 }
 
-func TestParseModelAndThinkingDoesNotRewriteDatedSnapshotMinor(t *testing.T) {
-	// Guards the \b boundary in claudeVersionPattern: without it, the regex would
-	// rewrite "claude-sonnet-4-20250514" to "claude-sonnet-4.20250514" before the
-	// alias table could redirect it.
-	got, _ := ParseModelAndThinking("claude-sonnet-4-20250514", "-thinking")
-	if got != "claude-sonnet-4" {
-		t.Fatalf("dated snapshot must alias to claude-sonnet-4, got %q", got)
+func TestParseModelAndThinkingUsesConfiguredMappings(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+		t.Fatalf("config.Init: %v", err)
 	}
-	if strings.Contains(got, ".") {
-		t.Fatalf("dated snapshot must not be rewritten with a dot, got %q", got)
+	t.Cleanup(func() {
+		_ = config.UpdateModelMappings(config.DefaultModelMappings())
+	})
+	if err := config.UpdateModelMappings([]config.ModelMappingRule{
+		{Key: "custom-mini", Value: "claude-haiku-4.5"},
+	}); err != nil {
+		t.Fatalf("UpdateModelMappings: %v", err)
+	}
+
+	gotModel, gotThinking := ParseModelAndThinking("vendor/custom-mini-thinking", "-thinking")
+	if gotModel != "claude-haiku-4.5" || !gotThinking {
+		t.Fatalf("ParseModelAndThinking custom mapping = (%q, %v), want (%q, %v)", gotModel, gotThinking, "claude-haiku-4.5", true)
 	}
 }
 
-func TestClaudeToolResultImageAttachedToCurrentMessage(t *testing.T) {
-	const imgData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-	req := &ClaudeRequest{
-		Model: "claude-opus-4.8",
-		Messages: []ClaudeMessage{
-			{Role: "user", Content: "read this image"},
-			{
-				Role: "assistant",
-				Content: []interface{}{
-					map[string]interface{}{"type": "tool_use", "id": "tool_1", "name": "read", "input": map[string]interface{}{"path": "a.png"}},
-				},
-			},
-			{
-				Role: "user",
-				Content: []interface{}{
-					map[string]interface{}{
-						"type":        "tool_result",
-						"tool_use_id": "tool_1",
-						"content": []interface{}{
-							map[string]interface{}{
-								"type": "image",
-								"source": map[string]interface{}{
-									"type":       "base64",
-									"media_type": "image/png",
-									"data":       imgData,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
+//! Guards the Claude Code (/v1/messages) path: the top-level composition flattener must
+//! leave ordinary tool schemas, and any nested oneOf/anyOf/allOf, completely untouched.
+func TestEnsureObjectSchemaLeavesClaudeCodeToolSchemasIntact(t *testing.T) {
+	const schemas = `[
+	{"type":"object","properties":{"file_path":{"type":"string"},"limit":{"type":"integer"},"offset":{"type":"integer"}},"required":["file_path"]},
+	{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"},"run_in_background":{"type":"boolean"}},"required":["command"]},
+	{"type":"object","properties":{
+	   "files":{"anyOf":[{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},{"type":"object"}]},
+	   "contract":{"anyOf":[{"const":"latest","type":"string"},{"pattern":"^[0-9]+$","type":"string"}]}},
+	 "required":["files"]}
+	]`
 
-	payload := ClaudeToKiro(req, false)
-	cur := payload.ConversationState.CurrentMessage.UserInputMessage
-	if len(cur.Images) != 1 {
-		t.Fatalf("expected tool_result image attached to current message, got %d images", len(cur.Images))
+	var parsed []map[string]interface{}
+	if err := json.Unmarshal([]byte(schemas), &parsed); err != nil {
+		t.Fatalf("bad fixture: %v", err)
 	}
-	if cur.Images[0].Format != "png" || cur.Images[0].Source.Bytes != imgData {
-		t.Fatalf("unexpected image payload: %+v", cur.Images[0])
-	}
-	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
-		t.Fatalf("expected one tool result preserved")
-	}
-	if strings.TrimSpace(cur.UserInputMessageContext.ToolResults[0].Content[0].Text) == "" {
-		t.Fatalf("expected non-empty placeholder text for image-only tool result")
-	}
-}
-
-func TestClaudeToolResultMixedTextAndImage(t *testing.T) {
-	const imgData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-	req := &ClaudeRequest{
-		Model: "claude-opus-4.8",
-		Messages: []ClaudeMessage{
-			{
-				Role: "user",
-				Content: []interface{}{
-					map[string]interface{}{
-						"type":        "tool_result",
-						"tool_use_id": "tool_2",
-						"content": []interface{}{
-							map[string]interface{}{"type": "text", "text": "here is the screenshot"},
-							map[string]interface{}{
-								"type": "image",
-								"source": map[string]interface{}{
-									"type":       "base64",
-									"media_type": "image/png",
-									"data":       imgData,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	payload := ClaudeToKiro(req, false)
-	cur := payload.ConversationState.CurrentMessage.UserInputMessage
-	if len(cur.Images) != 1 {
-		t.Fatalf("expected one image extracted, got %d", len(cur.Images))
-	}
-	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.ToolResults) != 0 {
-		t.Fatalf("orphan tool result must be flattened, got %#v", cur.UserInputMessageContext.ToolResults)
-	}
-	if !strings.Contains(cur.Content, toolResultsContinuationPrefix) {
-		t.Fatalf("expected tool result continuation, got %q", cur.Content)
-	}
-	if !strings.Contains(cur.Content, "here is the screenshot") {
-		t.Fatalf("expected original tool text preserved, got %q", cur.Content)
-	}
-}
-
-func TestOpenAIToolResultImageAttachedToCurrentMessage(t *testing.T) {
-	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-	req := &OpenAIRequest{
-		Model: "claude-sonnet-4.5",
-		Messages: []OpenAIMessage{
-			{Role: "user", Content: "look at the file"},
-			{
-				Role:       "tool",
-				ToolCallID: "call_img",
-				Content: []interface{}{
-					map[string]interface{}{
-						"type":      "image_url",
-						"image_url": map[string]interface{}{"url": dataURL},
-					},
-				},
-			},
-		},
-	}
-
-	payload := OpenAIToKiro(req, false)
-	cur := payload.ConversationState.CurrentMessage.UserInputMessage
-	if len(cur.Images) != 1 {
-		t.Fatalf("expected tool image attached to current message, got %d", len(cur.Images))
-	}
-	if cur.Images[0].Format != "png" {
-		t.Fatalf("expected png format, got %q", cur.Images[0].Format)
-	}
-}
-
-func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
-	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-	req := &OpenAIRequest{
-		Model: "claude-sonnet-4.5",
-		Messages: []OpenAIMessage{
-			{Role: "user", Content: "look at the file"},
-			{
-				Role: "assistant",
-				ToolCalls: []ToolCall{
-					{
-						ID:   "call_img",
-						Type: "function",
-						Function: struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						}{Name: "read", Arguments: `{"path":"a.png"}`},
-					},
-				},
-			},
-			{
-				Role:       "tool",
-				ToolCallID: "call_img",
-				Content: []interface{}{
-					map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": dataURL}},
-				},
-			},
-			{Role: "user", Content: "what do you see?"},
-		},
-	}
-
-	payload := OpenAIToKiro(req, false)
-
-	var toolHistImages, structuredToolResults int
-	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage == nil {
-			continue
+	for i, schema := range parsed {
+		got := ensureObjectSchema(schema).(map[string]interface{})
+		if got["type"] != "object" {
+			t.Fatalf("schema %d lost object root: %#v", i, got)
 		}
-		toolHistImages += len(h.UserInputMessage.Images)
-		if context := h.UserInputMessage.UserInputMessageContext; context != nil {
-			structuredToolResults += len(context.ToolResults)
+		wantProps, _ := schema["properties"].(map[string]interface{})
+		gotProps, ok := got["properties"].(map[string]interface{})
+		if !ok || len(gotProps) != len(wantProps) {
+			t.Fatalf("schema %d property set changed: %#v", i, got["properties"])
+		}
+		for _, key := range []string{"oneOf", "anyOf", "allOf"} {
+			if _, present := got[key]; present {
+				t.Fatalf("schema %d gained a root %s: %#v", i, key, got)
+			}
 		}
 	}
-	if toolHistImages != 1 {
-		t.Fatalf("expected tool image carried in history, got %d", toolHistImages)
+
+	nested := ensureObjectSchema(parsed[2]).(map[string]interface{})["properties"].(map[string]interface{})
+	for _, name := range []string{"files", "contract"} {
+		prop := nested[name].(map[string]interface{})
+		branches, ok := prop["anyOf"].([]interface{})
+		if !ok || len(branches) != 2 {
+			t.Fatalf("nested anyOf on %q was altered: %#v", name, prop)
+		}
 	}
-	if structuredToolResults != 0 {
-		t.Fatalf("history must not retain structured tool results, got %d", structuredToolResults)
+}
+
+//! A schema with no root composition keyword keeps whatever type it declared; only a
+//! flattened schema is forced back to "object".
+func TestEnsureObjectSchemaKeepsDeclaredTypeWithoutComposition(t *testing.T) {
+	got := ensureObjectSchema(map[string]interface{}{
+		"type":       "string",
+		"properties": map[string]interface{}{"a": map[string]interface{}{"type": "string"}},
+	}).(map[string]interface{})
+	if got["type"] != "string" {
+		t.Fatalf("expected declared type preserved, got %#v", got["type"])
 	}
 
-	cur := payload.ConversationState.CurrentMessage.UserInputMessage
-	if len(cur.Images) != 0 {
-		t.Fatalf("tool image should not leak into a later user message, got %d on current", len(cur.Images))
+	flattened := ensureObjectSchema(map[string]interface{}{
+		"type":  "string",
+		"oneOf": []interface{}{map[string]interface{}{"properties": map[string]interface{}{"a": map[string]interface{}{"type": "string"}}}},
+	}).(map[string]interface{})
+	if flattened["type"] != "object" {
+		t.Fatalf("expected flattened schema forced to object, got %#v", flattened["type"])
 	}
 }

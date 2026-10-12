@@ -6,6 +6,7 @@ package auth
 // URL into the existing admin flow (the same interaction used by IAM SSO).
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -13,7 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"kiro-go/config"
+	"kiro-proxy/config"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,7 +28,7 @@ import (
 )
 
 const (
-	MicrosoftSSOAuthMethod = "external_idp"
+	MicrosoftSSOAuthMethod = config.AuthMethodExternalIdp
 	MicrosoftSSOProvider   = "AzureAD"
 
 	microsoftPortalSignInURL   = "https://app.kiro.dev/signin"
@@ -63,11 +64,6 @@ type microsoftSSOSession struct {
 	PortalState string
 	ProxyURL    string
 	ExpiresAt   time.Time
-	// ApiKeyID is the optional account-group ownership selected when the
-	// interactive flow starts. ApiKeyIDSet distinguishes an explicit empty
-	// selection (which intentionally unbinds the account) from an omitted field.
-	ApiKeyID    string
-	ApiKeyIDSet bool
 	timer       *time.Timer
 	mu          sync.Mutex
 	canceled    atomic.Bool
@@ -88,8 +84,6 @@ type MicrosoftSSOResult struct {
 	Email         string
 	UserID        string
 	ExpiresAt     int64
-	ApiKeyID      string
-	ApiKeyIDSet   bool
 }
 
 // MicrosoftSSOProgress represents either the authorization URL for the second
@@ -97,8 +91,6 @@ type MicrosoftSSOResult struct {
 type MicrosoftSSOProgress struct {
 	AuthorizationURL string
 	Result           *MicrosoftSSOResult
-	ApiKeyID         string
-	ApiKeyIDSet      bool
 }
 
 var (
@@ -111,11 +103,7 @@ var (
 // the fixed localhost callback; it is not an OAuth code exchange for this
 // proxy, so no PKCE verifier is retained server-side. Microsoft's second leg
 // still uses a stored PKCE verifier.
-func StartMicrosoftSSOLogin(apiKeyIDs ...string) (sessionID, authorizationURL string, expiresIn int, err error) {
-	apiKeyID, apiKeyIDSet, err := parseMicrosoftSSOApiKeyArgument(apiKeyIDs)
-	if err != nil {
-		return "", "", 0, err
-	}
+func StartMicrosoftSSOLogin() (sessionID, authorizationURL string, expiresIn int, err error) {
 	// code_challenge is still sent because Kiro's hosted sign-in URL expects the
 	// same query shape as other clients. There is no later code_verifier check
 	// for this portal leg.
@@ -134,8 +122,6 @@ func StartMicrosoftSSOLogin(apiKeyIDs ...string) (sessionID, authorizationURL st
 		PortalState: state,
 		ProxyURL:    config.GetProxyURL(),
 		ExpiresAt:   now.Add(microsoftSSOSessionTTL),
-		ApiKeyID:    apiKeyID,
-		ApiKeyIDSet: apiKeyIDSet,
 		stage:       microsoftSSOWaitingForPortal,
 	}
 
@@ -174,11 +160,7 @@ func StartMicrosoftSSOLogin(apiKeyIDs ...string) (sessionID, authorizationURL st
 // ContinueMicrosoftSSOLogin consumes one pasted callback URL. The first call
 // returns the Microsoft authorization URL; the second exchanges the Microsoft
 // authorization code and returns the credential.
-func ContinueMicrosoftSSOLogin(sessionID, callbackURL string, apiKeyIDs ...string) (*MicrosoftSSOProgress, error) {
-	requestedApiKeyID, apiKeyProvided, err := parseMicrosoftSSOApiKeyArgument(apiKeyIDs)
-	if err != nil {
-		return nil, err
-	}
+func ContinueMicrosoftSSOLogin(sessionID, callbackURL string) (*MicrosoftSSOProgress, error) {
 	session := getMicrosoftSSOSession(strings.TrimSpace(sessionID))
 	if session == nil {
 		return nil, fmt.Errorf("Microsoft SSO session not found or expired")
@@ -201,55 +183,15 @@ func ContinueMicrosoftSSOLogin(sessionID, callbackURL string, apiKeyIDs ...strin
 		retireMicrosoftSSOSessionLocked(session)
 		return nil, fmt.Errorf("Microsoft SSO session expired")
 	}
-	if apiKeyProvided {
-		// The start request owns the flow's account-group binding. A later
-		// callback may explicitly clear it, but a non-empty callback value cannot
-		// silently move an already-bound login into another group. For legacy
-		// sessions without a snapshot, accept the first non-empty callback value.
-		if requestedApiKeyID == "" {
-			session.ApiKeyID = ""
-			session.ApiKeyIDSet = true
-		} else if !session.ApiKeyIDSet {
-			session.ApiKeyID = requestedApiKeyID
-			session.ApiKeyIDSet = true
-		}
-	}
-	// Capture the binding before a provider-leg completion retires and scrubs
-	// the session. The returned progress/result must still carry the snapshot.
-	snapshotApiKeyID, snapshotApiKeySet := session.ApiKeyID, session.ApiKeyIDSet
 
 	switch session.stage {
 	case microsoftSSOWaitingForPortal:
-		progress, err := continueMicrosoftPortalLeg(session, callbackURL)
-		if progress != nil {
-			progress.ApiKeyID = snapshotApiKeyID
-			progress.ApiKeyIDSet = snapshotApiKeySet
-		}
-		return progress, err
+		return continueMicrosoftPortalLeg(session, callbackURL)
 	case microsoftSSOWaitingForProvider:
-		progress, err := continueMicrosoftProviderLeg(session, callbackURL)
-		if progress != nil {
-			progress.ApiKeyID = snapshotApiKeyID
-			progress.ApiKeyIDSet = snapshotApiKeySet
-			if progress.Result != nil {
-				progress.Result.ApiKeyID = snapshotApiKeyID
-				progress.Result.ApiKeyIDSet = snapshotApiKeySet
-			}
-		}
-		return progress, err
+		return continueMicrosoftProviderLeg(session, callbackURL)
 	default:
 		return nil, fmt.Errorf("Microsoft SSO session is in an invalid state")
 	}
-}
-
-func parseMicrosoftSSOApiKeyArgument(apiKeyIDs []string) (string, bool, error) {
-	if len(apiKeyIDs) > 1 {
-		return "", false, fmt.Errorf("Microsoft SSO accepts at most one api key binding")
-	}
-	if len(apiKeyIDs) == 0 {
-		return "", false, nil
-	}
-	return strings.TrimSpace(apiKeyIDs[0]), true, nil
 }
 
 // CancelMicrosoftSSOLogin discards one transient session. It is safe to call for
@@ -406,15 +348,12 @@ func continueMicrosoftProviderLeg(session *microsoftSSOSession, rawURL string) (
 		return nil, fmt.Errorf("Microsoft SSO session was canceled")
 	}
 	metadata := parseExternalTokenMetadata(token.AccessToken)
-	if metadata.Issuer != "" && !sameNormalizedURL(metadata.Issuer, leg.IssuerURL) {
+	if !externalTokenTenantMatches(metadata, leg.IssuerURL) {
 		retireMicrosoftSSOSessionLocked(session)
-		return nil, fmt.Errorf("Microsoft access token issuer does not match the login issuer")
+		return nil, fmt.Errorf("Microsoft access token tenant does not match the login issuer")
 	}
 
-	userID := ""
-	if metadata.Issuer != "" && metadata.ObjectID != "" {
-		userID = strings.TrimRight(metadata.Issuer, "/") + "." + metadata.ObjectID
-	}
+	email, userID := externalIdpIdentity(metadata, leg.IssuerURL)
 	result := &MicrosoftSSOResult{
 		AccessToken:   token.AccessToken,
 		RefreshToken:  token.RefreshToken,
@@ -422,11 +361,9 @@ func continueMicrosoftProviderLeg(session *microsoftSSOSession, rawURL string) (
 		TokenEndpoint: leg.TokenEndpoint,
 		IssuerURL:     leg.IssuerURL,
 		Scopes:        leg.Scopes,
-		Email:         metadata.Email,
+		Email:         email,
 		UserID:        userID,
 		ExpiresAt:     time.Now().Unix() + int64(token.ExpiresIn),
-		ApiKeyID:      session.ApiKeyID,
-		ApiKeyIDSet:   session.ApiKeyIDSet,
 	}
 	retireMicrosoftSSOSessionLocked(session)
 	return &MicrosoftSSOProgress{Result: result}, nil
@@ -681,7 +618,7 @@ func exchangeMicrosoftAuthorizationCode(client *http.Client, leg *microsoftProvi
 	form.Set("redirect_uri", microsoftLoopbackBaseURL+microsoftOAuthCallback)
 	form.Set("code_verifier", leg.CodeVerifier)
 	form.Set("scope", leg.Scopes)
-	token, err := postExternalIdpToken(client, leg.TokenEndpoint, leg.IssuerURL, form)
+	token, err := postExternalIdpToken(context.Background(), client, leg.TokenEndpoint, leg.IssuerURL, form)
 	if err != nil {
 		return nil, fmt.Errorf("Microsoft token exchange failed: %w", err)
 	}
@@ -691,7 +628,7 @@ func exchangeMicrosoftAuthorizationCode(client *http.Client, leg *microsoftProvi
 	return token, nil
 }
 
-func refreshExternalIdpToken(refreshToken, clientID, tokenEndpoint, issuerURL, scopes string, client *http.Client) (string, string, int64, string, error) {
+func refreshExternalIdpToken(ctx context.Context, refreshToken, clientID, tokenEndpoint, issuerURL, scopes string, client *http.Client) (string, string, int64, string, error) {
 	if strings.TrimSpace(refreshToken) == "" || strings.TrimSpace(clientID) == "" || strings.TrimSpace(tokenEndpoint) == "" {
 		return "", "", 0, "", fmt.Errorf("external IdP refresh requires refreshToken, clientId, and tokenEndpoint")
 	}
@@ -707,7 +644,7 @@ func refreshExternalIdpToken(refreshToken, clientID, tokenEndpoint, issuerURL, s
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	form.Set("scope", normalizedScopes)
-	token, err := postExternalIdpToken(client, tokenEndpoint, issuerURL, form)
+	token, err := postExternalIdpToken(ctx, client, tokenEndpoint, issuerURL, form)
 	if err != nil {
 		return "", "", 0, "", err
 	}
@@ -717,7 +654,7 @@ func refreshExternalIdpToken(refreshToken, clientID, tokenEndpoint, issuerURL, s
 	return token.AccessToken, token.RefreshToken, time.Now().Unix() + int64(token.ExpiresIn), "", nil
 }
 
-func postExternalIdpToken(client *http.Client, tokenEndpoint, issuerURL string, form url.Values) (*externalIdpTokenResponse, error) {
+func postExternalIdpToken(ctx context.Context, client *http.Client, tokenEndpoint, issuerURL string, form url.Values) (*externalIdpTokenResponse, error) {
 	if err := ValidateExternalIdpEndpoint(tokenEndpoint); err != nil {
 		return nil, fmt.Errorf("external IdP token endpoint rejected: %w", err)
 	}
@@ -730,7 +667,7 @@ func postExternalIdpToken(client *http.Client, tokenEndpoint, issuerURL string, 
 			return nil, fmt.Errorf("external IdP token endpoint rejected: %w", err)
 		}
 	}
-	request, err := http.NewRequest(http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("build external IdP token request: %w", err)
 	}
@@ -767,6 +704,7 @@ func postExternalIdpToken(client *http.Client, tokenEndpoint, issuerURL string, 
 
 type externalTokenMetadata struct {
 	Issuer    string
+	TenantID  string
 	Email     string
 	ObjectID  string
 	ExpiresAt int64
@@ -790,6 +728,7 @@ func parseExternalTokenMetadata(accessToken string) externalTokenMetadata {
 		PreferredUsername string `json:"preferred_username"`
 		UPN               string `json:"upn"`
 		UniqueName        string `json:"unique_name"`
+		TenantID          string `json:"tid"`
 		ObjectID          string `json:"oid"`
 		ExpiresAt         int64  `json:"exp"`
 	}
@@ -805,6 +744,7 @@ func parseExternalTokenMetadata(accessToken string) externalTokenMetadata {
 	}
 	return externalTokenMetadata{
 		Issuer:    strings.TrimRight(strings.TrimSpace(claims.Issuer), "/"),
+		TenantID:  strings.TrimSpace(claims.TenantID),
 		Email:     email,
 		ObjectID:  strings.TrimSpace(claims.ObjectID),
 		ExpiresAt: claims.ExpiresAt,
@@ -904,12 +844,46 @@ func ExternalIdpTokenIssuer(accessToken string) string {
 // ExternalIdpTokenIdentity extracts display-only identity hints from the JWT
 // payload returned by Microsoft's trusted token endpoint. Authorization never
 // relies on these unverified claims.
-func ExternalIdpTokenIdentity(accessToken string) (email, userID string) {
-	metadata := parseExternalTokenMetadata(accessToken)
-	if metadata.Issuer != "" && metadata.ObjectID != "" {
-		userID = strings.TrimRight(metadata.Issuer, "/") + "." + metadata.ObjectID
+func ExternalIdpTokenIdentity(accessToken, issuerURL string) (email, userID string) {
+	return externalIdpIdentity(parseExternalTokenMetadata(accessToken), issuerURL)
+}
+
+// externalIdpIdentity keys userID on the validated login issuer, the format
+// Kiro Account Manager exports (<issuer>.<oid>).
+func externalIdpIdentity(metadata externalTokenMetadata, issuerURL string) (email, userID string) {
+	issuerURL = strings.TrimRight(strings.TrimSpace(issuerURL), "/")
+	if issuerURL != "" && metadata.ObjectID != "" {
+		userID = issuerURL + "." + metadata.ObjectID
 	}
 	return metadata.Email, userID
+}
+
+// externalTokenTenantMatches rejects a token minted for another tenant. The
+// tenant is compared rather than the issuer string because Entra issues v1
+// tokens (iss https://sts.windows.net/<tid>/) when the resource app accepts
+// v1, while the login issuer is always the v2 form. An opaque token carries
+// no claims and passes: it came straight from the validated token endpoint.
+func externalTokenTenantMatches(metadata externalTokenMetadata, issuerURL string) bool {
+	_, tenant, err := parseMicrosoftIssuer(issuerURL)
+	if err != nil {
+		return false
+	}
+	if metadata.TenantID != "" {
+		return strings.EqualFold(metadata.TenantID, tenant)
+	}
+	if metadata.Issuer == "" {
+		return true
+	}
+	u, err := url.Parse(metadata.Issuer)
+	if err != nil {
+		return false
+	}
+	for _, segment := range strings.Split(strings.Trim(u.Path, "/"), "/") {
+		if strings.EqualFold(segment, tenant) {
+			return true
+		}
+	}
+	return false
 }
 
 func noRedirectClient(client *http.Client) *http.Client {
@@ -1035,8 +1009,6 @@ func retireMicrosoftSSOSessionLocked(session *microsoftSSOSession) {
 func clearMicrosoftSSOSessionLocked(session *microsoftSSOSession) {
 	session.PortalState = ""
 	session.ProxyURL = ""
-	session.ApiKeyID = ""
-	session.ApiKeyIDSet = false
 	session.providerLeg = nil
 }
 

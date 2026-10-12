@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
-	"kiro-go/config"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,13 +13,11 @@ import (
 
 const defaultPromptCacheTTL = 5 * time.Minute
 
-// Anthropic requires cached prefixes to reach a minimum token count before
-// caching takes effect. Breakpoints below this threshold are excluded from
-// matching and storage to avoid reporting unrealistic 100% cache hits on
-// short requests.
-const defaultMinCacheableTokens = 1024
-const opusMinCacheableTokens = 4096
-const maxPromptCacheLookback = 10
+const (
+	//! Anthropic ignores cache prefixes below the model-specific token floor.
+	defaultMinCacheableTokens = 1024
+	opusMinCacheableTokens    = 4096
+)
 
 type promptCacheUsage struct {
 	CacheCreationInputTokens   int
@@ -81,23 +77,17 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	breakpoints := make([]promptCacheBreakpoint, 0)
 	cumulativeTokens := 0
 	var activeTTL time.Duration
-	hasExplicitBreakpoint := false
 
 	for _, block := range blocks {
 		canonical := canonicalizeCacheValue(block.Value)
 		writeHashChunk(hasher, canonical)
 		cumulativeTokens += block.Tokens
 
-		// Determine whether this block acts as a cache breakpoint:
-		//   1) Explicit cache_control on the block itself.
-		//   2) Once any explicit breakpoint has been seen, every message-end
-		//      boundary becomes an implicit breakpoint so that multi-turn
-		//      conversations can hit earlier stored prefixes.
+		//! After an explicit cache marker, message ends become reusable prefix boundaries.
 		breakpointTTL := time.Duration(0)
 		if block.TTL > 0 {
 			breakpointTTL = block.TTL
 			activeTTL = block.TTL
-			hasExplicitBreakpoint = true
 		} else if block.IsMessageEnd && activeTTL > 0 {
 			breakpointTTL = activeTTL
 		}
@@ -116,42 +106,11 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	}
 
 	if len(breakpoints) == 0 {
-		// Sub2API emulation adds a default 5-minute breakpoint at the final
-		// message/block when the request has no explicit cache_control.
-		if len(blocks) == 0 {
-			return nil
-		}
-		var fingerprint [32]byte
-		copy(fingerprint[:], hasher.Sum(nil))
-		breakpoints = append(breakpoints, promptCacheBreakpoint{
-			Fingerprint:      fingerprint,
-			CumulativeTokens: cumulativeTokens,
-			TTL:              defaultPromptCacheTTL,
-		})
+		return nil
 	}
 
-	if totalInputTokens <= 0 {
-		totalInputTokens = cumulativeTokens
-	}
 	if totalInputTokens < cumulativeTokens {
 		totalInputTokens = cumulativeTokens
-	}
-	// Normalize estimated cumulative tokens into the caller's total-input
-	// token space so cache usage is reported against upstream billing totals.
-	if len(breakpoints) > 0 {
-		normalizationBase := breakpoints[len(breakpoints)-1].CumulativeTokens
-		if normalizationBase > 0 && totalInputTokens != normalizationBase {
-			for i := range breakpoints {
-				n := int(math.Round(float64(breakpoints[i].CumulativeTokens) * float64(totalInputTokens) / float64(normalizationBase)))
-				if i > 0 && n < breakpoints[i-1].CumulativeTokens {
-					n = breakpoints[i-1].CumulativeTokens
-				}
-				breakpoints[i].CumulativeTokens = n
-			}
-		}
-	}
-	if !hasExplicitBreakpoint && len(breakpoints) > 0 {
-		breakpoints[len(breakpoints)-1].CumulativeTokens = totalInputTokens
 	}
 
 	return &promptCacheProfile{
@@ -161,95 +120,72 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	}
 }
 
-// BuildOpenAIProfile mirrors the prefix-oriented cache model for Chat/Responses
-// requests. Each stable request component is hashed as an ordered block so a
-// later turn can reuse any previously stored message prefix.
-func (t *promptCacheTracker) BuildOpenAIProfile(req *OpenAIRequest, totalInputTokens int) *promptCacheProfile {
-	if req == nil {
+// BuildOpenAIProfile creates a conservative, local-only cache profile for an
+// OpenAI request after it has been translated to Kiro's wire payload. Only
+// stable conversation material is fingerprinted: model, previous history,
+// tool definitions, and inference configuration. The current user message,
+// images, and current tool-result bodies are deliberately excluded so they are
+// never reported as cache hits.
+func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInputTokens int) *promptCacheProfile {
+	if t == nil || payload == nil || totalInputTokens <= 0 {
 		return nil
 	}
+
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	stable := map[string]interface{}{
+		"model":            current.ModelID,
+		"inference_config": payload.InferenceConfig,
+	}
+	if current.UserInputMessageContext != nil {
+		// Tools are stable prompt material. Tool results belong to the current
+		// dynamic turn and must not participate in a cache-hit estimate.
+		stable["tools"] = current.UserInputMessageContext.Tools
+	}
+
+	// Keep a cumulative breakpoint after every historic message. A follow-up
+	// request may append new history, but it can still reuse an earlier stable
+	// prefix. The current dynamic message is intentionally never appended.
 	hasher := sha256.New()
-	breakpoints := make([]promptCacheBreakpoint, 0, len(req.Messages)+len(req.Tools)+2)
-	cumulative := 0
-	appendBlock := func(v interface{}, messageEnd bool) {
-		canonical := canonicalizeCacheValue(v)
+	cumulativeTokens := 0
+	appendStableBlock := func(value interface{}) {
+		canonical := canonicalizeCacheValue(value)
 		writeHashChunk(hasher, canonical)
-		cumulative += estimateApproxTokens(canonical)
-		if messageEnd {
-			var fp [32]byte
-			copy(fp[:], hasher.Sum(nil))
-			breakpoints = append(breakpoints, promptCacheBreakpoint{Fingerprint: fp, CumulativeTokens: cumulative, TTL: defaultPromptCacheTTL})
+		cumulativeTokens += estimateApproxTokens(canonical)
+	}
+	appendStableBlock(stable)
+
+	breakpoints := make([]promptCacheBreakpoint, 0, len(payload.ConversationState.History)+1)
+	appendBreakpoint := func() {
+		if cumulativeTokens < minCacheableTokensForModel(current.ModelID) {
+			return
 		}
+		fingerprint := [32]byte{}
+		copy(fingerprint[:], hasher.Sum(nil))
+		breakpoints = append(breakpoints, promptCacheBreakpoint{
+			Fingerprint:      fingerprint,
+			CumulativeTokens: minInt(cumulativeTokens, totalInputTokens),
+			TTL:              defaultPromptCacheTTL,
+		})
 	}
-	appendBlock(map[string]interface{}{"kind": "request_prelude", "model": req.Model}, false)
-	for i, tool := range req.Tools {
-		appendBlock(map[string]interface{}{"kind": "tool", "index": i, "type": tool.Type, "function": tool.Function}, false)
-	}
-	for i, msg := range req.Messages {
-		appendBlock(map[string]interface{}{"kind": "message", "index": i, "role": msg.Role, "content": msg.Content, "tool_calls": msg.ToolCalls, "tool_call_id": msg.ToolCallID}, true)
+	appendBreakpoint()
+	for _, historyMessage := range payload.ConversationState.History {
+		appendStableBlock(historyMessage)
+		appendBreakpoint()
 	}
 	if len(breakpoints) == 0 {
 		return nil
 	}
-	if totalInputTokens <= cumulative {
-		totalInputTokens = cumulative
+
+	return &promptCacheProfile{
+		Breakpoints:      breakpoints,
+		TotalInputTokens: totalInputTokens,
+		Model:            current.ModelID,
 	}
-	base := breakpoints[len(breakpoints)-1].CumulativeTokens
-	if base > 0 && totalInputTokens != base {
-		for i := range breakpoints {
-			breakpoints[i].CumulativeTokens = int(math.Round(float64(breakpoints[i].CumulativeTokens) * float64(totalInputTokens) / float64(base)))
-		}
-	}
-	breakpoints[len(breakpoints)-1].CumulativeTokens = totalInputTokens
-	return &promptCacheProfile{Breakpoints: breakpoints, TotalInputTokens: totalInputTokens, Model: req.Model}
 }
 
-// Compute calculates usage using the default full-ratio policy.
 func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfile) promptCacheUsage {
-	policy := config.PromptCacheSettings{Enabled: true, Mode: config.PromptCacheModeUniform, Ratio: 1, CreationRatio: 1, ReadRatio: 1}
-	return t.compute(accountID, profile, policy)
-}
-
-func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *promptCacheProfile, settings config.PromptCacheSettings) promptCacheUsage {
-	return t.compute(accountID, profile, settings)
-}
-
-func (t *promptCacheTracker) compute(accountID string, profile *promptCacheProfile, settings config.PromptCacheSettings) promptCacheUsage {
 	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
 		return promptCacheUsage{}
-	}
-	if !settings.Enabled {
-		return promptCacheUsage{}
-	}
-	if settings.Mode == "" {
-		settings.Mode = config.PromptCacheModeUniform
-	}
-	if settings.Mode != config.PromptCacheModeUniform && settings.Mode != config.PromptCacheModeIndependent {
-		settings.Mode = config.PromptCacheModeUniform
-	}
-	if settings.Mode == config.PromptCacheModeUniform {
-		settings.CreationRatio = settings.Ratio
-		settings.ReadRatio = settings.Ratio
-	}
-	if math.IsNaN(settings.CreationRatio) || math.IsInf(settings.CreationRatio, 0) {
-		settings.CreationRatio = 0
-	}
-	if math.IsNaN(settings.ReadRatio) || math.IsInf(settings.ReadRatio, 0) {
-		settings.ReadRatio = 0
-	}
-	if settings.CreationRatio < 0 || settings.CreationRatio > 1 {
-		if settings.CreationRatio < 0 {
-			settings.CreationRatio = 0
-		} else {
-			settings.CreationRatio = 1
-		}
-	}
-	if settings.ReadRatio < 0 || settings.ReadRatio > 1 {
-		if settings.ReadRatio < 0 {
-			settings.ReadRatio = 0
-		} else {
-			settings.ReadRatio = 1
-		}
 	}
 
 	minTokens := minCacheableTokensForModel(profile.Model)
@@ -263,29 +199,30 @@ func (t *promptCacheTracker) compute(accountID string, profile *promptCacheProfi
 
 	entries := t.entriesByAccount[accountID]
 	if len(entries) == 0 {
-		// First request for this account: report creation only if above threshold.
+
 		effectiveCreation := lastTokens
 		if effectiveCreation < minTokens {
 			effectiveCreation = 0
 		}
-		creation := int(float64(effectiveCreation) * settings.CreationRatio)
-		cache5m, cache1h := computePromptCacheTTLBreakdown(profile, 0)
-		cache5m = int(float64(cache5m) * settings.CreationRatio)
-		cache1h = int(float64(cache1h) * settings.CreationRatio)
+		cache5m, cache1h := computePromptCacheTTLBreakdownLimited(profile, 0, effectiveCreation)
 		return promptCacheUsage{
-			CacheCreationInputTokens:   creation,
+			CacheCreationInputTokens:   effectiveCreation,
 			CacheReadInputTokens:       0,
 			CacheCreation5mInputTokens: cache5m,
 			CacheCreation1hInputTokens: cache1h,
 		}
 	}
 
+	//! Leave some fresh input uncached so cache usage does not report impossible 100% hits.
+	maxCacheable := int(float64(profile.TotalInputTokens) * 0.85)
+	if lastTokens > maxCacheable {
+		lastTokens = maxCacheable
+	}
+
 	matchedTokens := 0
-	lookback := 0
-	for i := len(profile.Breakpoints) - 1; i >= 0 && lookback < maxPromptCacheLookback; i-- {
-		lookback++
+	for i := len(profile.Breakpoints) - 1; i >= 0; i-- {
 		breakpoint := profile.Breakpoints[i]
-		// Skip breakpoints below the minimum cacheable token threshold.
+
 		if breakpoint.CumulativeTokens < minTokens {
 			continue
 		}
@@ -302,12 +239,8 @@ func (t *promptCacheTracker) compute(accountID string, profile *promptCacheProfi
 		break
 	}
 
-	rawMatched := matchedTokens
-	matchedTokens = int(float64(rawMatched) * settings.ReadRatio)
-	creation := int(float64(maxInt(lastTokens-rawMatched, 0)) * settings.CreationRatio)
-	cache5m, cache1h := computePromptCacheTTLBreakdown(profile, rawMatched)
-	cache5m = int(float64(cache5m) * settings.CreationRatio)
-	cache1h = int(float64(cache1h) * settings.CreationRatio)
+	creation := maxInt(lastTokens-matchedTokens, 0)
+	cache5m, cache1h := computePromptCacheTTLBreakdownLimited(profile, matchedTokens, creation)
 	return promptCacheUsage{
 		CacheCreationInputTokens:   creation,
 		CacheReadInputTokens:       matchedTokens,
@@ -334,7 +267,7 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 	}
 
 	for _, breakpoint := range profile.Breakpoints {
-		// Skip breakpoints below the minimum cacheable token threshold.
+
 		if breakpoint.CumulativeTokens < minTokens {
 			continue
 		}
@@ -481,9 +414,7 @@ func appendPromptBlock(blocks *[]cacheablePromptBlock, wrapper map[string]interf
 	blockValue := wrapper["block"]
 	ttl := normalizePromptCacheTTL(extractPromptCacheTTL(blockValue))
 
-	// Drop volatile billing metadata from the cache fingerprint. Claude Code's
-	// x-anthropic-billing-header can drift, appear, or disappear across
-	// otherwise identical requests, and it does not change model semantics.
+	//! Billing headers drift per request and must not affect prompt-cache fingerprints.
 	if isAnthropicBillingHeaderBlock(blockValue) {
 		return
 	}
@@ -515,7 +446,6 @@ func isAnthropicBillingHeaderBlock(value interface{}) bool {
 		return false
 	}
 
-	// Only normalize text blocks (or blocks without an explicit type but containing text).
 	if t, ok := blockMap["type"].(string); ok && t != "" && t != "text" {
 		return false
 	}
@@ -606,6 +536,12 @@ func normalizePromptCacheTTL(ttl time.Duration) time.Duration {
 }
 
 func computePromptCacheTTLBreakdown(profile *promptCacheProfile, matchedTokens int) (int, int) {
+	if profile == nil {
+		return 0, 0
+	}
+	return computePromptCacheTTLBreakdownLimited(profile, matchedTokens, maxInt(profile.TotalInputTokens-matchedTokens, 0))
+}
+func computePromptCacheTTLBreakdownLimited(profile *promptCacheProfile, matchedTokens, creation int) (int, int) {
 	if profile == nil || len(profile.Breakpoints) == 0 {
 		return 0, 0
 	}
@@ -614,7 +550,7 @@ func computePromptCacheTTLBreakdown(profile *promptCacheProfile, matchedTokens i
 	cache1h := 0
 	previous := matchedTokens
 	for _, breakpoint := range profile.Breakpoints {
-		current := minInt(breakpoint.CumulativeTokens, profile.TotalInputTokens)
+		current := minInt(breakpoint.CumulativeTokens, minInt(profile.TotalInputTokens, matchedTokens+creation))
 		if current <= previous {
 			continue
 		}

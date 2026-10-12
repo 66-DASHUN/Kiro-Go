@@ -1,50 +1,26 @@
-/*
- * Kiro-Go admin UI logic.
- */
 (() => {
   'use strict';
-
-  // State
   const baseUrl = location.origin;
-  if (localStorage.getItem('kiro_remember') !== '1') {
-    localStorage.removeItem('admin_password');
-    localStorage.removeItem('admin_login_time');
-  }
-  let password = sessionStorage.getItem('admin_password') || localStorage.getItem('admin_password') || '';
-  const supportedLangs = ['zh', 'en', 'vi'];
-  let currentLang = localStorage.getItem('kiro_lang') || 'zh';
-  if (!supportedLangs.includes(currentLang)) currentLang = 'zh';
-  const dict = { en: null, zh: null, vi: null };
+  const TOKEN_KEY = 'kiro_admin_token';
+  const TOKEN_EXP_KEY = 'kiro_admin_token_exp';
+  let adminToken = readStoredToken();
+  let currentLang = localStorage.getItem('kiro_lang') || 'en';
+  const dict = { en: null, zh: null };
   let accountsData = [];
   const selectedAccounts = new Set();
   let filterKeyword = '';
   let filterStatus = 'all';
   let privacyModeEnabled = true;
   let promptRules = [];
+  let modelMappings = [];
+  let modelMappingDefaults = [];
+  let draggedModelMappingIndex = null;
+  let modelMappingDropIndex = null;
   let builderIdSession = '';
   let builderIdPollTimer = null;
-  let builderIdApiKeyId = '';
   let iamSession = '';
-  let iamApiKeyId = '';
-  let microsoftSession = '';
-  let microsoftSelectionId = '';
-  let microsoftApiKeyId = '';
-  let microsoftStage = 'kiro';
-  let microsoftAuthorizeUrl = '';
-  let microsoftProfiles = [];
-  let microsoftSelectedProfileArn = '';
-  let microsoftBusy = false;
-  let microsoftGeneration = 0;
-  // API-key ownership selected while adding an account. Auth endpoints receive
-  // this value directly; flow-specific snapshots keep async steps consistent.
-  let pendingApiKeyId = '';
-  let promptCacheSettings = {
-    enabled: true,
-    mode: 'uniform',
-    ratio: 1,
-    creationRatio: 1,
-    readRatio: 1
-  };
+  // Microsoft SSO: 'kiro' (portal callback) then 'microsoft' (Entra callback), then maybe a profile pick.
+  let ms = { session: '', stage: 'kiro', authorizeUrl: '', selectionId: '', profiles: [], busy: false, generation: 0 };
   let exportSelectedIds = new Set();
   let currentVersion = '';
   let testLogs = [];
@@ -56,8 +32,20 @@
   let customSelectUid = 0;
   let customSelectObserver = null;
   let customSelectRefreshQueued = false;
-
-  // DOM helpers
+  let currentTab = 'accounts';
+  let adminEventSource = null;
+  let adminEventsStarting = false;
+  let sessionExpiredNotified = false;
+  let observeRefreshTimer = null;
+  let observeCache = null;
+  let requestsCache = [];
+  let requestsMeta = { total: 0, page: 1, pageSize: 25, sort: 'time', order: 'desc', persistent: false };
+  let requestsSearchTimer = null;
+  let requestsQuery = { search: '', status: '', page: 1, pageSize: 25, sort: 'time', order: 'desc' };
+  let backupsCache = [];
+  let backupScheduleCache = null;
+  let apiKeysCache = [];
+  let editingApiKeyId = '';
   const $ = (id) => document.getElementById(id);
   const qsa = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   function escapeHtml(s) {
@@ -114,8 +102,6 @@
       el.textContent = raw;
     }
   }
-
-  // i18n
   async function loadLocale(lang) {
     if (dict[lang]) return dict[lang];
     try {
@@ -128,10 +114,31 @@
   }
   function t(key, ...args) {
     const active = dict[currentLang] || {};
-    const fallback = dict.zh || {};
+    const fallback = dict.en || {};
     let text = active[key] || fallback[key] || key;
     args.forEach((arg, idx) => { text = text.replace('{' + idx + '}', arg); });
     return text;
+  }
+  function localizedError(message) {
+    const raw = String(message || '').trim();
+    const key = {
+      'Invalid JSON': 'serverError.invalidJSON',
+      'Unauthorized': 'serverError.unauthorized',
+      'Not Found': 'serverError.notFound',
+      'Account not found': 'serverError.accountNotFound',
+      'API key not found': 'serverError.apiKeyNotFound',
+      'No account IDs provided': 'serverError.noAccountIds',
+      'startUrl is required': 'serverError.startUrlRequired',
+      'bearerToken is required': 'serverError.bearerTokenRequired',
+      'refreshToken is required': 'serverError.refreshTokenRequired',
+      'refreshToken or kiroApiKey is required': 'serverError.refreshTokenRequired',
+      'kiroApiKey is empty': 'serverError.kiroApiKeyEmpty',
+      'kiroApiKey contains invalid characters': 'serverError.kiroApiKeyInvalid',
+      "kiroApiKey has more than one '|' separator": 'serverError.kiroApiKeyInvalid',
+      'invalid Kiro API key region': 'serverError.kiroApiKeyRegion',
+      'this Kiro API key is already added': 'serverError.kiroApiKeyDuplicate'
+    }[raw];
+    return key ? t(key) : raw;
   }
   function applyTranslations() {
     qsa('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
@@ -145,7 +152,6 @@
     refreshCustomSelects();
   }
   async function setLang(lang) {
-    if (!supportedLangs.includes(lang)) lang = 'zh';
     currentLang = lang;
     localStorage.setItem('kiro_lang', lang);
     await loadLocale(lang);
@@ -153,21 +159,21 @@
     renderVersionBadge();
     renderAccounts();
     renderPromptRules();
-    renderLogs(logsCache);
+    renderModelMappings();
+    renderObserveCached();
+    renderRequestsCached();
+    renderBackupsCached();
   }
   function updateLangButtons() {
     qsa('.lang-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.lang === currentLang));
     qsa('.lang-toggle').forEach(btn => {
       const label = btn.querySelector('.lang-toggle-label');
-      if (label) label.textContent = t('lang.' + currentLang);
+      if (label) label.textContent = currentLang === 'zh' ? t('lang.zh') : t('lang.en');
     });
   }
   function toggleLang() {
-    const next = supportedLangs[(supportedLangs.indexOf(currentLang) + 1) % supportedLangs.length];
-    setLang(next);
+    setLang(currentLang === 'zh' ? 'en' : 'zh');
   }
-
-  // Custom select
   function getCustomSelectLabel(select) {
     const option = select.selectedOptions && select.selectedOptions[0];
     return ((option && option.textContent) || select.value || '').trim();
@@ -399,8 +405,6 @@
       attributeFilter: ['disabled', 'class', 'id', 'data-native-select']
     });
   }
-
-  // Theme
   const THEME_ORDER = ['system', 'light', 'dark'];
   const themeMQ = window.matchMedia('(prefers-color-scheme: dark)');
   function resolveTheme(pref) {
@@ -436,8 +440,6 @@
     localStorage.setItem('kiro_theme', next);
     applyTheme(next);
   }
-
-  // Privacy and email mask
   function initPrivacyMode() {
     const saved = localStorage.getItem('privacyMode');
     privacyModeEnabled = saved === null ? true : saved === 'true';
@@ -458,12 +460,17 @@
     }
     return maskedLocal + '@' + domain;
   }
+  function maskEmailsInText(text) {
+    if (!privacyModeEnabled || !text) return text;
+    return String(text).replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, email => maskEmail(email));
+  }
   function getDisplayEmail(email, id) {
     const raw = email || (id ? id.substring(0, 12) + '...' : '-');
     return maskEmail(raw);
   }
-
-  // Toast bridge
+  function getDisplayAccount(email, id) {
+    return getDisplayEmail(email, id);
+  }
   const toast = function (msg, variant, opts) {
     if (typeof window.toast === 'function') return window.toast(msg, variant, opts);
     try { console.warn('[toast missing]', variant, msg); } catch (_) { }
@@ -472,8 +479,6 @@
   const toastPrimary = (msg, opts) => toast(msg, 'primary', opts);
   const toastWarning = (msg, opts) => toast(msg, 'warning', opts);
   const toastError = (msg, opts) => toast(msg, 'error', opts);
-
-  // Modal helpers
   let modalScrollY = 0;
   let confirmResolve = null;
   const modalFocusStack = [];
@@ -599,283 +604,213 @@
     ok.focus({ preventScroll: true });
     return pending;
   }
-
-  // Fetch wrapper
   function api(path, opts) {
     opts = opts || {};
-    opts.headers = Object.assign({ 'X-Admin-Password': password }, opts.headers || {});
-    if (opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
-    return fetch('/admin/api' + path, opts);
+    opts.headers = Object.assign({ 'X-Admin-Token': adminToken }, opts.headers || {});
+    if (opts.body && !(opts.body instanceof FormData) && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
+    return fetch('/admin/api' + path, opts).then(res => {
+      if (res.status === 401 && adminToken) handleSessionExpired();
+      return res;
+    });
   }
-
-  // Login
-  function clearActivePassword() {
-    sessionStorage.removeItem('admin_password');
-    sessionStorage.removeItem('admin_login_time');
-    localStorage.removeItem('admin_password');
-    localStorage.removeItem('admin_login_time');
-    password = '';
+  //! Unlike the password it replaced, a token expires and is revoked when the
+  //! password changes. Drop the dead session once instead of letting every later
+  //! call fail silently. Auto-login runs before the main page shows, so a stale
+  //! token there is cleared without a reload.
+  function handleSessionExpired() {
+    stopAdminEvents();
+    clearSession();
+    const main = $('mainPage');
+    if (!main || main.classList.contains('hidden') || sessionExpiredNotified) return;
+    sessionExpiredNotified = true;
+    toast(t('login.sessionExpired'), 'warning');
+    setTimeout(() => location.reload(), 1500);
   }
-  function getActiveLoginTime() {
-    const storage = sessionStorage.getItem('admin_password') ? sessionStorage : localStorage;
-    return parseInt(storage.getItem('admin_login_time') || '0', 10);
-  }
-  function setActivePassword(nextPassword, remember) {
-    const now = Date.now().toString();
-    password = nextPassword;
-    sessionStorage.setItem('admin_password', nextPassword);
-    sessionStorage.setItem('admin_login_time', now);
-    if (remember) {
-      localStorage.setItem('admin_password', nextPassword);
-      localStorage.setItem('admin_login_time', now);
-      localStorage.setItem('kiro_remember', '1');
-      localStorage.setItem('kiro_remembered_pwd', nextPassword);
-    } else {
-      localStorage.removeItem('admin_password');
-      localStorage.removeItem('admin_login_time');
-      localStorage.removeItem('kiro_remember');
-      localStorage.removeItem('kiro_remembered_pwd');
+  function readStoredToken() {
+    for (const store of [sessionStorage, localStorage]) {
+      const token = store.getItem(TOKEN_KEY);
+      if (!token) continue;
+      const expiresAt = parseInt(store.getItem(TOKEN_EXP_KEY) || '0', 10);
+      if (expiresAt && Date.now() >= expiresAt) {
+        store.removeItem(TOKEN_KEY);
+        store.removeItem(TOKEN_EXP_KEY);
+        continue;
+      }
+      return token;
     }
+    return '';
   }
-  async function tryAutoLogin() {
-    if (!password) return;
-    const loginTime = getActiveLoginTime();
-    if (loginTime && Date.now() - loginTime > 72 * 3600 * 1000) {
-      clearActivePassword();
-      return;
-    }
+  function clearSession() {
+    [sessionStorage, localStorage].forEach(store => {
+      store.removeItem(TOKEN_KEY);
+      store.removeItem(TOKEN_EXP_KEY);
+    });
+    adminToken = '';
+  }
+  function storeSession(token, expiresAt, remember) {
+    clearSession();
+    adminToken = token;
+    const store = remember ? localStorage : sessionStorage;
+    store.setItem(TOKEN_KEY, token);
+    store.setItem(TOKEN_EXP_KEY, String(expiresAt || 0));
+    if (remember) localStorage.setItem('kiro_remember', '1');
+    else localStorage.removeItem('kiro_remember');
+  }
+  async function createSession(adminPassword, remember) {
+    const res = await fetch('/admin/api/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: adminPassword })
+    });
+    if (!res.ok) return false;
+    const data = await res.json().catch(() => ({}));
+    if (!data.token) return false;
+    storeSession(data.token, data.expiresAt, remember);
+    return true;
+  }
+  async function loadFirstRunPassword() {
     try {
-      const res = await api('/status');
-      if (res.ok) { showMain(); loadData(); }
+      const res = await fetch('/admin/api/first-run', { cache: 'no-store' });
+      const d = await res.json();
+      if (!d.password) return;
+      $('firstRunPasswordValue').textContent = d.password;
+      $('firstRunPassword').classList.remove('hidden');
     } catch (e) { }
   }
-  async function login() {
-    password = $('pwdField').value;
+  async function tryAutoLogin() {
+    if (!adminToken) return;
     try {
       const res = await api('/status');
-      if (res.ok) {
-        const remember = $('rememberPwd');
-        setActivePassword(password, !!(remember && remember.checked));
-        showMain(); loadData();
-      } else {
-        toast(t('login.error'), 'error');
+      if (res.ok) { showMain(); loadData(); return; }
+    } catch (e) { return; }
+    clearSession();
+  }
+  async function login() {
+    const supplied = $('pwdField').value;
+    if (!supplied) return toast(t('login.error'), 'error');
+    const remember = $('rememberPwd');
+    try {
+      if (!await createSession(supplied, !!(remember && remember.checked))) {
+        return toast(t('login.error'), 'error');
       }
+      $('pwdField').value = '';
+      showMain(); loadData();
     } catch (e) {
       toast(t('login.connectError'), 'error');
     }
   }
   function initRememberMe() {
     const remember = $('rememberPwd');
-    const field = $('pwdField');
-    if (!remember || !field) return;
-    if (localStorage.getItem('kiro_remember') === '1') {
-      remember.checked = true;
-      const saved = localStorage.getItem('kiro_remembered_pwd');
-      if (saved) field.value = saved;
-    }
+    if (!remember) return;
+    remember.checked = localStorage.getItem('kiro_remember') === '1';
   }
-  function logout() {
-    clearActivePassword();
+  async function logout() {
+    stopAdminEvents();
+    if (adminToken) { try { await api('/session', { method: 'DELETE' }); } catch (e) { } }
+    clearSession();
     location.reload();
   }
   function showMain() {
     $('loginPage').classList.add('hidden');
     $('mainPage').classList.remove('hidden');
+    startAdminEvents();
   }
-
-  // Data loaders
   async function loadData() {
     await Promise.all([loadStats(), loadAccounts(), loadSettings(), loadVersion()]);
     renderEndpointCode('claudeEndpoint', baseUrl + '/v1/messages');
     renderEndpointCode('openaiEndpoint', baseUrl + '/v1/chat/completions');
-    renderEndpointCode('openaiResponsesEndpoint', baseUrl + '/v1/responses');
+    renderEndpointCode('responsesEndpoint', baseUrl + '/v1/responses');
     renderEndpointCode('modelsEndpoint', baseUrl + '/v1/models');
+    renderEndpointCode('codexModelsEndpoint', baseUrl + '/v1/codex/models');
     renderEndpointCode('statsEndpoint', baseUrl + '/v1/stats');
     setTimeout(checkUpdate, 2000);
+  }
+
+  async function startAdminEvents() {
+    if (adminEventSource || adminEventsStarting || !adminToken || !window.EventSource) return;
+    //! EventSource cannot send headers, so the stream authenticates with a
+    //! single-use ticket that expires in seconds rather than with a credential.
+    adminEventsStarting = true;
+    let ticket = '';
+    try {
+      const res = await api('/session/ticket', { method: 'POST' });
+      if (res.ok) ticket = (await res.json().catch(() => ({}))).ticket || '';
+    } catch (e) { }
+    adminEventsStarting = false;
+    if (!ticket || adminEventSource) return;
+    adminEventSource = new EventSource('/admin/api/events?ticket=' + encodeURIComponent(ticket));
+    adminEventSource.addEventListener('observe_tick', scheduleObserveRefresh);
+    adminEventSource.addEventListener('account_updated', () => { loadAccounts(); loadStats(); });
+    adminEventSource.addEventListener('accounts_refreshed', () => { loadAccounts(); loadStats(); });
+    adminEventSource.addEventListener('backup_created', () => {
+      if (currentTab === 'backups') loadBackups();
+    });
+    adminEventSource.addEventListener('backup_restored', () => {
+      loadAccounts();
+      loadSettings();
+      if (currentTab === 'backups') loadBackups();
+    });
+    adminEventSource.onerror = () => {
+      stopAdminEvents();
+      if (!$('mainPage').classList.contains('hidden')) setTimeout(startAdminEvents, 5000);
+    };
+  }
+  function stopAdminEvents() {
+    if (!adminEventSource) return;
+    adminEventSource.close();
+    adminEventSource = null;
+  }
+  function scheduleObserveRefresh() {
+    if (currentTab !== 'observe') return;
+    if (observeRefreshTimer) return;
+    observeRefreshTimer = setTimeout(() => {
+      observeRefreshTimer = null;
+      loadObserve();
+    }, 1200);
   }
   async function loadStats() {
     const res = await api('/status');
     const d = await res.json();
-    $('statAccounts').textContent = d.accounts || 0;
-    $('statRequests').textContent = d.totalRequests || 0;
-    $('statSuccess').textContent = d.successRequests || 0;
-    $('statFailed').textContent = d.failedRequests || 0;
-    $('statTokens').textContent = formatNum(d.totalTokens || 0);
-    $('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
+    const accounts = Number(d.accounts || 0);
+    const available = Number(d.available || 0);
+    const exhausted = Number(d.totalExhausted || 0);
+    const totalRequests = Number(d.totalRequests || 0);
+    const successRequests = Number(d.successRequests || 0);
+    const failedRequests = Number(d.failedRequests || 0);
+    const totalTokens = Number(d.totalTokens || 0);
+    const appCredits = Number(d.totalCredits || 0);
+    const successInTokens = Number(d.successInTokens || 0);
+    const successOutTokens = Number(d.successOutTokens || 0);
+    const accountCreditsUsed = Number(d.accountCreditsUsed || 0);
+    const accountCreditsLimit = Number(d.accountCreditsLimit || 0);
+    const otherCredits = Math.max(0, accountCreditsUsed - appCredits);
+    const unavailable = Math.max(0, accounts - available);
+    setText('statAccounts', formatNum(accounts));
+    setText('statAvailable', formatCountRatio(available, accounts));
+    setText('statCapacityPct', formatPercent(accountCreditsUsed, accountCreditsLimit));
+    setText('statCredits', formatStatCredits(accountCreditsUsed) + ' / ' + formatStatCredits(accountCreditsLimit));
+    setText('statOtherCredits', formatStatCredits(otherCredits));
+    setText('statRequests', formatNum(totalRequests));
+    setText('statTokens', formatCompactNum(totalTokens));
+    setText('statAppCredits', formatStatCredits(appCredits));
+    setText('statAvgTokens', formatCompactNum(totalRequests ? totalTokens / totalRequests : 0));
+    setText('statAvgCredits', formatStatCredits(totalRequests ? appCredits / totalRequests : 0));
+    setText('statSuccess', formatNum(successRequests));
+    setText('statSuccessRate', formatPercent(successRequests, totalRequests));
+    setText('statSuccessRatio', formatCountRatio(successRequests, totalRequests));
+    setText('statSuccessInTokens', formatCompactNum(successInTokens));
+    setText('statSuccessOutTokens', formatCompactNum(successOutTokens));
+    setText('statFailed', formatNum(failedRequests));
+    setText('statFailedRate', formatPercent(failedRequests, totalRequests));
+    setText('statErrorEvents', formatNum(d.totalErrorEvents || 0));
+    setText('statExhausted', formatNum(exhausted));
+    setText('statUnavailable', formatNum(unavailable));
   }
-
-  // ===== Logs =====
-  let logsFilter = 'all';
-  let logsAutoTimer = null;
-  let logsCache = [];
-
-  function errorTypeLabel(type) {
-    if (!type) return '';
-    const key = 'errors.type' + type.charAt(0).toUpperCase() + type.slice(1);
-    return t(key) || type;
-  }
-
-  function formatLogTime(ts) {
-    const d = new Date(ts * 1000);
-    const pad = n => String(n).padStart(2, '0');
-    return pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
-      pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
-  }
-
-  function accountLabel(id) {
-    if (!id) return '-';
-    const acc = accountsData.find(a => a.id === id);
-    if (acc && acc.email) {
-      return privacyModeEnabled ? maskEmail(acc.email) : acc.email;
-    }
-    return id.slice(0, 8);
-  }
-
-  async function loadLogs() {
-    try {
-      const res = await api('/logs');
-      const d = await res.json();
-      const logs = d.logs || [];
-      renderLogs(logs);
-    } catch (e) {
-      // silent
-    }
-  }
-
-  function renderLogs(logs) {
-    logsCache = logs;
-    const list = $('logsList');
-    const summary = $('logsSummary');
-    if (!list) return;
-
-    const total = logs.length;
-    const okCount = logs.filter(l => l.status === 'success').length;
-    const errCount = total - okCount;
-    summary.innerHTML =
-      '<span>' + escapeHtml(t('logs.total')) + ': <strong>' + total + '</strong></span>' +
-      '<span>' + escapeHtml(t('logs.success')) + ': <strong>' + okCount + '</strong></span>' +
-      '<span>' + escapeHtml(t('logs.errors')) + ': <strong>' + errCount + '</strong></span>';
-
-    const filtered = logs.filter(l => logsFilter === 'all' || l.status === logsFilter);
-
-    if (!filtered.length) {
-      list.innerHTML = '<p class="text-muted">' + escapeHtml(t('logs.empty')) + '</p>';
-      return;
-    }
-
-    let html = '<table class="logs-table"><thead><tr>' +
-      '<th>' + escapeHtml(t('logs.time')) + '</th>' +
-      '<th>' + escapeHtml(t('logs.status')) + '</th>' +
-      '<th>' + escapeHtml(t('logs.endpoint')) + '</th>' +
-      '<th>' + escapeHtml(t('logs.model')) + '</th>' +
-      '<th>' + escapeHtml(t('logs.account')) + '</th>' +
-      '<th>' + escapeHtml(t('logs.tokens')) + '</th>' +
-      '<th>' + escapeHtml(t('logs.duration')) + '</th>' +
-      '<th>' + escapeHtml(t('logs.detail')) + '</th>' +
-      '</tr></thead><tbody>';
-    for (const l of filtered) {
-      const isErr = l.status === 'error';
-      const statusCell = '<span class="log-status log-status--' + escapeAttr(l.status) + '">' +
-        escapeHtml(isErr ? t('logs.statusError') : t('logs.statusSuccess')) + '</span>';
-      let detailCell;
-      if (isErr) {
-        detailCell = '<span class="err-badge err-badge--' + escapeAttr(l.errorType || 'unknown') + '">' +
-          escapeHtml(errorTypeLabel(l.errorType || 'unknown')) + '</span> ' +
-          '<span class="log-msg" title="' + escapeAttr(l.error) + '">' + escapeHtml(l.error) + '</span>';
-      } else {
-        detailCell = '<span class="text-muted">' + (l.credits ? (l.credits.toFixed(3) + ' cr') : '-') + '</span>';
-      }
-      html += '<tr>' +
-        '<td>' + escapeHtml(formatLogTime(l.time)) + '</td>' +
-        '<td>' + statusCell + '</td>' +
-        '<td>' + escapeHtml(l.endpoint) + '</td>' +
-        '<td>' + escapeHtml(l.model || '-') + '</td>' +
-        '<td>' + escapeHtml(accountLabel(l.accountId)) + '</td>' +
-        '<td>' + (l.tokens ? formatNum(l.tokens) : '-') + '</td>' +
-        '<td>' + (l.duration ? (l.duration + 'ms') : '-') + '</td>' +
-        '<td>' + detailCell + '</td>' +
-        '</tr>';
-    }
-    html += '</tbody></table>';
-    list.innerHTML = html;
-  }
-
-  async function clearLogs() {
-    if (!confirm(t('logs.clearConfirm'))) return;
-    await api('/logs', { method: 'DELETE' });
-    renderLogs([]);
-    toast(t('logs.cleared'), 'success');
-  }
-
-  function toggleLogsAutoRefresh() {
-    const on = $('logsAutoRefresh').checked;
-    if (logsAutoTimer) { clearInterval(logsAutoTimer); logsAutoTimer = null; }
-    if (on) {
-      logsAutoTimer = setInterval(() => {
-        if (!$('tabLogs').classList.contains('hidden')) loadLogs();
-      }, 5000);
-    }
-  }
-
   async function loadAccounts() {
     const res = await api('/accounts');
     accountsData = await res.json();
     renderAccounts();
   }
-
-  function getApiKeyEntry(id) {
-    if (!id) return null;
-    return apiKeysCache.find(entry => entry && entry.id === id) || null;
-  }
-
-  function apiKeyLabel(entry, includeStatus) {
-    if (!entry) return t('apiKeys.unbound');
-    const name = entry.name || t('apiKeys.unnamed');
-    const masked = entry.keyMasked ? ' · ' + entry.keyMasked : '';
-    const status = includeStatus && !entry.enabled ? ' · ' + t('apiKeys.disabled') : '';
-    return name + masked + status;
-  }
-
-  function apiKeyOptions(selectedId, includeDisabledSelected) {
-    const selected = String(selectedId || '');
-    let html = '<option value="">' + escapeHtml(t('apiKeys.unbound')) + '</option>';
-    apiKeysCache.forEach(entry => {
-      if (!entry || !entry.id) return;
-      const isSelected = entry.id === selected;
-      if (!entry.enabled && !(includeDisabledSelected && isSelected)) return;
-      html += '<option value="' + escapeAttr(entry.id) + '"' +
-        (isSelected ? ' selected' : '') +
-        (!entry.enabled ? ' disabled' : '') + '>' +
-        escapeHtml(apiKeyLabel(entry, includeDisabledSelected)) + '</option>';
-    });
-    return html;
-  }
-
-  function renderApiKeyOwnershipField(id, selectedId, includeDisabledSelected) {
-    const selectId = id || 'pendingApiKeySelect';
-    return '<div class="form-group api-key-ownership-field">' +
-      '<label for="' + escapeAttr(selectId) + '">' + escapeHtml(t('apiKeys.accountBinding')) + '</label>' +
-      '<select id="' + escapeAttr(selectId) + '" class="api-key-ownership-select">' +
-      apiKeyOptions(selectedId, !!includeDisabledSelected) +
-      '</select>' +
-      '<small>' + escapeHtml(t('apiKeys.accountBindingHint')) + '</small>' +
-      '</div>';
-  }
-
-  function clearPendingApiKey() {
-    pendingApiKeyId = '';
-  }
-
-  function withPendingApiKey(payload, apiKeyId) {
-    const keyId = String(apiKeyId === undefined ? pendingApiKeyId : (apiKeyId || '')).trim();
-    // Keep the ownership field explicit, including the empty value for an
-    // intentionally unbound account. This prevents an auth flow from falling
-    // back to an implicit/default key on older configurations.
-    payload.apiKeyId = keyId;
-    return payload;
-  }
-
-  // Account list
   function getFilteredAccounts() {
     return accountsData.filter(a => {
       if (filterStatus === 'enabled' && !a.enabled) return false;
@@ -944,6 +879,36 @@
     }
     return '';
   }
+  function renderOverageBadge(a) {
+    const status = String(a.overageStatus || '').toUpperCase();
+    if (status === 'ENABLED') {
+      return '<span class="badge badge-success" title="' + escapeAttr(t('accounts.overageOn')) + '">' + escapeHtml(t('accounts.overage')) + '</span>';
+    }
+    if (status === 'DISABLED') {
+      return '<span class="badge badge-muted" title="' + escapeAttr(t('accounts.overageOff')) + '">' + escapeHtml(t('accounts.overage')) + '</span>';
+    }
+    return '';
+  }
+  function overageStatusLabel(a) {
+    const status = String(a.overageStatus || '').toUpperCase();
+    if (status === 'ENABLED') return t('detail.overageEnabled');
+    if (status === 'DISABLED') return t('detail.overageDisabled');
+    return t('detail.overageUnknown');
+  }
+  function formatMoney(n) {
+    return '$' + Number(n || 0).toFixed(2);
+  }
+  function renderOverageMeta(a) {
+    const notCapable = String(a.overageCapability || '').toUpperCase() === 'NOT_OVERAGE_CAPABLE';
+    return '<div class="detail-grid">' +
+      detailItem(t('detail.overageStatus'), overageStatusLabel(a)) +
+      detailItem(t('detail.overageCap'), formatMoney(a.overageCap)) +
+      detailItem(t('detail.overageRate'), formatMoney(a.overageRate)) +
+      detailItem(t('detail.overageCurrent'), formatMoney(a.currentOverages)) +
+      detailItem(t('detail.overageCheckedAt'), a.overageCheckedAt ? formatTime(a.overageCheckedAt) : '-') +
+      (notCapable ? detailItem(t('detail.overageCapability'), t('detail.overageNotCapable')) : '') +
+      '</div>';
+  }
   function formatTrialExpiry(ts) {
     if (!ts) return '';
     const date = new Date(ts * 1000);
@@ -956,10 +921,10 @@
   function formatAuthMethod(method) {
     if (!method) return '-';
     const normalized = String(method).toLowerCase();
-    if (normalized === 'external_idp' || normalized === 'azuread') return t('auth.microsoft');
     if (normalized === 'idc') return t('auth.enterprise');
+    if (normalized === 'external_idp' || normalized === 'azuread') return t('auth.microsoft');
+    if (normalized === 'apikey' || normalized === 'api_key') return t('auth.apiKey');
     if (normalized === 'social') return t('auth.social');
-    if (normalized === 'api_key' || normalized === 'apikey') return t('auth.apiKey');
     if (normalized === 'builderid') return 'BuilderID';
     if (normalized === 'github') return t('local.providerGithub');
     if (normalized === 'google') return t('local.providerGoogle');
@@ -994,9 +959,42 @@
     return Math.floor(diff / 86400) + t('time.days');
   }
   function formatNum(n) {
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-    return n.toString();
+    const value = Number(n || 0);
+    if (!Number.isFinite(value)) return '0';
+    return String(Math.trunc(value));
+  }
+  function setText(id, value) {
+    const el = $(id);
+    if (el) el.textContent = value;
+  }
+  function formatCountRatio(part, total) {
+    return formatNum(part) + ' / ' + formatNum(total);
+  }
+  function formatPercent(part, total) {
+    const denominator = Number(total || 0);
+    if (!Number.isFinite(denominator) || denominator <= 0) return '0%';
+    const value = (Number(part || 0) / denominator) * 100;
+    if (!Number.isFinite(value)) return '0%';
+    return value.toFixed(value >= 10 ? 1 : 2).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '') + '%';
+  }
+  function formatCompactNum(n) {
+    const value = Number(n || 0);
+    if (!Number.isFinite(value)) return '0';
+    const abs = Math.abs(value);
+    if (abs >= 1e9) return (value / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+    if (abs >= 1e6) return (value / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (abs >= 1e3) return (value / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+    return String(Math.trunc(value));
+  }
+  function formatCredits(n) {
+    const value = Number(n || 0);
+    if (!Number.isFinite(value)) return '0';
+    return value.toFixed(2);
+  }
+  function formatStatCredits(n) {
+    const value = Number(n || 0);
+    if (!Number.isFinite(value)) return '0.0';
+    return value.toFixed(1);
   }
   function applyUsageBars(root) {
     qsa('.usage-fill[data-usage-pct]', root).forEach(el => {
@@ -1026,11 +1024,6 @@
       const idAttr = escapeAttr(a.id);
       const displayEmail = getDisplayEmail(a.email, a.id);
       const selectLabel = t('accounts.selectAccount', displayEmail);
-      const boundKey = getApiKeyEntry(a.apiKeyId);
-      const apiKeyBadge = a.apiKeyId
-        ? '<span class="badge badge-key" title="' + escapeAttr(boundKey ? apiKeyLabel(boundKey, true) : a.apiKeyId) + '">' +
-          '<i class="fa-solid fa-key" aria-hidden="true"></i> ' + escapeHtml(boundKey ? (boundKey.name || boundKey.keyMasked || a.apiKeyId) : a.apiKeyId) + '</span>'
-        : '';
 
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
@@ -1048,7 +1041,6 @@
         getTrialBadge(a) +
         weightBadge +
         overageBadge +
-        apiKeyBadge +
         '<span class="badge badge-info">' + escapeHtml(formatAuthMethod(a.provider || a.authMethod)) + '</span>' +
         getStatusBadge(a) +
         '</div>' +
@@ -1062,7 +1054,7 @@
           '<button class="btn btn-sm ' + (a.enabled ? 'btn-outline' : 'btn-primary') + '" data-action="toggle" data-id="' + idAttr + '" data-enabled="' + (!a.enabled) + '">' +
           escapeHtml(a.enabled ? t('accounts.disable') : t('accounts.enable')) +
           '</button>') +
-        '<button class="btn btn-sm btn-secondary" data-action="test" data-id="' + idAttr + '" id="test-' + idAttr + '">' + escapeHtml(t('accounts.test')) + '</button>' +
+        '<button class="btn btn-sm btn-test" data-action="test" data-id="' + idAttr + '" id="test-' + idAttr + '"><i class="fa-solid fa-play" aria-hidden="true"></i><span>' + escapeHtml(t('accounts.test')) + '</span></button>' +
         '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + idAttr + '">' + escapeHtml(t('accounts.delete')) + '</button>' +
         '</div>' +
         '</div>' +
@@ -1080,7 +1072,7 @@
           '</div>' : '') +
         '<div class="account-stats">' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.requests')) + '</div></div>' +
-        '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.tokens')) + '</div></div>' +
+        '<div class="account-stat"><div class="account-stat-value">' + formatCompactNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.tokens')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.totalCredits || 0).toFixed(1) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.credits')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + escapeHtml(formatTokenExpiry(a.expiresAt)) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.expiry')) + '</div></div>' +
         '</div>' +
@@ -1089,15 +1081,13 @@
     applyUsageBars(container);
     enhanceCustomSelects(container);
   }
-
-  // Account actions
   async function refreshAccount(id, card) {
     if (card) card.classList.add('loading');
     try {
       const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
       const d = await res.json();
       if (d.success) loadAccounts();
-      else toastError(t('accounts.refreshFailed') + ': ' + (d.error || ''));
+      else toastError(t('accounts.refreshFailed') + ': ' + localizedError(d.error));
     } catch (e) {
       toastError(t('accounts.refreshFailed'));
     }
@@ -1117,55 +1107,25 @@
     try {
       const res = await api('/accounts/' + id, { method: 'DELETE' });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) throw new Error(d.error || t('common.failed'));
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.failed'));
       toast(t('accounts.deleteSuccess'), 'danger', { icon: 'fa-solid fa-trash' });
       loadAccounts(); loadStats();
     } catch (e) {
       toast((e && e.message) || t('common.failed'), 'error');
     }
   }
-  function credentialImportPayloadFromFullAccount(a) {
-    const payload = {
-      clientId: a.clientId || '',
-      clientSecret: a.clientSecret || '',
-      accessToken: a.accessToken || '',
-      refreshToken: a.refreshToken || ''
-    };
-    if (a.authMethod) payload.authMethod = a.authMethod;
-    if (a.provider) payload.provider = a.provider;
-    if (a.tokenEndpoint) payload.tokenEndpoint = a.tokenEndpoint;
-    if (a.issuerUrl) payload.issuerUrl = a.issuerUrl;
-    if (a.scopes) payload.scopes = a.scopes;
-    if (a.userId) payload.userId = a.userId;
-    if (a.profileArn) payload.profileArn = a.profileArn;
-    if (a.region) payload.region = a.region;
-    if (a.apiKeyId) payload.apiKeyId = a.apiKeyId;
-    return payload;
-  }
-  function credentialImportPayloadFromExportAccount(a) {
-    const credentials = a.credentials || {};
-    return credentialImportPayloadFromFullAccount({
-      clientId: credentials.clientId,
-      clientSecret: credentials.clientSecret,
-      accessToken: credentials.accessToken,
-      refreshToken: credentials.refreshToken,
-      authMethod: credentials.authMethod || a.authMethod,
-      provider: credentials.provider || a.provider || a.idp,
-      tokenEndpoint: credentials.tokenEndpoint,
-      issuerUrl: credentials.issuerUrl,
-      scopes: credentials.scopes,
-      userId: a.userId,
-      profileArn: a.profileArn,
-      region: credentials.region || a.region,
-      apiKeyId: a.apiKeyId || credentials.apiKeyId
-    });
-  }
   async function copyAccountJSON(id, btn) {
     try {
       const jsonPromise = api('/accounts/' + id + '/full').then(async res => {
-        if (!res.ok) throw new Error('Failed');
+        if (!res.ok) throw new Error(t('common.failed'));
         const a = await res.json();
-        return JSON.stringify(credentialImportPayloadFromFullAccount(a), null, 2);
+        if (a.authMethod === 'api_key') return JSON.stringify({ kiroApiKey: a.accessToken, region: a.region, authMethod: 'api_key' }, null, 2);
+        const { clientId, clientSecret, accessToken, refreshToken } = a;
+        if (a.authMethod === 'external_idp') {
+          const { authMethod, provider, userId, profileArn, tokenEndpoint, issuerUrl, scopes } = a;
+          return JSON.stringify({ clientId, accessToken, refreshToken, authMethod, provider, userId, profileArn, tokenEndpoint, issuerUrl, scopes }, null, 2);
+        }
+        return JSON.stringify({ clientId, clientSecret, accessToken, refreshToken }, null, 2);
       });
       await copyText(jsonPromise);
       flashCopySuccess(btn);
@@ -1182,23 +1142,21 @@
     btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
     setTimeout(() => { btn.disabled = false; btn.className = cls; btn.innerHTML = html; }, 800);
   }
-
-  // Batch actions
   async function batchAction(action) {
     const ids = Array.from(selectedAccounts);
     if (!ids.length) return;
     const confirmKey = 'batch.confirm' + action.charAt(0).toUpperCase() + action.slice(1);
     const ok = await confirmAction(t(confirmKey, ids.length), {
-      title: t('common.confirm'),
-      confirmText: t('common.confirm'),
-      variant: action === 'disable' ? 'danger' : 'primary'
+      title: action === 'delete' ? t('accounts.delete') : t('common.confirm'),
+      confirmText: action === 'delete' ? t('accounts.delete') : t('common.confirm'),
+      variant: action === 'disable' || action === 'delete' ? 'danger' : 'primary'
     });
     if (!ok) return;
-    const dismiss = toast(t('batch.processing'), 'info', { duration: 0 });
+    const dismiss = toast(t(action === 'delete' ? 'batch.deleting' : 'batch.processing'), 'info', { duration: 0 });
     try {
       const res = await api('/accounts/batch', { method: 'POST', body: JSON.stringify({ ids, action }) });
       const d = await res.json();
-      if (!res.ok || !d.success) throw new Error(d.error || t('common.failed'));
+      if (!res.ok || !d.success) throw new Error(localizedError(d.error) || t('common.failed'));
       dismiss();
       if (action === 'refresh') {
         toast(t('batch.refreshResult', d.refreshed || 0, d.failed || 0), d.failed ? 'warning' : 'success');
@@ -1206,6 +1164,8 @@
         toast(t('batch.enableResult', d.count || ids.length), 'success');
       } else if (action === 'disable') {
         toast(t('batch.disableResult', d.count || ids.length), 'success');
+      } else if (action === 'delete') {
+        toast(t('batch.deleteResult', d.deleted || 0, d.failed || 0), d.failed ? 'warning' : 'success');
       } else {
         toast(t('batch.done'), 'success');
       }
@@ -1240,30 +1200,6 @@
     updateBatchBar();
     loadAccounts();
   }
-  async function batchDelete() {
-    const ids = Array.from(selectedAccounts);
-    if (!ids.length) return;
-    const confirmed = await confirmAction(t('batch.confirmDelete', ids.length), {
-      title: t('accounts.delete'),
-      confirmText: t('accounts.delete'),
-      variant: 'danger'
-    });
-    if (!confirmed) return;
-    const dismiss = toast(t('batch.deleting'), 'info', { duration: 0 });
-    let ok = 0, fail = 0;
-    for (const id of ids) {
-      try {
-        const res = await api('/accounts/' + id, { method: 'DELETE' });
-        const d = await res.json().catch(() => ({}));
-        if (res.ok && d.success !== false) ok++; else fail++;
-      } catch { fail++; }
-    }
-    dismiss();
-    toast(t('batch.deleteResult', ok, fail), fail ? 'warning' : 'success', { icon: 'fa-solid fa-trash' });
-    selectedAccounts.clear();
-    updateBatchBar();
-    loadAccounts(); loadStats();
-  }
   async function refreshAllModels() {
     const ok = await confirmAction(t('models.confirmRefreshAll'), {
       title: t('models.refreshAll'),
@@ -1288,14 +1224,12 @@
       const d = await res.json();
       dismiss();
       if (d.success) toast(t('detail.refreshModelCache') + ' · ' + (d.count || 0), 'success');
-      else toast(t('common.failed') + (d.error ? ': ' + d.error : ''), 'error');
+      else toast(t('common.failed') + (d.error ? ': ' + localizedError(d.error) : ''), 'error');
     } catch (e) {
       dismiss();
       toast(t('common.failed'), 'error');
     }
   }
-
-  // Detail modal
   function detailItem(label, value) {
     return '<div class="detail-item"><div class="detail-label">' + escapeHtml(label) + '</div><div class="detail-value">' + escapeHtml(value) + '</div></div>';
   }
@@ -1303,6 +1237,7 @@
     const a = accountsData.find(x => x.id === id);
     if (!a) return;
     const idAttr = escapeAttr(id);
+    const overageNotCapable = String(a.overageCapability || '').toUpperCase() === 'NOT_OVERAGE_CAPABLE';
     $('detailBody').innerHTML =
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.basicInfo')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.email'), getDisplayEmail(a.email, null)) +
@@ -1311,13 +1246,8 @@
       detailItem(t('detail.region'), a.region || 'us-east-1') +
       '</div></div>' +
 
-      '<div class="detail-section"><h4>' + escapeHtml(t('detail.apiKey')) + '</h4>' +
-      renderApiKeyOwnershipField('detailApiKeySelect', a.apiKeyId || '', true) +
-      '<button class="btn btn-sm btn-primary" data-detail-action="saveApiKey" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
-      '</div>' +
-
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.machineId')) + '</h4><div class="machine-id-row">' +
-      '<input type="text" id="machineIdInput" value="' + escapeAttr(a.machineId || '') + '" placeholder="UUID" />' +
+      '<input type="text" id="machineIdInput" value="' + escapeAttr(a.machineId || '') + '" placeholder="' + escapeAttr(t('detail.machineIdPlaceholder')) + '" />' +
       '<button class="btn btn-sm btn-outline" id="generateMachineIdBtn" type="button">' + escapeHtml(t('detail.generate')) + '</button>' +
       '<button class="btn btn-sm btn-primary" data-detail-action="saveMachineId" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div></div>' +
@@ -1330,16 +1260,20 @@
       '<button class="btn btn-sm btn-primary" data-detail-action="saveWeight" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div>' +
 
-      '<div class="detail-section">' +
-      '<h4>' + escapeHtml(t('detail.overage')) +
-      ' <button class="btn btn-sm btn-outline" data-detail-action="refreshOverage" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.overageRefresh')) + '</button>' +
-      '</h4>' +
-      '<p class="help-block">' + escapeHtml(t('detail.overageHint')) + '</p>' +
-      renderOverageBlock(a, idAttr) +
+      '<div class="detail-section detail-section-overage">' +
+      '<div class="detail-section-header">' +
+      '<h4>' + escapeHtml(t('detail.overage')) + '</h4>' +
+      '<button class="btn btn-sm btn-outline" data-detail-action="refreshOverage" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.overageRefresh')) + '</button>' +
+      '</div>' +
+      '<div class="form-group">' +
+      '<label class="flex items-center gap-2"><span class="switch"><input type="checkbox" id="overageSwitchInput" data-id="' + idAttr + '" ' + (String(a.overageStatus || '').toUpperCase() === 'ENABLED' ? 'checked' : '') + (overageNotCapable ? ' disabled' : '') + ' /><span class="slider"></span></span><span>' + escapeHtml(t('detail.overageSwitch')) + '</span></label>' +
+      '<small>' + escapeHtml(t('detail.overageHint')) + '</small>' +
+      '</div>' +
+      renderOverageMeta(a) +
       '</div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
-      '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="socks5://host:port" />' +
+      '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="' + escapeAttr(t('detail.proxyURLPlaceholder')) + '" />' +
       '<button class="btn btn-sm btn-primary" data-detail-action="saveProxyURL" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div><p class="help-block">' + escapeHtml(t('detail.proxyHint')) + '</p></div>' +
 
@@ -1358,7 +1292,7 @@
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.statistics')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.requestCount'), a.requestCount || 0) +
       detailItem(t('detail.errorCount'), a.errorCount || 0) +
-      detailItem(t('detail.totalTokens'), formatNum(a.totalTokens || 0)) +
+      detailItem(t('detail.totalTokens'), formatCompactNum(a.totalTokens || 0)) +
       detailItem(t('detail.totalCredits'), (a.totalCredits || 0).toFixed(2)) +
       '</div></div>' +
 
@@ -1371,7 +1305,6 @@
       '</div>';
 
     openDialog('detailModal');
-    enhanceCustomSelects($('detailBody'));
   }
   async function loadModels(id) {
     const c = $('modelsList');
@@ -1394,8 +1327,8 @@
             '</div>';
         }).join('') || '<p class="empty-state">' + escapeHtml(t('detail.noModels')) + '</p>';
       } else {
-        c.innerHTML = '<p class="message message-error">' + escapeHtml(t('detail.loadFailed')) + ': ' + escapeHtml(d.error || '') + '</p>';
-        toast(t('detail.loadFailed') + (d.error ? ': ' + d.error : ''), 'error');
+        c.innerHTML = '<p class="message message-error">' + escapeHtml(t('detail.loadFailed')) + ': ' + escapeHtml(localizedError(d.error)) + '</p>';
+        toast(t('detail.loadFailed') + (d.error ? ': ' + localizedError(d.error) : ''), 'error');
       }
     } catch (e) {
       c.innerHTML = '<p class="message message-error">' + escapeHtml(t('detail.loadFailed')) + '</p>';
@@ -1419,7 +1352,7 @@
         toast(successMsg, 'success');
         loadAccounts();
       } else {
-        toast(t('detail.saveFailed') + (d.error ? ': ' + d.error : ''), 'error');
+        toast(t('detail.saveFailed') + (d.error ? ': ' + localizedError(d.error) : ''), 'error');
       }
     } catch (e) {
       toast(t('detail.saveFailed'), 'error');
@@ -1436,107 +1369,55 @@
     const weight = parseInt($('weightInput').value, 10) || 0;
     await putAccount(id, { weight }, t('detail.saved'));
   }
-  async function saveAccountApiKey(id) {
-    const account = accountsData.find(item => item.id === id);
-    const select = $('detailApiKeySelect');
-    if (!account || !select) return;
-    const apiKeyId = String(select.value || '').trim();
-    if (apiKeyId === String(account.apiKeyId || '').trim()) {
-      toast(t('detail.saved'), 'success');
-      return;
-    }
-    const saveButton = qsa('[data-detail-action="saveApiKey"]', $('detailBody'))[0];
-    if (saveButton) saveButton.disabled = true;
+  function mergeOverageSnapshot(id, d) {
+    const a = accountsData.find(x => x.id === id);
+    if (!a) return;
+    a.overageStatus = d.overageStatus;
+    a.overageCapability = d.overageCapability;
+    a.overageCap = d.overageCap;
+    a.overageRate = d.overageRate;
+    a.currentOverages = d.currentOverages;
+    a.overageCheckedAt = d.overageCheckedAt;
+  }
+  async function refreshOverage(id) {
+    const dismiss = toast(t('detail.overageSwitching'), 'info', { duration: 0 });
     try {
-      const res = await api('/accounts/' + encodeURIComponent(id), {
-        method: 'PUT',
-        body: JSON.stringify({ apiKeyId })
-      });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) throw new Error(d.error || t('detail.saveFailed'));
-      account.apiKeyId = apiKeyId;
-      toast(t('detail.saved'), 'success');
-      await Promise.all([loadAccounts(), loadApiKeys()]);
+      const res = await api('/accounts/' + id + '/overage');
+      const d = await res.json();
+      dismiss();
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.failed'));
+      mergeOverageSnapshot(id, d);
       showDetail(id);
+      renderAccounts();
+      toast(t('detail.saved'), 'success');
     } catch (e) {
-      toast((e && e.message) || t('detail.saveFailed'), 'error');
-    } finally {
-      if (saveButton) saveButton.disabled = false;
+      dismiss();
+      toast((e && e.message) || t('accounts.overageSwitchFailed'), 'error');
     }
   }
-  function renderOverageBadge(a) {
-    const status = (a.overageStatus || '').toUpperCase();
-    if (status === 'ENABLED') {
-      return '<span class="badge badge-warning">' + escapeHtml(t('accounts.overageOn')) + '</span>';
-    }
-    if (status === 'DISABLED') {
-      return '<span class="badge badge-muted">' + escapeHtml(t('accounts.overageOff')) + '</span>';
-    }
-    return '';
-  }
-  function renderOverageBlock(a, idAttr) {
-    const status = (a.overageStatus || '').toUpperCase();
-    const capable = !a.overageCapability || a.overageCapability === 'OVERAGE_CAPABLE';
-    const checked = status === 'ENABLED';
-    const checkedAt = a.overageCheckedAt ? new Date(a.overageCheckedAt * 1000).toLocaleString() : '-';
-    const statusText = status === 'ENABLED' ? t('detail.overageEnabled')
-      : status === 'DISABLED' ? t('detail.overageDisabled')
-      : t('detail.overageUnknown');
-    const disabledAttr = capable ? '' : ' disabled';
-    return '<div class="form-group flex items-center gap-2">' +
-      '<label class="switch"><input type="checkbox" id="overageSwitchInput-' + idAttr + '" data-detail-action="toggleOverage" data-id="' + idAttr + '" ' + (checked ? 'checked' : '') + disabledAttr + ' /><span class="slider"></span></label>' +
-      '<span id="overageSwitchLabel-' + idAttr + '">' + escapeHtml(statusText) + '</span>' +
-      '</div>' +
-      (capable ? '' : '<p class="help-block" style="color:#ef4444">' + escapeHtml(t('detail.overageNotCapable')) + '</p>') +
-      '<div class="detail-grid">' +
-      detailItem(t('detail.overageStatus'), status || '-') +
-      detailItem(t('detail.overageCap'), a.overageCap ? '$' + Number(a.overageCap).toFixed(2) : '-') +
-      detailItem(t('detail.overageRate'), a.overageRate ? '$' + Number(a.overageRate).toFixed(4) : '-') +
-      detailItem(t('detail.overageCurrent'), a.currentOverages ? '$' + Number(a.currentOverages).toFixed(4) : '$0') +
-      detailItem(t('detail.overageCheckedAt'), checkedAt) +
-      '</div>';
-  }
-  async function toggleOverageSwitch(id, inputEl) {
-    const desired = inputEl.checked;
-    const labelEl = $('overageSwitchLabel-' + id);
-    const oldLabel = labelEl ? labelEl.textContent : '';
-    inputEl.disabled = true;
-    if (labelEl) labelEl.textContent = t('detail.overageSwitching');
+  async function setAccountOverage(id, enabled) {
+    const input = $('overageSwitchInput');
+    if (input) input.disabled = true;
+    const dismiss = toast(t('detail.overageSwitching'), 'info', { duration: 0 });
     try {
-      const res = await api('/accounts/' + encodeURIComponent(id) + '/overage', {
+      const res = await api('/accounts/' + id + '/overage', {
         method: 'POST',
-        body: JSON.stringify({ enabled: desired }),
+        body: JSON.stringify({ enabled })
       });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) {
-        throw new Error(d.error || t('accounts.overageSwitchFailed'));
-      }
-      if (labelEl) {
-        labelEl.textContent = d.overageStatus === 'ENABLED' ? t('detail.overageEnabled')
-          : d.overageStatus === 'DISABLED' ? t('detail.overageDisabled')
-          : t('detail.overageUnknown');
-      }
-      inputEl.checked = d.overageStatus === 'ENABLED';
-      await loadAccounts();
-    } catch (e) {
-      inputEl.checked = !desired;
-      if (labelEl) labelEl.textContent = oldLabel;
-      toast(t('accounts.overageSwitchFailed') + ': ' + (e.message || e), 'warning');
-    } finally {
-      inputEl.disabled = false;
-    }
-  }
-  async function refreshAccountOverage(id) {
-    try {
-      const res = await api('/accounts/' + encodeURIComponent(id) + '/overage', { method: 'GET' });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) {
-        throw new Error(d.error || t('accounts.overageSwitchFailed'));
-      }
-      await loadAccounts();
+      const d = await res.json();
+      dismiss();
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.failed'));
+      mergeOverageSnapshot(id, d);
       showDetail(id);
+      renderAccounts();
+      toast(t('detail.saved'), 'success');
     } catch (e) {
-      toast(t('accounts.overageSwitchFailed') + ': ' + (e.message || e), 'warning');
+      dismiss();
+      if (input) {
+        input.disabled = false;
+        input.checked = !enabled;
+      }
+      toast((e && e.message) || t('accounts.overageSwitchFailed'), 'error');
     }
   }
   async function saveProxyURL(id) {
@@ -1547,14 +1428,12 @@
     await putAccount(id, { proxyURL: url }, t('detail.proxySaved'));
   }
   function closeDetailModal() { closeDialog('detailModal'); }
-
-  // Test flow
   function getTestAccount(id) {
     return accountsData.find(a => a.id === id) || null;
   }
   function getTestModelValue() {
     const choice = $('testModelChoice');
-    return (choice && choice.value.trim()) || 'claude-sonnet-4';
+    return (choice && choice.value.trim()) || 'claude-sonnet-4.6';
   }
   function renderTestLog() {
     const c = $('testModalLog');
@@ -1599,7 +1478,7 @@
         ? '<select id="testModelChoice">' +
         testModalModels.map(m => '<option value="' + escapeAttr(m) + '">' + escapeHtml(m) + '</option>').join('') +
         '</select>'
-        : '<input type="text" id="testModelChoice" placeholder="claude-sonnet-4" value="claude-sonnet-4" />';
+        : '<input type="text" id="testModelChoice" placeholder="' + escapeAttr(t('accounts.testModelPlaceholder')) + '" value="claude-sonnet-4.6" />';
 
     body.innerHTML =
       '<div class="test-modal-account">' +
@@ -1673,8 +1552,16 @@
       const d = await res.json();
       if (d.success) {
         addTestLog(t('accounts.testLog.success', email, elapsed, d.reply), 'ok');
+        addTestLog(t('accounts.testLog.details',
+          d.stopReason || t('accounts.testLog.noStopReason'),
+          (d.inputTokens || 0) + '/' + (d.outputTokens || 0),
+          (d.credits || 0),
+          (d.contextUsage || 0).toFixed(1)), 'info');
+        //! No stop reason means the stream ended without metadataEvent. The turn may
+        //! still be complete on IdC accounts, so this reports rather than fails.
+        if (!d.stopReason) addTestLog(t('accounts.testLog.noStopReasonHint'), 'warn');
       } else {
-        addTestLog(t('accounts.testLog.failed', email, elapsed, d.error || t('common.unknownError')), 'err');
+        addTestLog(t('accounts.testLog.failed', email, elapsed, localizedError(d.error) || t('common.unknownError')), 'err');
       }
     } catch (e) {
       addTestLog(t('accounts.testLog.error', email, e.message), 'err');
@@ -1682,107 +1569,17 @@
     testModalRunning = false;
     if (modalBtn) modalBtn.removeAttribute('aria-busy');
   }
-
-  // Settings
   async function loadSettings() {
     const res = await api('/settings');
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
+    syncApiKeyManagementVisibility();
     $('allowOverUsage').checked = d.allowOverUsage || false;
-    promptCacheSettings = normalizePromptCacheSettings(d);
-    renderPromptCacheSettings();
-    await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
+    $('lenientStreamIntegrity').checked = d.lenientStreamIntegrity || false;
+    $('sessionAffinity').checked = d.sessionAffinity !== false;
+    await Promise.all([loadApiKeys(), loadThinkingConfig(), loadModelMappings(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter()]);
+    syncApiKeyManagementVisibility();
     refreshCustomSelects();
-  }
-
-  function normalizePromptCacheSettings(source) {
-    source = source || {};
-    const mode = source.promptCacheEmulationMode === 'independent' ? 'independent' : 'uniform';
-    const ratio = clampRatio(source.promptCacheEmulationRatio, 1);
-    const creationRatio = clampRatio(source.promptCacheCreationEmulationRatio, ratio);
-    const readRatio = clampRatio(source.promptCacheReadEmulationRatio, ratio);
-    return {
-      enabled: source.promptCacheEmulationEnabled !== false,
-      mode,
-      ratio,
-      creationRatio: mode === 'uniform' ? ratio : creationRatio,
-      readRatio: mode === 'uniform' ? ratio : readRatio
-    };
-  }
-
-  function clampRatio(value, fallback) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return fallback;
-    return Math.max(0, Math.min(1, n));
-  }
-
-  function ratioToPercent(value) {
-    return (clampRatio(value, 1) * 100).toFixed(1).replace(/\.0$/, '');
-  }
-
-  function percentToRatio(value, fallback) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return fallback;
-    return Math.max(0, Math.min(1, n / 100));
-  }
-
-  function renderPromptCacheSettings() {
-    const enabled = $('promptCacheEnabled');
-    const mode = $('promptCacheMode');
-    const ratio = $('promptCacheRatio');
-    const creation = $('promptCacheCreationRatio');
-    const read = $('promptCacheReadRatio');
-    if (!enabled || !mode || !ratio || !creation || !read) return;
-    enabled.checked = promptCacheSettings.enabled;
-    mode.value = promptCacheSettings.mode;
-    ratio.value = ratioToPercent(promptCacheSettings.ratio);
-    creation.value = ratioToPercent(promptCacheSettings.creationRatio);
-    read.value = ratioToPercent(promptCacheSettings.readRatio);
-    const uniform = mode.value === 'uniform';
-    creation.disabled = uniform;
-    read.disabled = uniform;
-    if (uniform) {
-      creation.value = ratio.value;
-      read.value = ratio.value;
-    }
-    refreshCustomSelects($('promptCacheMode').parentElement);
-  }
-
-  function onPromptCacheModeChange() {
-    promptCacheSettings.mode = $('promptCacheMode').value === 'independent' ? 'independent' : 'uniform';
-    renderPromptCacheSettings();
-  }
-
-  async function savePromptCacheSettings() {
-    const mode = $('promptCacheMode').value === 'independent' ? 'independent' : 'uniform';
-    const ratio = percentToRatio($('promptCacheRatio').value, promptCacheSettings.ratio);
-    const creationRatio = mode === 'uniform'
-      ? ratio
-      : percentToRatio($('promptCacheCreationRatio').value, promptCacheSettings.creationRatio);
-    const readRatio = mode === 'uniform'
-      ? ratio
-      : percentToRatio($('promptCacheReadRatio').value, promptCacheSettings.readRatio);
-    const payload = {
-      promptCacheEmulationEnabled: $('promptCacheEnabled').checked,
-      promptCacheEmulationMode: mode,
-      promptCacheEmulationRatio: ratio,
-      promptCacheCreationEmulationRatio: creationRatio,
-      promptCacheReadEmulationRatio: readRatio
-    };
-    const button = $('savePromptCacheBtn');
-    if (button) button.disabled = true;
-    try {
-      const res = await api('/settings', { method: 'POST', body: JSON.stringify(payload) });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
-      promptCacheSettings = normalizePromptCacheSettings(payload);
-      renderPromptCacheSettings();
-      toast(t('settings.promptCacheSaved'), 'success');
-    } catch (e) {
-      toast((e && e.message) || t('common.saveFailed'), 'error');
-    } finally {
-      if (button) button.disabled = false;
-    }
   }
   async function loadThinkingConfig() {
     const res = await api('/thinking');
@@ -1801,7 +1598,84 @@
     });
     const d = await res.json();
     if (d.success) toast(t('settings.thinkingSaved'), 'success');
-    else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+    else toast(t('common.saveFailed') + ': ' + localizedError(d.error), 'error');
+  }
+  async function loadModelMappings() {
+    const res = await api('/model-mappings');
+    const d = await res.json();
+    modelMappings = d.mappings || [];
+    modelMappingDefaults = d.defaults || [];
+    renderModelMappings();
+  }
+  async function saveModelMappings() {
+    const mappings = modelMappings
+      .map(m => ({ key: (m.key || '').trim(), value: (m.value || '').trim() }))
+      .filter(m => m.key && m.value);
+    const res = await api('/model-mappings', {
+      method: 'POST', body: JSON.stringify({ mappings })
+    });
+    const d = await res.json();
+    if (d.success) {
+      modelMappings = mappings;
+      renderModelMappings();
+      toast(t('settings.modelMappingsSaved'), 'success');
+    } else {
+      toast(t('common.saveFailed') + ': ' + localizedError(d.error), 'error');
+    }
+  }
+  function renderModelMappings() {
+    const c = $('modelMappings');
+    if (!c) return;
+    if (!modelMappings.length) {
+      c.innerHTML = '<div class="model-mapping-empty">' + escapeHtml(t('modelMappings.noRules')) + '</div>';
+      return;
+    }
+    const rows = modelMappings.map((m, i) => (
+      '<div class="model-mapping-row" data-model-mapping-row="' + i + '">' +
+      '<button class="model-mapping-drag" type="button" draggable="true" data-model-mapping-handle="' + i + '" aria-label="' + escapeAttr(t('modelMappings.drag')) + '">' +
+      '<i class="fa-solid fa-grip-vertical" aria-hidden="true"></i>' +
+      '</button>' +
+      '<div class="model-mapping-cell model-mapping-source">' +
+      '<input value="' + escapeAttr(m.key || '') + '" data-model-mapping-idx="' + i + '" data-model-mapping-field="key" placeholder="' + escapeAttr(t('modelMappings.matchPlaceholder')) + '" spellcheck="false" />' +
+      '</div>' +
+      '<div class="model-mapping-arrow"><i class="fa-solid fa-arrow-right-long" aria-hidden="true"></i></div>' +
+      '<div class="model-mapping-cell model-mapping-target">' +
+      '<input value="' + escapeAttr(m.value || '') + '" data-model-mapping-idx="' + i + '" data-model-mapping-field="value" placeholder="' + escapeAttr(t('modelMappings.targetPlaceholder')) + '" spellcheck="false" />' +
+      '</div>' +
+      '<button class="rule-remove model-mapping-delete" data-model-mapping-remove="' + i + '" type="button" aria-label="' + escapeAttr(t('common.remove')) + '">&times;</button>' +
+      '</div>'
+    )).join('');
+    c.innerHTML =
+      '<div class="model-mapping-table-head">' +
+      '<span></span>' +
+      '<span>' + escapeHtml(t('modelMappings.match')) + '</span>' +
+      '<span></span>' +
+      '<span>' + escapeHtml(t('modelMappings.target')) + '</span>' +
+      '<span></span>' +
+      '</div>' + rows;
+  }
+  function addModelMapping() {
+    modelMappings.unshift({ key: '', value: '' });
+    renderModelMappings();
+    requestAnimationFrame(() => {
+      const firstInput = $('modelMappings').querySelector('[data-model-mapping-field="key"]');
+      if (firstInput) firstInput.focus();
+    });
+  }
+  function resetModelMappingsToDefaults() {
+    modelMappings = modelMappingDefaults.map(m => ({ key: m.key || '', value: m.value || '' }));
+    renderModelMappings();
+  }
+  function clearModelMappingDropState() {
+    qsa('.model-mapping-row', $('modelMappings')).forEach(row => row.classList.remove('drag-over', 'drop-before', 'drop-after'));
+  }
+  function markModelMappingDropped(index) {
+    requestAnimationFrame(() => {
+      const row = qsa('.model-mapping-row', $('modelMappings'))[index];
+      if (!row) return;
+      row.classList.add('dropped');
+      setTimeout(() => row.classList.remove('dropped'), 260);
+    });
   }
   async function loadEndpointConfig() {
     const res = await api('/endpoint');
@@ -1818,7 +1692,7 @@
     });
     const d = await res.json();
     if (d.success) toast(t('settings.endpointSaved'), 'success');
-    else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+    else toast(t('common.saveFailed') + ': ' + localizedError(d.error), 'error');
   }
   async function loadProxyConfig() {
     const res = await api('/proxy');
@@ -1862,26 +1736,262 @@
     const res = await api('/proxy', { method: 'POST', body: JSON.stringify({ proxyURL: url }) });
     const d = await res.json();
     if (d.success) toast(t('settings.proxySaved'), 'success');
-    else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+    else toast(t('common.saveFailed') + ': ' + localizedError(d.error), 'error');
   }
-  async function saveRequireApiKey() {
+  async function saveApiSettings() {
     try {
       const requireApiKey = $('requireApiKey').checked;
-      if (requireApiKey) {
-        const hasEnabledKey = Array.isArray(apiKeysCache) && apiKeysCache.some(k => k && k.enabled);
-        if (!hasEnabledKey) {
-          if (!confirm(t('apiKeys.requireWithoutEnabledKeyWarning'))) {
-            $('requireApiKey').checked = false;
-            return;
-          }
-        }
+      const hasEnabledManagedKey = apiKeysCache.some(k => k.enabled);
+      if (requireApiKey && !hasEnabledManagedKey) {
+        toast(t('settings.enabledApiKeyRequired'), 'warning');
+        return;
       }
       const res = await api('/settings', { method: 'POST', body: JSON.stringify({ requireApiKey }) });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.saveFailed'));
+      syncApiKeyManagementVisibility();
       toast(t('detail.saved'), 'success');
     } catch (e) {
       toast((e && e.message) || t('common.saveFailed'), 'error');
+    }
+  }
+  function syncApiKeyManagementVisibility() {
+    const enabled = !!$('requireApiKey').checked;
+    const management = $('apiKeyManagement');
+    if (management) management.classList.toggle('hidden', !enabled);
+    const refresh = $('refreshApiKeysBtn');
+    if (refresh) refresh.classList.toggle('hidden', !enabled);
+    if (!enabled) {
+      editingApiKeyId = '';
+      const cancelBtn = $('cancelApiKeyEditBtn');
+      if (cancelBtn) cancelBtn.classList.add('hidden');
+      const createdPanel = $('createdApiKeyPanel');
+      if (createdPanel) createdPanel.classList.add('hidden');
+    } else {
+      setApiKeyEditorMode(editingApiKeyId);
+    }
+  }
+  async function loadApiKeys() {
+    const el = $('apiKeysList');
+    if (!el) return;
+    try {
+      const res = await api('/api-keys');
+      const d = await res.json();
+      apiKeysCache = d.apiKeys || [];
+      renderApiKeys();
+    } catch (e) {
+      apiKeysCache = [];
+      renderApiKeys(t('settings.apiKeysLoadFailed'));
+    }
+  }
+  function renderApiKeys(errorText) {
+    const el = $('apiKeysList');
+    if (!el) return;
+    if (errorText) {
+      el.innerHTML = '<div class="message message-error">' + escapeHtml(errorText) + '</div>';
+      return;
+    }
+    if (editingApiKeyId && !apiKeysCache.some(k => k.id === editingApiKeyId)) {
+      clearApiKeyEditor();
+    }
+    if (!apiKeysCache.length) {
+      el.innerHTML = '<div class="empty-state">' + escapeHtml(t('settings.noApiKeys')) + '</div>';
+      return;
+    }
+    const rows = apiKeysCache.map(k => {
+      const usage = formatApiKeyUsage(k);
+      const last = k.lastUsedAt ? formatTime(k.lastUsedAt) : '-';
+      const isEditing = k.id === editingApiKeyId;
+      const statusLabel = k.enabled ? t('common.enabled') : t('common.disabled');
+      const statusIcon = k.enabled ? 'fa-circle-check' : 'fa-circle-xmark';
+      const statusClass = k.enabled ? 'api-key-status-enabled' : 'api-key-status-disabled';
+      const copyLabel = t('common.copy');
+      const keyCell = '<span class="api-key-cell">' +
+        '<code class="code-inline">' + escapeHtml(k.keyMasked || '') + '</code>' +
+        '<button class="btn btn-outline btn-icon btn-sm api-key-copy-btn" data-api-key-action="copy" data-id="' + escapeAttr(k.id) + '" type="button" title="' + escapeAttr(copyLabel) + '" aria-label="' + escapeAttr(copyLabel) + '"><i class="fa-solid fa-copy" aria-hidden="true"></i></button>' +
+        '</span>';
+      return '<tr>' +
+        '<td><strong>' + escapeHtml(k.name || t('settings.unnamedApiKey')) + '</strong></td>' +
+        '<td>' + keyCell + '</td>' +
+        '<td><span class="api-key-status ' + statusClass + '" title="' + escapeAttr(statusLabel) + '" aria-label="' + escapeAttr(statusLabel) + '"><i class="fa-solid ' + statusIcon + '" aria-hidden="true"></i></span></td>' +
+        '<td>' + usage + '</td>' +
+        '<td>' + escapeHtml(String(k.requestsCount || 0)) + '</td>' +
+        '<td>' + escapeHtml(last) + '</td>' +
+        '<td><span class="api-key-actions">' +
+        '<button class="btn btn-outline btn-sm" data-api-key-action="edit" data-id="' + escapeAttr(k.id) + '" type="button" ' + (isEditing ? 'disabled' : '') + '>' + escapeHtml(t('common.edit')) + '</button>' +
+        '<button class="btn btn-outline btn-sm" data-api-key-action="toggle" data-id="' + escapeAttr(k.id) + '" data-enabled="' + (k.enabled ? 'true' : 'false') + '" type="button">' + escapeHtml(k.enabled ? t('common.disable') : t('common.enable')) + '</button>' +
+        '<button class="btn btn-outline btn-sm" data-api-key-action="reset" data-id="' + escapeAttr(k.id) + '" type="button">' + escapeHtml(t('settings.resetUsage')) + '</button>' +
+        '<button class="btn btn-danger btn-sm" data-api-key-action="delete" data-id="' + escapeAttr(k.id) + '" type="button">' + escapeHtml(t('common.delete')) + '</button>' +
+        '</span></td>' +
+        '</tr>';
+    });
+    renderTable('apiKeysList', [
+      t('settings.apiKeyName'),
+      t('settings.apiKeyValue'),
+      t('common.status'),
+      t('settings.apiKeyUsage'),
+      t('settings.apiKeyRequests'),
+      t('settings.apiKeyLastUsed'),
+      t('common.actions'),
+    ], rows, 'settings.noApiKeys');
+  }
+  function formatApiKeyUsage(k) {
+    const tokenLimit = Number(k.tokenLimit || 0);
+    const creditLimit = Number(k.creditLimit || 0);
+    if (tokenLimit <= 0 && creditLimit <= 0) {
+      return '<span class="api-key-usage-unlimited"><i class="fa-solid fa-infinity" aria-hidden="true"></i>' + escapeHtml(t('common.unlimited')) + '</span>';
+    }
+    const tokenText = tokenLimit > 0 ? formatNum(k.tokensUsed || 0) + ' / ' + formatNum(tokenLimit) : t('common.noLimit');
+    const creditText = creditLimit > 0 ? formatCredits(k.creditsUsed || 0) + ' / ' + formatCredits(creditLimit) : t('common.noLimit');
+    return '<span class="api-key-usage">' +
+      '<span class="api-key-usage-line"><span class="api-key-usage-icon" title="' + escapeAttr(t('stats.tokens')) + '"><i class="fa-solid fa-cubes" aria-hidden="true"></i></span>' + escapeHtml(tokenText) + '</span>' +
+      '<span class="api-key-usage-line api-key-muted"><span class="api-key-usage-icon" title="' + escapeAttr(t('stats.credits')) + '"><i class="fa-solid fa-coins" aria-hidden="true"></i></span>' + escapeHtml(creditText) + '</span>' +
+      '</span>';
+  }
+  async function copyApiKey(id) {
+    const res = await api('/api-keys/' + encodeURIComponent(id));
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || !d.key) throw new Error(localizedError(d.error) || t('common.failed'));
+    await copyText(d.key);
+    toast(t('common.copied'), 'primary');
+  }
+  function setApiKeyEditorMode(id) {
+    editingApiKeyId = id || '';
+    const createBtn = $('createApiKeyBtn');
+    if (createBtn) {
+      createBtn.dataset.i18n = editingApiKeyId ? 'settings.updateApiKey' : 'settings.createApiKey';
+      createBtn.textContent = t(createBtn.dataset.i18n);
+    }
+    const keyInput = $('newApiKeyValue');
+    if (keyInput) {
+      keyInput.dataset.i18nPlaceholder = editingApiKeyId ? 'settings.apiKeyCustomValueEditPlaceholder' : 'settings.apiKeyCustomValuePlaceholder';
+      keyInput.placeholder = t(keyInput.dataset.i18nPlaceholder);
+    }
+    const cancelBtn = $('cancelApiKeyEditBtn');
+    if (cancelBtn) cancelBtn.classList.toggle('hidden', !editingApiKeyId);
+  }
+  function clearApiKeyEditor() {
+    setApiKeyEditorMode('');
+    $('newApiKeyName').value = '';
+    $('newApiKeyValue').value = '';
+    $('newApiKeyTokenLimit').value = '0';
+    $('newApiKeyCreditLimit').value = '0';
+    $('createdApiKeyPanel').classList.add('hidden');
+    renderApiKeys();
+  }
+  function getApiKeyEditorValues() {
+    const customKey = $('newApiKeyValue').value.trim();
+    const tokenRaw = $('newApiKeyTokenLimit').value.trim();
+    const creditRaw = $('newApiKeyCreditLimit').value.trim();
+    const tokenLimit = tokenRaw === '' ? 0 : Number(tokenRaw);
+    const creditLimit = creditRaw === '' ? 0 : Number(creditRaw);
+    if (!Number.isFinite(tokenLimit) || tokenLimit < 0 || Math.floor(tokenLimit) !== tokenLimit || !Number.isFinite(creditLimit) || creditLimit < 0) {
+      toast(t('settings.invalidApiKeyLimits'), 'warning');
+      return null;
+    }
+    return {
+      name: $('newApiKeyName').value.trim(),
+      key: customKey,
+      tokenLimit,
+      creditLimit,
+    };
+  }
+  function beginEditApiKey(id) {
+    const key = apiKeysCache.find(k => k.id === id);
+    if (!key) return;
+    $('newApiKeyName').value = key.name || '';
+    $('newApiKeyValue').value = '';
+    $('newApiKeyTokenLimit').value = String(key.tokenLimit || 0);
+    $('newApiKeyCreditLimit').value = String(key.creditLimit || 0);
+    $('createdApiKeyPanel').classList.add('hidden');
+    setApiKeyEditorMode(id);
+    renderApiKeys();
+    $('newApiKeyName').focus();
+  }
+  async function createApiKey() {
+    const values = getApiKeyEditorValues();
+    if (!values) return;
+    try {
+      if (editingApiKeyId) {
+        const res = await api('/api-keys/' + encodeURIComponent(editingApiKeyId), {
+          method: 'PUT',
+          body: JSON.stringify(values)
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.failed'));
+        toast(t('settings.apiKeyUpdated'), 'success');
+        setApiKeyEditorMode('');
+        $('newApiKeyName').value = '';
+        $('newApiKeyValue').value = '';
+        $('newApiKeyTokenLimit').value = '0';
+        $('newApiKeyCreditLimit').value = '0';
+        await loadApiKeys();
+        return;
+      }
+      const payload = {
+        name: values.name,
+        enabled: true,
+        tokenLimit: values.tokenLimit,
+        creditLimit: values.creditLimit,
+      };
+      if (values.key) payload.key = values.key;
+      const res = await api('/api-keys', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.failed'));
+      $('newApiKeyName').value = '';
+      $('newApiKeyValue').value = '';
+      $('newApiKeyTokenLimit').value = '0';
+      $('newApiKeyCreditLimit').value = '0';
+      if (d.key) {
+        $('createdApiKeyPanel').classList.remove('hidden');
+        $('createdApiKeyValue').textContent = d.key;
+      }
+      toast(t('settings.apiKeyCreated'), 'success');
+      await loadApiKeys();
+    } catch (e) {
+      toast((e && e.message) || t('common.failed'), 'error');
+    }
+  }
+  async function toggleApiKey(id, enabled) {
+    try {
+      const res = await api('/api-keys/' + encodeURIComponent(id), {
+        method: 'PUT',
+        body: JSON.stringify({ enabled: !enabled })
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.failed'));
+      await loadApiKeys();
+    } catch (e) {
+      toast((e && e.message) || t('common.failed'), 'error');
+    }
+  }
+  async function resetApiKeyUsage(id) {
+    try {
+      const res = await api('/api-keys/' + encodeURIComponent(id) + '/reset-usage', { method: 'POST' });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.failed'));
+      await loadApiKeys();
+    } catch (e) {
+      toast((e && e.message) || t('common.failed'), 'error');
+    }
+  }
+  async function deleteApiKey(id) {
+    const ok = await confirmAction(t('settings.confirmDeleteApiKey'), {
+      title: t('common.delete'),
+      confirmText: t('common.delete'),
+      variant: 'danger'
+    });
+    if (!ok) return;
+    try {
+      const res = await api('/api-keys/' + encodeURIComponent(id), { method: 'DELETE' });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.failed'));
+      await loadApiKeys();
+    } catch (e) {
+      toast((e && e.message) || t('common.failed'), 'error');
     }
   }
   async function saveOverUsageConfig() {
@@ -1889,14 +1999,32 @@
     await api('/settings', { method: 'POST', body: JSON.stringify({ allowOverUsage }) });
     toast(t('settings.overUsageSaved'), 'success');
   }
+  async function saveStreamIntegrityConfig() {
+    const lenientStreamIntegrity = $('lenientStreamIntegrity').checked;
+    await api('/settings', { method: 'POST', body: JSON.stringify({ lenientStreamIntegrity }) });
+    toast(t('settings.streamIntegritySaved'), 'success');
+  }
+  async function saveRoutingConfig() {
+    const sessionAffinity = $('sessionAffinity').checked;
+    await api('/settings', { method: 'POST', body: JSON.stringify({ sessionAffinity }) });
+    toast(t('settings.routingSaved'), 'success');
+  }
   async function changePassword() {
     const np = $('newPassword').value;
     if (!np) return toast(t('settings.passwordRequired'), 'warning');
+    if ([...np].length < 8) return toast(t('settings.passwordTooShort'), 'warning');
     try {
       const res = await api('/settings', { method: 'POST', body: JSON.stringify({ password: np }) });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
-      setActivePassword(np, localStorage.getItem('kiro_remember') === '1');
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.saveFailed'));
+      //! The server revokes every session on a password change, so this tab must
+      //! trade the new password for a fresh token or the next call returns 401.
+      stopAdminEvents();
+      if (!await createSession(np, localStorage.getItem('kiro_remember') === '1')) {
+        clearSession();
+        return location.reload();
+      }
+      startAdminEvents();
       toast(t('settings.passwordChanged'), 'success');
       $('newPassword').value = '';
     } catch (e) {
@@ -1919,409 +2047,379 @@
       toastError((e && e.message) || t('common.failed'));
     }
   }
-  // Multi API Key management
-  let apiKeysCache = [];
-  let apiKeyEditingId = '';
-  let apiKeyModalSubmitting = false;
-
-  async function loadApiKeys() {
-    const list = $('apiKeysList');
-    if (!list) return;
-    try {
-      const res = await api('/api-keys');
-      if (!res.ok) throw new Error('http ' + res.status);
-      const d = await res.json();
-      apiKeysCache = Array.isArray(d.apiKeys) ? d.apiKeys : [];
-      if (pendingApiKeyId) {
-        const selected = getApiKeyEntry(pendingApiKeyId);
-        if (!selected || !selected.enabled) pendingApiKeyId = '';
-      }
-      renderApiKeys();
-      renderAccounts();
-      refreshPendingApiKeySelect();
-    } catch (e) {
-      apiKeysCache = [];
-      list.innerHTML = '<div class="muted-text" style="padding:0.5rem 0;">' + escapeHtml(t('apiKeys.loadFailed')) + '</div>';
-      renderAccounts();
-      refreshPendingApiKeySelect();
-    }
+  function formatTime(ts) {
+    return ts ? new Date(ts * 1000).toLocaleString() : '-';
   }
-
-  function formatNumber(n) {
-    if (n == null || isNaN(n)) return '0';
-    if (Math.abs(n) >= 1 && Math.floor(n) === n) return Number(n).toLocaleString('en-US');
-    return Number(n).toLocaleString('en-US', { maximumFractionDigits: 4 });
-  }
-
-  function usageBar(used, limit) {
-    if (!limit || limit <= 0) return '';
-    const ratio = Math.max(0, Math.min(1, used / limit));
-    const pct = (ratio * 100).toFixed(1);
-    let color = '#3b82f6';
-    if (ratio >= 0.95) color = '#ef4444';
-    else if (ratio >= 0.8) color = '#f59e0b';
-    return '<div style="height:6px;background:rgba(127,127,127,0.2);border-radius:3px;overflow:hidden;margin-top:4px;">' +
-      '<div style="height:100%;width:' + pct + '%;background:' + color + ';transition:width 0.3s;"></div>' +
-      '</div>';
-  }
-
-  function usageLine(label, used, limit, options) {
-    options = options || {};
-    const fmt = options.fmt || formatNumber;
-    if (!limit || limit <= 0) {
-      return '<div class="text-xs muted-text">' + escapeHtml(label) + ': ' + escapeHtml(fmt(used)) + ' / ' + escapeHtml(t('apiKeys.unlimited')) + '</div>';
-    }
-    return '<div class="text-xs muted-text">' + escapeHtml(label) + ': ' + escapeHtml(fmt(used)) + ' / ' + escapeHtml(fmt(limit)) + '</div>' + usageBar(used, limit);
-  }
-
-  function refreshPendingApiKeySelect() {
-    const select = $('pendingApiKeySelect');
-    if (select) {
-      const current = pendingApiKeyId;
-      select.innerHTML = apiKeyOptions(current, false);
-      select.value = current;
-      refreshCustomSelects(select.parentElement);
-    }
-    const detailSelect = $('detailApiKeySelect');
-    const detailWrap = detailSelect && detailSelect.__customSelect;
-    if (detailSelect && !(detailWrap && detailWrap.classList.contains('is-open'))) {
-      const current = detailSelect.value;
-      detailSelect.innerHTML = apiKeyOptions(current, true);
-      detailSelect.value = current;
-      refreshCustomSelects(detailSelect.parentElement);
-    }
-  }
-
-  function apiKeyHasCacheOverride(entry) {
-    if (!entry) return false;
-    return ['promptCacheEmulationEnabled', 'promptCacheEmulationMode', 'promptCacheEmulationRatio',
-      'promptCacheCreationEmulationRatio', 'promptCacheReadEmulationRatio']
-      .some(key => entry[key] !== undefined && entry[key] !== null);
-  }
-
-  function effectiveApiKeyCacheSettings(entry) {
-    const inherited = promptCacheSettings || { enabled: true, mode: 'uniform', ratio: 1, creationRatio: 1, readRatio: 1 };
-    const mode = entry && entry.promptCacheEmulationMode === 'independent' ? 'independent' :
-      (entry && entry.promptCacheEmulationMode === 'uniform' ? 'uniform' : inherited.mode);
-    const ratio = clampRatio(entry && entry.promptCacheEmulationRatio, inherited.ratio);
-    const creationRatio = mode === 'uniform'
-      ? ratio
-      : clampRatio(entry && entry.promptCacheCreationEmulationRatio, inherited.creationRatio);
-    const readRatio = mode === 'uniform'
-      ? ratio
-      : clampRatio(entry && entry.promptCacheReadEmulationRatio, inherited.readRatio);
-    return {
-      enabled: entry && entry.promptCacheEmulationEnabled !== undefined
-        ? !!entry.promptCacheEmulationEnabled : inherited.enabled,
-      mode,
-      ratio,
-      creationRatio,
-      readRatio,
-      overridden: apiKeyHasCacheOverride(entry)
-    };
-  }
-
-  function cachePolicySummary(entry) {
-    const settings = effectiveApiKeyCacheSettings(entry);
-    const scope = settings.overridden ? t('apiKeys.cacheIndependent') : t('apiKeys.cacheInherited');
-    if (!settings.enabled) return scope + ' · ' + t('apiKeys.cacheDisabled');
-    if (settings.mode === 'uniform') return scope + ' · ' + t('apiKeys.cacheUniform', ratioToPercent(settings.ratio));
-    return scope + ' · ' + t('apiKeys.cacheIndependentRatios', ratioToPercent(settings.creationRatio), ratioToPercent(settings.readRatio));
-  }
-
-  function renderApiKeys() {
-    const list = $('apiKeysList');
-    if (!list) return;
-    if (!apiKeysCache.length) {
-      list.innerHTML = '<div class="muted-text" style="padding:0.5rem 0;">' + escapeHtml(t('apiKeys.empty')) + '</div>';
+  function renderTable(id, headers, rows, emptyKey) {
+    const el = $(id);
+    if (!el) return;
+    if (!rows || !rows.length) {
+      el.innerHTML = '<div class="empty-state">' + escapeHtml(t(emptyKey || 'common.empty')) + '</div>';
       return;
     }
-    const html = apiKeysCache.map(item => {
-      const id = escapeAttr(item.id || '');
-      const name = item.name ? escapeHtml(item.name) : '<span class="muted-text">' + escapeHtml(t('apiKeys.unnamed')) + '</span>';
-      const masked = escapeHtml(item.keyMasked || '');
-      const migrated = item.migrated
-        ? '<span class="text-xs" style="background:rgba(59,130,246,0.15);color:#3b82f6;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.migrated')) + '</span>'
-        : '';
-      const disabled = !item.enabled
-        ? '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.disabled')) + '</span>'
-        : '';
-      const tokensLine = usageLine(t('apiKeys.tokens'), item.tokensUsed || 0, item.tokenLimit || 0);
-      const creditsLine = usageLine(t('apiKeys.credits'), item.creditsUsed || 0, item.creditLimit || 0);
-      const requestsLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.requests')) + ': ' + escapeHtml(formatNumber(item.requestsCount || 0)) + '</div>';
-      const boundLine = '<div class="text-xs muted-text api-key-bound-count"><i class="fa-solid fa-users" aria-hidden="true"></i> ' +
-        escapeHtml(t('apiKeys.boundAccounts', item.boundAccountCount || 0)) + '</div>';
-      const cacheLine = '<div class="text-xs muted-text api-key-cache-summary"><i class="fa-solid fa-database" aria-hidden="true"></i> ' +
-        escapeHtml(cachePolicySummary(item)) + '</div>';
-      return '<div class="card" data-apikey-id="' + id + '" style="margin-top:0.5rem;padding:0.75rem;">' +
-        '<div class="flex items-center gap-2" style="flex-wrap:wrap;justify-content:space-between;">' +
-          '<div class="flex items-center gap-2" style="flex-wrap:wrap;">' +
-            '<span class="font-semibold">' + name + '</span>' +
-            migrated +
-            disabled +
-            '<span class="text-xs muted-text font-mono">' + masked + '</span>' +
-          '</div>' +
-          '<div class="flex items-center gap-2">' +
-            '<label class="switch" title="' + escapeAttr(item.enabled ? t('accounts.disable') : t('accounts.enable')) + '">' +
-              '<input type="checkbox" data-apikey-action="toggle" data-id="' + id + '"' + (item.enabled ? ' checked' : '') + ' />' +
-              '<span class="slider"></span>' +
-            '</label>' +
-            '<button class="btn btn-outline btn-sm" type="button" data-apikey-action="edit" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionEdit')) + '</button>' +
-            '<button class="btn btn-outline btn-sm" type="button" data-apikey-action="reset" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionReset')) + '</button>' +
-            '<button class="btn btn-danger btn-sm" type="button" data-apikey-action="delete" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionDelete')) + '</button>' +
-          '</div>' +
-        '</div>' +
-        '<div style="margin-top:0.5rem;display:grid;gap:0.35rem;">' +
-          tokensLine +
-          creditsLine +
-          requestsLine +
-          boundLine +
-          cacheLine +
-        '</div>' +
-      '</div>';
-    }).join('');
-    list.innerHTML = html;
+    el.innerHTML = '<table class="data-table"><thead><tr>' +
+      headers.map(h => '<th>' + escapeHtml(h) + '</th>').join('') +
+      '</tr></thead><tbody>' + rows.join('') + '</tbody></table>';
   }
-
-  function openApiKeyModal(entry) {
-    apiKeyEditingId = entry ? (entry.id || '') : '';
-    const titleEl = $('apiKeyModalTitle');
-    titleEl.textContent = t(apiKeyEditingId ? 'apiKeys.modalTitleEdit' : 'apiKeys.modalTitleCreate');
-    $('apiKeyForm_name').value = entry ? (entry.name || '') : '';
-    const keyEl = $('apiKeyForm_key');
-    if (apiKeyEditingId) {
-      keyEl.value = entry.keyMasked || '';
-      keyEl.readOnly = true;
-    } else {
-      keyEl.value = '';
-      keyEl.readOnly = false;
-    }
-    $('apiKeyForm_enabled').checked = entry ? !!entry.enabled : true;
-    $('apiKeyForm_tokenLimit').value = entry ? String(entry.tokenLimit || 0) : '0';
-    $('apiKeyForm_creditLimit').value = entry ? String(entry.creditLimit || 0) : '0';
-    const cache = effectiveApiKeyCacheSettings(entry);
-    $('apiKeyCacheScope').value = cache.overridden ? 'independent' : 'inherit';
-    $('apiKeyCacheEnabled').checked = cache.enabled;
-    $('apiKeyCacheMode').value = cache.mode;
-    $('apiKeyCacheRatio').value = ratioToPercent(cache.ratio);
-    $('apiKeyCacheCreationRatio').value = ratioToPercent(cache.creationRatio);
-    $('apiKeyCacheReadRatio').value = ratioToPercent(cache.readRatio);
-    updateApiKeyCacheForm();
-    apiKeyModalSubmitting = false;
-    $('apiKeyModalSaveBtn').disabled = false;
-    openDialog('apiKeyModal');
-  }
-
-  function updateApiKeyCacheForm() {
-    const scope = $('apiKeyCacheScope');
-    const controls = [
-      $('apiKeyCacheEnabled'), $('apiKeyCacheMode'), $('apiKeyCacheRatio'),
-      $('apiKeyCacheCreationRatio'), $('apiKeyCacheReadRatio')
-    ];
-    if (!scope || controls.some(control => !control)) return;
-    const inherited = scope.value !== 'independent';
-    controls.forEach(control => { control.disabled = inherited; });
-    const uniform = !inherited && $('apiKeyCacheMode').value === 'uniform';
-    $('apiKeyCacheCreationRatio').disabled = inherited || uniform;
-    $('apiKeyCacheReadRatio').disabled = inherited || uniform;
-    if (uniform) {
-      $('apiKeyCacheCreationRatio').value = $('apiKeyCacheRatio').value;
-      $('apiKeyCacheReadRatio').value = $('apiKeyCacheRatio').value;
-    }
-    refreshCustomSelects($('apiKeyCacheScope').parentElement);
-    refreshCustomSelects($('apiKeyCacheMode').parentElement);
-  }
-
-  function closeApiKeyModal() {
-    closeDialog('apiKeyModal');
-    apiKeyEditingId = '';
-    apiKeyModalSubmitting = false;
-    $('apiKeyModalSaveBtn').disabled = false;
-  }
-
-  async function submitApiKeyModal() {
-    if (apiKeyModalSubmitting) return;
-    apiKeyModalSubmitting = true;
-    const saveBtn = $('apiKeyModalSaveBtn');
-    saveBtn.disabled = true;
+  async function loadObserve() {
     try {
-      const name = $('apiKeyForm_name').value.trim();
-      const enabled = $('apiKeyForm_enabled').checked;
-      const tokenLimit = parseInt($('apiKeyForm_tokenLimit').value, 10);
-      const creditLimit = parseFloat($('apiKeyForm_creditLimit').value);
-      const cacheScope = $('apiKeyCacheScope').value;
-      const payload = {
-        name: name,
-        enabled: enabled,
-        tokenLimit: isNaN(tokenLimit) || tokenLimit < 0 ? 0 : tokenLimit,
-        creditLimit: isNaN(creditLimit) || creditLimit < 0 ? 0 : creditLimit
+      const [overviewRes, heatmapRes, mixRes, errorsRes] = await Promise.all([
+        api('/observe/overview'),
+        api('/observe/account-heatmap?windowMin=60'),
+        api('/observe/model-mix'),
+        api('/observe/recent-errors?limit=10')
+      ]);
+      observeCache = {
+        overview: await overviewRes.json(),
+        heatmap: await heatmapRes.json(),
+        mix: await mixRes.json(),
+        errors: await errorsRes.json()
       };
-      if (cacheScope === 'independent') {
-        const cacheMode = $('apiKeyCacheMode').value === 'independent' ? 'independent' : 'uniform';
-        const cacheRatio = percentToRatio($('apiKeyCacheRatio').value, 1);
-        payload.promptCacheEmulationEnabled = $('apiKeyCacheEnabled').checked;
-        payload.promptCacheEmulationMode = cacheMode;
-        payload.promptCacheEmulationRatio = cacheRatio;
-        payload.promptCacheCreationEmulationRatio = cacheMode === 'uniform'
-          ? cacheRatio : percentToRatio($('apiKeyCacheCreationRatio').value, cacheRatio);
-        payload.promptCacheReadEmulationRatio = cacheMode === 'uniform'
-          ? cacheRatio : percentToRatio($('apiKeyCacheReadRatio').value, cacheRatio);
-      } else if (apiKeyEditingId) {
-        payload.clearPromptCacheOverrides = true;
-      }
-      let res, d;
-      if (apiKeyEditingId) {
-        res = await api('/api-keys/' + encodeURIComponent(apiKeyEditingId), { method: 'PUT', body: JSON.stringify(payload) });
-        d = await res.json().catch(() => ({}));
-        if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
-        toast(t('apiKeys.updated'), 'success');
-        closeApiKeyModal();
-        await loadApiKeys();
-        await loadAccounts();
-      } else {
-        const keyVal = $('apiKeyForm_key').value.trim();
-        if (keyVal) payload.key = keyVal;
-        res = await api('/api-keys', { method: 'POST', body: JSON.stringify(payload) });
-        d = await res.json().catch(() => ({}));
-        if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
-        toast(t('apiKeys.created'), 'success');
-        closeApiKeyModal();
-        await loadApiKeys();
-        await loadAccounts();
-        if (d.key) showNewApiKey(d.key);
-      }
-    } catch (e) {
-      toast((e && e.message) || t('common.saveFailed'), 'error');
-      apiKeyModalSubmitting = false;
-      saveBtn.disabled = false;
-    }
-  }
-
-  async function toggleApiKeyEntry(id, enabled) {
-    try {
-      const res = await api('/api-keys/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify({ enabled }) });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
-      // Enabling the first key can migrate legacy accounts; reload both
-      // collections so badges and bound-account counts stay authoritative.
-      await loadApiKeys();
-      await loadAccounts();
-    } catch (e) {
-      toast((e && e.message) || t('common.saveFailed'), 'error');
-      await loadApiKeys();
-    }
-  }
-
-  async function deleteApiKeyEntry(id, name) {
-    const ok = await confirmAction(t('apiKeys.confirmDelete', name || t('apiKeys.unnamed')), {
-      title: t('apiKeys.actionDelete'),
-      confirmText: t('apiKeys.actionDelete'),
-      variant: 'danger'
-    });
-    if (!ok) return;
-    try {
-      const res = await api('/api-keys/' + encodeURIComponent(id), { method: 'DELETE' });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) throw new Error(d.error || t('common.failed'));
-      toast(t('apiKeys.deleteSuccess'), 'success');
-      await loadApiKeys();
-    } catch (e) {
-      toast((e && e.message) || t('common.failed'), 'error');
-    }
-  }
-
-  async function resetApiKeyUsageEntry(id, name) {
-    const ok = await confirmAction(t('apiKeys.confirmReset', name || t('apiKeys.unnamed')), {
-      title: t('apiKeys.actionReset'),
-      confirmText: t('apiKeys.actionReset')
-    });
-    if (!ok) return;
-    try {
-      const res = await api('/api-keys/' + encodeURIComponent(id) + '/reset-usage', { method: 'POST' });
-      const d = await res.json().catch(() => ({}));
-      if (!res.ok || d.success === false) throw new Error(d.error || t('common.failed'));
-      toast(t('apiKeys.usageReset'), 'success');
-      await loadApiKeys();
-    } catch (e) {
-      toast((e && e.message) || t('common.failed'), 'error');
-    }
-  }
-
-  function showNewApiKey(plaintext) {
-    $('apiKeyShowValue').value = plaintext || '';
-    openDialog('apiKeyShowModal');
-    setTimeout(() => {
-      const el = $('apiKeyShowValue');
-      if (el) { try { el.select(); } catch (_) { } }
-    }, 0);
-  }
-
-  function closeShowApiKeyModal() {
-    closeDialog('apiKeyShowModal');
-    $('apiKeyShowValue').value = '';
-  }
-
-  async function copyNewApiKey() {
-    const val = $('apiKeyShowValue').value;
-    if (!val) return;
-    try {
-      await copyText(val);
-      toast(t('apiKeys.copySuccess'), 'success');
+      renderObserveCached();
     } catch (e) {
       toast(t('common.failed'), 'error');
     }
   }
-
-  function bindApiKeyEvents() {
-    const list = $('apiKeysList');
-    if (list) {
-      list.addEventListener('click', e => {
-        const btn = e.target.closest('[data-apikey-action]');
-        if (!btn) return;
-        const action = btn.dataset.apikeyAction;
-        const id = btn.dataset.id;
-        if (!id) return;
-        const entry = apiKeysCache.find(x => x.id === id);
-        const name = entry ? entry.name : '';
-        if (action === 'edit') openApiKeyModal(entry);
-        else if (action === 'delete') deleteApiKeyEntry(id, name);
-        else if (action === 'reset') resetApiKeyUsageEntry(id, name);
-      });
-      list.addEventListener('change', e => {
-        const cb = e.target.closest('input[data-apikey-action="toggle"]');
-        if (!cb) return;
-        const id = cb.dataset.id;
-        if (!id) return;
-        toggleApiKeyEntry(id, cb.checked);
-      });
+  function renderObserveCached() {
+    if (!observeCache) return;
+    const o = observeCache.overview || {};
+    const summary = $('observeSummary');
+    if (summary) {
+      summary.innerHTML = [
+        ['observe.rpm', o.rpm1 || 0],
+        ['observe.errRate', (((o.errRate5 || 0) * 100).toFixed(1) + '%')],
+        ['observe.inTpm', formatNum(Math.round(o.inTpm5 || 0))],
+        ['observe.outTpm', formatNum(Math.round(o.outTpm5 || 0))],
+        ['observe.credits60', (o.credits60 || 0).toFixed(2)],
+        ['observe.activeAccounts', (o.activeAccts || 0) + ' / ' + (o.totalAccts || 0)]
+      ].map(item => '<div class="feature-stat"><div class="feature-stat-label">' + escapeHtml(t(item[0])) +
+        '</div><div class="feature-stat-value">' + escapeHtml(item[1]) + '</div></div>').join('');
     }
-    const addBtn = $('addApiKeyBtn');
-    if (addBtn) addBtn.addEventListener('click', () => openApiKeyModal(null));
-    const saveBtn = $('apiKeyModalSaveBtn');
-    if (saveBtn) saveBtn.addEventListener('click', submitApiKeyModal);
-    const cancelBtn = $('apiKeyModalCancelBtn');
-    if (cancelBtn) cancelBtn.addEventListener('click', closeApiKeyModal);
-    const closeBtn = $('apiKeyModalClose');
-    if (closeBtn) closeBtn.addEventListener('click', closeApiKeyModal);
-    const showCloseBtn = $('apiKeyShowCloseBtn');
-    if (showCloseBtn) showCloseBtn.addEventListener('click', closeShowApiKeyModal);
-    const showCloseX = $('apiKeyShowClose');
-    if (showCloseX) showCloseX.addEventListener('click', closeShowApiKeyModal);
-    const copyBtn = $('apiKeyShowCopyBtn');
-    if (copyBtn) copyBtn.addEventListener('click', copyNewApiKey);
-    const cacheScope = $('apiKeyCacheScope');
-    if (cacheScope) cacheScope.addEventListener('change', updateApiKeyCacheForm);
-    const cacheMode = $('apiKeyCacheMode');
-    if (cacheMode) cacheMode.addEventListener('change', updateApiKeyCacheForm);
-    const cacheRatio = $('apiKeyCacheRatio');
-    if (cacheRatio) cacheRatio.addEventListener('input', () => {
-      if ($('apiKeyCacheMode')?.value === 'uniform') updateApiKeyCacheForm();
-    });
-    bindDialogBackdropClose('apiKeyModal', closeApiKeyModal);
-    bindDialogBackdropClose('apiKeyShowModal', closeShowApiKeyModal);
+    renderHeatmap();
+    renderObserveTables();
   }
+  function renderHeatmap() {
+    const el = $('observeHeatmap');
+    if (!el || !observeCache) return;
+    const heatmap = observeCache.heatmap || {};
+    const rows = [];
+    if (heatmap.global) rows.push({ label: t('observe.global'), cells: heatmap.global.cells || [] });
+    const accounts = (heatmap.accounts || []).slice().sort((a, b) => {
+      const score = item => (item.cells || []).reduce((sum, c) => sum + (c.reqs || 0) + (c.failures || 0), 0);
+      return score(b) - score(a);
+    });
+    const visibleAccounts = accounts.slice(0, 2);
+    visibleAccounts.forEach(a => rows.push({ label: getDisplayAccount(a.email, a.accountId), cells: a.cells || [] }));
+    const hasMoreAccounts = accounts.length > visibleAccounts.length;
+    el.classList.toggle('heatmap-single', rows.length === 1);
+    el.classList.toggle('heatmap-table', rows.length > 1);
+    el.classList.toggle('has-footer', hasMoreAccounts);
+    if (!rows.length) {
+      el.innerHTML = '<div class="empty-state">' + escapeHtml(t('observe.noTraffic')) + '</div>';
+      return;
+    }
+    let maxReq = 1;
+    rows.forEach(r => (r.cells || []).forEach(c => { if ((c.reqs || 0) > maxReq) maxReq = c.reqs; }));
+    el.innerHTML = rows.map(r => {
+      const cells = (r.cells || []).slice().reverse().map(c => {
+        const pct = Math.min(1, (c.reqs || 0) / maxReq);
+        const cls = c.failures ? ' heat-cell-fail' : '';
+        return '<span class="heat-cell' + cls + '" style="opacity:' + (0.18 + pct * 0.82).toFixed(2) + '" title="' +
+          escapeAttr(t('observe.heatCellTooltip', c.reqs || 0, c.failures || 0)) + '"></span>';
+      }).join('');
+      return '<div class="heat-row"><div class="heat-label">' + escapeHtml(r.label) + '</div><div class="heat-cells">' + cells + '</div></div>';
+    }).join('') + (hasMoreAccounts
+      ? '<div class="observe-panel-footer">' + escapeHtml(t('observe.moreAccounts', accounts.length - visibleAccounts.length)) + '</div>'
+      : '');
+  }
+  function renderObserveTables() {
+    const allModels = ((observeCache.mix || {}).models || []);
+    const visibleModels = allModels.slice(0, 3);
+    const models = visibleModels.map(m => '<tr><td>' + escapeHtml(m.model || '-') +
+      '</td><td>' + (m.reqs || 0) + '</td><td>' + formatNum((m.inTokens || 0) + (m.outTokens || 0)) +
+      '</td><td>' + (m.credits || 0).toFixed(2) + '</td></tr>');
+    renderTable('observeModelMix', [t('requests.model'), t('accounts.requests'), t('stats.tokens'), t('stats.credits')], models, 'observe.noTraffic');
+    const mixEl = $('observeModelMix');
+    if (mixEl && allModels.length > visibleModels.length) {
+      mixEl.insertAdjacentHTML('beforeend', '<div class="observe-panel-footer">' +
+        escapeHtml(t('observe.moreModels', allModels.length - visibleModels.length)) + '</div>');
+    }
 
-  // Prompt filter rules
+    const allErrors = ((observeCache.errors || {}).errors || []).slice(0, 10);
+    const errors = allErrors.map(e => '<tr><td>' + escapeHtml(formatTime(e.ts)) +
+      '</td><td>' + escapeHtml(getDisplayAccount(e.email, e.accountId)) + '</td><td>' + escapeHtml(e.model || '-') +
+      '</td><td>' + escapeHtml(maskEmailsInText(e.message || '-')) + '</td></tr>');
+    renderTable('observeErrors', [t('requests.time'), t('requests.account'), t('requests.model'), t('requests.message')], errors, 'observe.noErrors');
+    const errorsEl = $('observeErrors');
+    if (errorsEl && errors.length) {
+      errorsEl.insertAdjacentHTML('beforeend', '<button type="button" class="observe-panel-footer observe-footer-button" data-observe-view-requests>' +
+        escapeHtml(t('observe.viewAllRequests')) + '</button>');
+    }
+  }
+  async function loadRequests() {
+    try {
+      const params = new URLSearchParams({
+        page: String(requestsQuery.page),
+        pageSize: String(requestsQuery.pageSize),
+        sort: requestsQuery.sort,
+        order: requestsQuery.order
+      });
+      if (requestsQuery.search) params.set('search', requestsQuery.search);
+      if (requestsQuery.status) params.set('status', requestsQuery.status);
+      const res = await api('/observe/recent-requests?' + params.toString());
+      const data = await res.json();
+      requestsCache = data.requests || [];
+      requestsMeta = {
+        total: data.total || 0,
+        page: data.page || requestsQuery.page,
+        pageSize: data.pageSize || requestsQuery.pageSize,
+        sort: data.sort || requestsQuery.sort,
+        order: data.order || requestsQuery.order,
+        persistent: !!data.persistent
+      };
+      renderRequestsCached();
+    } catch (e) {
+      toast(t('common.failed'), 'error');
+    }
+  }
+  function renderRequestsCached() {
+    const el = $('requestsTable');
+    if (!el) return;
+    const headers = [
+      requestSortHeader('time', t('requests.time')),
+      requestSortHeader('status', t('requests.status')),
+      requestSortHeader('account', t('requests.account')),
+      requestSortHeader('api_key', t('requests.apiKey')),
+      '<th>' + escapeHtml(t('requests.endpoint')) + '</th>',
+      requestSortHeader('model', t('requests.model')),
+      requestSortHeader('tokens', t('stats.tokens')),
+      requestSortHeader('credits', t('stats.credits')),
+      requestSortHeader('duration', t('requests.duration')),
+      '<th>' + escapeHtml(t('requests.error')) + '</th>'
+    ].join('');
+    const rows = (requestsCache || []).map(r => '<tr><td>' + escapeHtml(formatTime(r.ts)) + '</td><td>' +
+      formatRequestStatus(r) + '</td><td>' + escapeHtml(getDisplayAccount(r.email, r.accountId)) + '</td><td>' + formatRequestApiKey(r) + '</td><td>' + formatRequestEndpoint(r) +
+      '</td><td>' + escapeHtml(r.model || '-') + '</td><td>' + formatNum(r.totalTokens || 0) + '</td><td>' + formatCredits(r.credits || 0) +
+      '</td><td>' + formatRequestDuration(r) + '</td><td>' + formatRequestError(r) + '</td></tr>');
+    if (!rows.length) {
+      el.innerHTML = '<div class="empty-state">' + escapeHtml(t('requests.empty')) + '</div>';
+    } else {
+      el.innerHTML = '<table class="data-table requests-data-table"><thead><tr>' + headers + '</tr></thead><tbody>' + rows.join('') + '</tbody></table>';
+    }
+    renderRequestsPagination();
+  }
+  function requestSortHeader(sort, label) {
+    const active = requestsMeta.sort === sort || requestsQuery.sort === sort;
+    const order = active ? (requestsMeta.order || requestsQuery.order) : '';
+    const icon = !active ? 'fa-sort' : (order === 'asc' ? 'fa-sort-up' : 'fa-sort-down');
+    return '<th><button type="button" class="table-sort-btn" data-request-sort="' + escapeAttr(sort) + '">' +
+      '<span>' + escapeHtml(label) + '</span><i class="fa-solid ' + icon + '" aria-hidden="true"></i></button></th>';
+  }
+  function formatRequestStatus(r) {
+    if (r.success) {
+      return '<span class="badge badge-success">' + escapeHtml(t('requests.ok')) + '</span>';
+    }
+    const code = r.status ? ' ' + r.status : '';
+    return '<span class="badge badge-error">' + escapeHtml(t('requests.fail') + code) + '</span>';
+  }
+  function normalizeApiKeyMask(value) {
+    value = String(value || '');
+    if (!value) return '';
+    if (value.includes('****')) return value;
+    if (value.length <= 10) return value;
+    return value.slice(0, 6) + '****' + value.slice(-4);
+  }
+  function formatRequestApiKey(r) {
+    const value = normalizeApiKeyMask(r.apiKeyMasked || '');
+    if (!value) return '<span class="muted-text">-</span>';
+    return '<code class="code-inline request-api-key-cell" title="' + escapeAttr(value) + '">' + escapeHtml(value) + '</code>';
+  }
+  function formatRequestEndpoint(r) {
+    if (!r.endpoint) return '<span class="muted-text">-</span>';
+    return escapeHtml(t('requests.endpoint.' + r.endpoint));
+  }
+  function formatRequestDuration(r) {
+    const ms = Number(r.durationMs || 0);
+    //! Rows logged before durations were tracked have no endpoint either; a real 0ms request still shows 0 ms.
+    if (!Number.isFinite(ms) || (!ms && !r.endpoint)) return '<span class="muted-text">-</span>';
+    if (ms < 1000) return escapeHtml(Math.round(ms) + ' ms');
+    if (ms < 60000) return escapeHtml((ms / 1000).toFixed(ms < 10000 ? 2 : 1) + ' s');
+    const totalSec = Math.round(ms / 1000);
+    return escapeHtml(Math.floor(totalSec / 60) + 'm ' + (totalSec % 60) + 's');
+  }
+  const requestErrorTypeBadges = {
+    client_closed: 'badge-muted',
+    invalid_request: 'badge-muted',
+    api_key_limit: 'badge-muted',
+    stream: 'badge-warning',
+    timeout: 'badge-warning',
+    rate_limit: 'badge-warning',
+    upstream: 'badge-warning',
+    unknown: 'badge-warning'
+  };
+  function formatRequestError(r) {
+    if (r.success) return '<span class="muted-text">-</span>';
+    const msg = maskEmailsInText(r.message || t('requests.noErrorMessage'));
+    const badge = r.errorType
+      ? '<span class="badge ' + (requestErrorTypeBadges[r.errorType] || 'badge-error') + ' request-error-type">' + escapeHtml(t('requests.errorType.' + r.errorType)) + '</span>'
+      : '';
+    return '<div class="request-error">' + badge +
+      '<span class="request-error-cell" title="' + escapeAttr(msg) + '">' + escapeHtml(msg) + '</span></div>';
+  }
+  function renderRequestsPagination() {
+    const info = $('requestsPageInfo');
+    const prev = $('requestsPrevBtn');
+    const next = $('requestsNextBtn');
+    if (!info || !prev || !next) return;
+    const total = requestsMeta.total || 0;
+    const pageSize = requestsMeta.pageSize || requestsQuery.pageSize;
+    const page = requestsMeta.page || requestsQuery.page;
+    const start = total ? ((page - 1) * pageSize + 1) : 0;
+    const end = Math.min(total, page * pageSize);
+    info.textContent = t('requests.pageInfo', start, end, total);
+    prev.disabled = page <= 1;
+    next.disabled = end >= total;
+  }
+  function setRequestSort(sort) {
+    if (requestsQuery.sort === sort) {
+      requestsQuery.order = requestsQuery.order === 'asc' ? 'desc' : 'asc';
+    } else {
+      requestsQuery.sort = sort;
+      requestsQuery.order = sort === 'time' ? 'desc' : 'asc';
+    }
+    requestsQuery.page = 1;
+    loadRequests();
+  }
+  function queueRequestsSearch() {
+    clearTimeout(requestsSearchTimer);
+    requestsSearchTimer = setTimeout(() => {
+      requestsQuery.search = $('requestSearchInput').value.trim();
+      requestsQuery.page = 1;
+      loadRequests();
+    }, 250);
+  }
+  async function loadBackups() {
+    try {
+      const [listRes, schedRes] = await Promise.all([api('/backups?autoInclude=true'), api('/backups/schedule')]);
+      backupsCache = (await listRes.json()).backups || [];
+      backupScheduleCache = (await schedRes.json()).schedule || {};
+      renderBackupsCached();
+    } catch (e) {
+      toast(t('common.failed'), 'error');
+    }
+  }
+  function renderBackupsCached() {
+    if ($('backupScheduleEnabled') && backupScheduleCache) {
+      $('backupScheduleEnabled').checked = !!backupScheduleCache.enabled;
+      $('backupCadence').value = backupScheduleCache.cadence || 'daily';
+      $('backupKeep').value = backupScheduleCache.keep || 20;
+      refreshCustomSelects($('tabBackups'));
+    }
+    const rows = (backupsCache || []).map(b => '<tr><td>' + escapeHtml(formatTime(b.createdAt)) + '</td><td>' +
+      '<span class="badge ' + backupKindBadgeClass(b.kind) + '">' + escapeHtml(formatBackupKind(b.kind)) + '</span></td><td>' + escapeHtml(formatBackupNote(b)) +
+      '</td><td>' + formatBackupAccountCell(b) + '</td><td>' +
+      '<button class="btn btn-outline btn-xs" data-backup-download="' + escapeAttr(b.id) + '">' + escapeHtml(t('backups.download')) + '</button> ' +
+      '<button class="btn btn-secondary btn-xs" data-backup-restore="' + escapeAttr(b.id) + '">' + escapeHtml(t('backups.restore')) + '</button> ' +
+      '<button class="btn btn-danger btn-xs" data-backup-delete="' + escapeAttr(b.id) + '">' + escapeHtml(t('common.delete')) + '</button></td></tr>');
+    renderTable('backupsTable', [t('requests.time'), t('backups.kind'), t('backups.note'), t('backups.accountsInBackup'), t('common.actions')], rows, 'backups.empty');
+  }
+  function formatBackupKind(kind) {
+    const key = {
+      manual: 'backups.kindManual',
+      scheduled: 'backups.kindScheduled',
+      auto: 'backups.kindAuto',
+      'pre-restore': 'backups.kindPreRestore'
+    }[kind];
+    return key ? t(key) : (kind || '-');
+  }
+  function backupKindBadgeClass(kind) {
+    return kind === 'pre-restore' ? 'badge-warning' : 'badge-info';
+  }
+  function formatBackupNote(backup) {
+    const note = backup && backup.note ? backup.note : '';
+    if (!note) return '-';
+    if (backup.kind === 'pre-restore' && note.startsWith('upload ')) {
+      return t('backups.noteBeforeUpload', maskEmailsInText(note.slice(7)));
+    }
+    if (backup.kind === 'pre-restore' && note.startsWith('auto before restore ')) {
+      return t('backups.noteBeforeRestore', maskEmailsInText(note.slice(20)));
+    }
+    return maskEmailsInText(note);
+  }
+  function formatBackupAccountCell(backup) {
+    if (backup && backup.kind === 'pre-restore' && typeof backup.restoredAccountCnt === 'number') {
+      return '<span title="' + escapeAttr(t('backups.preRestoreSavedHint', backup.accountCnt || 0)) + '">' +
+        escapeHtml(t('backups.restoredAccountCount', backup.restoredAccountCnt)) + '</span>';
+    }
+    return escapeHtml(String((backup && backup.accountCnt) || 0));
+  }
+  async function createBackup() {
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const note = 'manual backup ' + now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate()) +
+      ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
+    const res = await api('/backups', { method: 'POST', body: JSON.stringify({ kind: 'manual', note }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.error) return toast(localizedError(d && d.error) || t('common.failed'), 'error');
+    toast(t('backups.created'), 'success');
+    loadBackups();
+  }
+  async function saveBackupSchedule() {
+    const schedule = {
+      enabled: $('backupScheduleEnabled').checked,
+      cadence: $('backupCadence').value,
+      keep: parseInt($('backupKeep').value, 10) || 20
+    };
+    const res = await api('/backups/schedule', { method: 'POST', body: JSON.stringify(schedule) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) return toast(localizedError(d && d.error) || t('common.saveFailed'), 'error');
+    toast(t('backups.scheduleSaved'), 'success');
+    loadBackups();
+  }
+  async function downloadBackup(id) {
+    const res = await api('/backups/' + encodeURIComponent(id) + '/download');
+    if (!res.ok) return toast(t('common.failed'), 'error');
+    const blob = await res.blob();
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'kiro-backup-' + id + '.json';
+    document.body.appendChild(link);
+    link.click();
+    URL.revokeObjectURL(link.href);
+    link.remove();
+  }
+  async function restoreBackup(id) {
+    const ok = await confirmAction(t('backups.confirmRestore'), { title: t('backups.restore'), confirmText: t('backups.restore'), variant: 'danger' });
+    if (!ok) return;
+    const res = await api('/backups/' + encodeURIComponent(id) + '/restore', { method: 'POST' });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) return toast(localizedError(d && d.error) || t('common.failed'), 'error');
+    toast(t('backups.restored'), 'success');
+    loadData();
+    loadBackups();
+  }
+  async function deleteBackup(id) {
+    const ok = await confirmAction(t('backups.confirmDelete'), { title: t('common.delete'), confirmText: t('common.delete'), variant: 'danger' });
+    if (!ok) return;
+    const res = await api('/backups/' + encodeURIComponent(id), { method: 'DELETE' });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) return toast(localizedError(d && d.error) || t('common.failed'), 'error');
+    toast(t('backups.deleted'), 'success');
+    loadBackups();
+  }
+  async function uploadBackupFile(file) {
+    if (!file) return;
+    const ok = await confirmAction(t('backups.confirmUpload'), { title: t('backups.upload'), confirmText: t('backups.restore'), variant: 'danger' });
+    if (!ok) return;
+    const body = new FormData();
+    body.append('file', file);
+    const res = await api('/backups/restore', { method: 'POST', body });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) return toast(localizedError(d && d.error) || t('common.failed'), 'error');
+    toast(t('backups.restored'), 'success');
+    loadData();
+    loadBackups();
+  }
   async function loadPromptFilter() {
     const res = await api('/prompt-filter');
     const d = await res.json();
@@ -2342,7 +2440,7 @@
     });
     const d = await res.json();
     if (d.success) toast(t('settings.promptFilterSaved'), 'success');
-    else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+    else toast(t('common.saveFailed') + ': ' + localizedError(d.error), 'error');
   }
   function renderPromptRules() {
     const c = $('promptFilterRules');
@@ -2382,8 +2480,6 @@
     promptRules.push({ id: 'rule-' + Date.now(), name: '', type, match: '', replace: '', enabled: true });
     renderPromptRules();
   }
-
-  // Add-account modal templates
   var METHOD_ICONS = {
     builderid: 'fa-solid fa-id-card',
     iam: 'fa-solid fa-key',
@@ -2392,7 +2488,7 @@
     local: 'fa-solid fa-folder-open',
     credentials: 'fa-solid fa-code',
     cookie: 'fa-solid fa-cookie-bite',
-    apikey: 'fa-solid fa-key'
+    apikey: 'fa-solid fa-terminal'
   };
   function methodCard(type, title, desc) {
     var icon = METHOD_ICONS[type] || 'fa-solid fa-circle-plus';
@@ -2412,7 +2508,7 @@
     if (type === 'add') modalAdd(title, body);
     else if (type === 'builderid') modalBuilderId(title, body);
     else if (type === 'iam') modalIam(title, body);
-    else if (type === 'microsoft') openMicrosoftModal(title, body);
+    else if (type === 'microsoft') { resetMicrosoftFlow(true); renderMicrosoftModal(); }
     else if (type === 'sso') modalSso(title, body);
     else if (type === 'local') modalLocal(title, body);
     else if (type === 'credentials') modalCredentials(title, body);
@@ -2423,18 +2519,14 @@
   }
   function closeModal() {
     closeDialog('addModal');
-    clearPendingApiKey();
     resetMicrosoftFlow(true);
     iamSession = '';
-    iamApiKeyId = '';
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
-    builderIdApiKeyId = '';
   }
   function modalAdd(title, body) {
     title.textContent = t('modal.addAccount');
     body.innerHTML =
-      renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
       '<div class="method-list">' +
       methodCard('builderid', t('modal.builderIdTitle'), t('modal.builderIdDesc')) +
       methodCard('iam', t('modal.iamTitle'), t('modal.iamDesc')) +
@@ -2450,7 +2542,6 @@
   function modalBuilderId(title, body) {
     title.textContent = t('modal.builderIdTitle');
     body.innerHTML =
-      renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
       '<p class="help-block">' + escapeHtml(t('modal.builderIdDesc')) + '</p>' +
       '<div id="builderIdStep1">' +
       '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="builderIdRegion" value="us-east-1" /></div>' +
@@ -2476,9 +2567,8 @@
   function modalIam(title, body) {
     title.textContent = t('modal.iamTitle');
     body.innerHTML =
-      renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
       '<p class="help-block">' + escapeHtml(t('modal.iamDesc')) + '</p>' +
-      '<div class="form-group"><label>' + escapeHtml(t('iam.startUrl')) + '</label><input type="text" id="iamStartUrl" placeholder="https://xxx.awsapps.com/start" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('iam.startUrl')) + '</label><input type="text" id="iamStartUrl" placeholder="' + escapeAttr(t('iam.startUrlPlaceholder')) + '" /></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="iamRegion" value="us-east-1" /></div>' +
       '<div id="iamStep2" class="hidden">' +
       '<div class="form-group"><label>' + escapeHtml(t('iam.loginUrl')) + '</label>' +
@@ -2488,8 +2578,8 @@
       '<button class="btn btn-sm btn-outline flex-1" id="iamCopyBtn" type="button">' + escapeHtml(t('common.copy')) + '</button>' +
       '</div>' +
       '</div>' +
-      '<p class="text-sm mt-3 success-text">' + escapeHtml(t('iam.completeLogin')) + '</p>' +
-      '<div class="form-group"><label>' + escapeHtml(t('iam.callbackUrl')) + '</label><input type="text" id="iamCallback" placeholder="http://127.0.0.1:xxx/?code=..." /></div>' +
+      '<p class="iam-login-instruction text-sm success-text">' + escapeHtml(t('iam.completeLogin')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('iam.callbackUrl')) + '</label><input type="text" id="iamCallback" placeholder="' + escapeAttr(t('iam.callbackUrlPlaceholder')) + '" /></div>' +
       '</div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
@@ -2497,91 +2587,119 @@
       '</div>';
     $('iamBtn').addEventListener('click', startIamSso);
   }
-  function openMicrosoftModal(title, body) {
-    resetMicrosoftFlow(true);
-    renderMicrosoftModal(title, body);
-  }
-  function renderMicrosoftModal(title, body) {
-    title = title || $('modalTitle');
-    body = body || $('modalBody');
-    title.textContent = t('modal.microsoftTitle');
-
-    if (microsoftSelectionId && microsoftProfiles.length) {
+  function renderMicrosoftModal() {
+    $('modalTitle').textContent = t('modal.microsoftTitle');
+    const body = $('modalBody');
+    const back = '<button class="btn btn-secondary" data-microsoft-back="1" type="button">' + escapeHtml(t('common.back')) + '</button>';
+    if (ms.selectionId) {
       body.innerHTML =
-        renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
         '<p class="help-block">' + escapeHtml(t('microsoft.selectProfileDesc')) + '</p>' +
-        '<fieldset class="microsoft-profile-list"><legend class="sr-only">' + escapeHtml(t('microsoft.selectProfileTitle')) + '</legend>' +
-        microsoftProfiles.map((profile, index) => {
-          const arn = String(profile.arn || '');
-          const checked = arn === microsoftSelectedProfileArn || (!microsoftSelectedProfileArn && index === 0);
-          return '<label class="microsoft-profile-card' + (checked ? ' selected' : '') + '">' +
-            '<input type="radio" name="microsoftProfile" value="' + escapeAttr(arn) + '"' + (checked ? ' checked' : '') + ' />' +
-            '<span class="microsoft-profile-body">' +
-            '<span class="microsoft-profile-name">' + escapeHtml(profile.name || arn) + '</span>' +
-            '<span class="microsoft-profile-arn font-mono">' + escapeHtml(arn) + '</span>' +
-            (profile.region ? '<span class="microsoft-profile-region">' + escapeHtml(t('microsoft.profileRegion', profile.region)) + '</span>' : '') +
-            '</span></label>';
-        }).join('') +
-        '</fieldset>' +
-        '<div class="modal-footer">' +
-        '<button class="btn btn-secondary" data-microsoft-back="1" type="button">' + escapeHtml(t('common.back')) + '</button>' +
-        '<button class="btn btn-primary" id="microsoftSelectProfileBtn" type="button">' + escapeHtml(t('microsoft.selectProfile')) + '</button>' +
-        '</div>';
-      enhanceCustomSelects(body);
-      qsa('input[name="microsoftProfile"]', body).forEach(radio => radio.addEventListener('change', e => {
-        microsoftSelectedProfileArn = e.target.value;
-        qsa('.microsoft-profile-card', body).forEach(card => {
-          const input = card.querySelector('input');
-          card.classList.toggle('selected', Boolean(input && input.checked));
-        });
-      }));
-      $('microsoftSelectProfileBtn').addEventListener('click', selectMicrosoftProfile);
-      syncMicrosoftBusyUI();
+        '<div class="form-group microsoft-profile-list">' + ms.profiles.map((p, i) =>
+          '<label class="microsoft-profile-card"><input type="radio" name="microsoftProfile" value="' + escapeAttr(p.arn) + '"' + (i === 0 ? ' checked' : '') + ' />' +
+          '<span class="microsoft-profile-body"><span class="microsoft-profile-name">' + escapeHtml(p.name || p.arn) + '</span>' +
+          '<span class="microsoft-profile-meta">' + escapeHtml(p.region || '') + '</span>' +
+          (p.name ? '<span class="microsoft-profile-meta font-mono">' + escapeHtml(p.arn) + '</span>' : '') + '</span></label>').join('') + '</div>' +
+        '<div class="modal-footer">' + back +
+        '<button class="btn btn-primary" id="microsoftBtn" type="button">' + escapeHtml(t('microsoft.selectProfile')) + '</button></div>';
+      $('microsoftBtn').addEventListener('click', selectMicrosoftProfile);
       return;
     }
-
-    const hasAuthorizeUrl = Boolean(microsoftAuthorizeUrl);
-    const loginLabel = microsoftStage === 'microsoft' ? t('microsoft.providerStep') : t('microsoft.portalStep');
-    body.innerHTML =
-      renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
-      '<p class="help-block">' + escapeHtml(t('modal.microsoftDesc')) + '</p>' +
-      (hasAuthorizeUrl ?
-        '<div class="form-group"><label>' + escapeHtml(loginLabel) + '</label>' +
+    const step = ms.authorizeUrl
+      ? '<div class="form-group"><label>' + escapeHtml(ms.stage === 'microsoft' ? t('microsoft.providerStep') : t('microsoft.portalStep')) + '</label>' +
         '<div class="endpoint"><span id="microsoftAuthUrl" class="font-mono text-xs"></span></div>' +
         '<div class="flex gap-2 mt-2">' +
         '<button class="btn btn-sm btn-outline flex-1" id="microsoftOpenBtn" type="button">' + escapeHtml(t('builderid.open')) + '</button>' +
         '<button class="btn btn-sm btn-outline flex-1" id="microsoftCopyBtn" type="button">' + escapeHtml(t('common.copy')) + '</button>' +
         '</div></div>' +
-        '<div class="message message-info microsoft-callback-note"><p>' + escapeHtml(t('microsoft.callbackInstructions')) + '</p></div>' +
-        '<div class="form-group mt-4"><label>' + escapeHtml(t('microsoft.callbackUrl')) + '</label>' +
-        '<textarea id="microsoftCallback" class="font-mono microsoft-callback-input" placeholder="' + escapeAttr(t('microsoft.callbackPlaceholder')) + '"></textarea></div>'
-        : '') +
-      '<div class="modal-footer">' +
-      '<button class="btn btn-secondary" data-microsoft-back="1" type="button">' + escapeHtml(t('common.back')) + '</button>' +
-      '<button class="btn btn-primary" id="microsoftBtn" type="button">' +
-      escapeHtml(hasAuthorizeUrl ? t('microsoft.complete') : t('microsoft.start')) +
-      '</button></div>';
-
-    enhanceCustomSelects(body);
-
-    if (hasAuthorizeUrl) {
-      $('microsoftAuthUrl').textContent = microsoftAuthorizeUrl;
-      $('microsoftOpenBtn').addEventListener('click', () => {
-        const opened = window.open(microsoftAuthorizeUrl, '_blank', 'noopener');
-        if (opened) opened.opener = null;
-      });
+        '<p class="iam-login-instruction text-sm success-text">' + escapeHtml(t('microsoft.callbackInstructions')) + '</p>' +
+        '<div class="form-group"><label>' + escapeHtml(t('iam.callbackUrl')) + '</label>' +
+        '<input type="text" id="microsoftCallback" placeholder="http://localhost:3128/..." /></div>'
+      : '';
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.microsoftDesc')) + '</p>' + step +
+      '<div class="modal-footer">' + back +
+      '<button class="btn btn-primary" id="microsoftBtn" type="button">' + escapeHtml(ms.authorizeUrl ? t('iam.complete') : t('builderid.startLogin')) + '</button></div>';
+    if (ms.authorizeUrl) {
+      $('microsoftAuthUrl').textContent = ms.authorizeUrl;
+      $('microsoftOpenBtn').addEventListener('click', () => window.open(ms.authorizeUrl, '_blank', 'noopener'));
       $('microsoftCopyBtn').addEventListener('click', async () => {
-        await copyText(microsoftAuthorizeUrl);
+        await copyText(ms.authorizeUrl);
         toast(t('common.copied'), 'primary');
       });
     }
-    $('microsoftBtn').addEventListener('click', hasAuthorizeUrl ? completeMicrosoftLogin : startMicrosoftLogin);
-    syncMicrosoftBusyUI();
+    $('microsoftBtn').addEventListener('click', ms.authorizeUrl ? completeMicrosoftLogin : startMicrosoftLogin);
+  }
+  function resetMicrosoftFlow(notifyServer) {
+    if (notifyServer && (ms.session || ms.selectionId)) {
+      api('/auth/microsoft-sso/cancel', { method: 'POST', body: JSON.stringify({ sessionId: ms.session, selectionId: ms.selectionId }) }).catch(() => {});
+    }
+    ms = { session: '', stage: 'kiro', authorizeUrl: '', selectionId: '', profiles: [], busy: false, generation: ms.generation + 1 };
+  }
+  // Runs one Microsoft SSO request. A response that lands after the operator
+  // left the flow is dropped, and its server session canceled.
+  async function microsoftStep(path, payload, onSuccess) {
+    if (ms.busy) return;
+    ms.busy = true;
+    const btn = $('microsoftBtn');
+    if (btn) btn.disabled = true;
+    const generation = ms.generation;
+    try {
+      const res = await api(path, { method: 'POST', body: JSON.stringify(payload) });
+      const d = await res.json().catch(() => ({}));
+      if (generation !== ms.generation) {
+        if (d.sessionId || d.selectionId) api('/auth/microsoft-sso/cancel', { method: 'POST', body: JSON.stringify({ sessionId: d.sessionId || '', selectionId: d.selectionId || '' }) }).catch(() => {});
+        return;
+      }
+      ms.busy = false;
+      if (!res.ok || d.error) return toastError(t('common.failed') + ': ' + localizedError(d.error || res.statusText));
+      if (d.account) {
+        resetMicrosoftFlow(false);
+        closeModal(); loadAccounts(); loadStats();
+        toastPrimary(t('builderid.success') + ': ' + (d.account.email || d.account.id));
+        if (d.warning) toastWarning(d.warning);
+        autoRefreshNewAccount(d.account.id);
+        return;
+      }
+      onSuccess(d);
+      renderMicrosoftModal();
+    } catch (e) {
+      if (generation === ms.generation) toastError(t('common.failed') + ': ' + ((e && e.message) || ''));
+    } finally {
+      if (generation === ms.generation) {
+        ms.busy = false;
+        const b = $('microsoftBtn');
+        if (b) b.disabled = false;
+      }
+    }
+  }
+  function startMicrosoftLogin() {
+    return microsoftStep('/auth/microsoft-sso/start', {}, d => {
+      ms.session = d.sessionId;
+      ms.authorizeUrl = d.authorizeUrl;
+      ms.stage = 'kiro';
+    });
+  }
+  function completeMicrosoftLogin() {
+    const callbackUrl = ($('microsoftCallback')?.value || '').trim();
+    if (!callbackUrl) return toastWarning(t('microsoft.callbackRequired'));
+    return microsoftStep('/auth/microsoft-sso/complete', { sessionId: ms.session, callbackUrl }, d => {
+      if (d.stage === 'profile') {
+        ms.selectionId = d.selectionId;
+        ms.profiles = d.profiles || [];
+      } else {
+        ms.stage = 'microsoft';
+        ms.authorizeUrl = d.authorizeUrl;
+      }
+    });
+  }
+  function selectMicrosoftProfile() {
+    const picked = document.querySelector('input[name="microsoftProfile"]:checked');
+    if (!picked) return toastWarning(t('microsoft.profileRequired'));
+    return microsoftStep('/auth/microsoft-sso/select-profile', { selectionId: ms.selectionId, profileArn: picked.value }, () => {});
   }
   function modalSso(title, body) {
     title.textContent = t('modal.ssoTitle');
     body.innerHTML =
-      renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
       '<div class="help-block">' +
       '<b>' + escapeHtml(t('sso.howToGet')) + '</b>' +
       '<ol class="steps-list">' +
@@ -2599,33 +2717,10 @@
       '</div>';
     $('importSsoBtn').addEventListener('click', importSsoToken);
   }
-  function modalApiKey(title, body) {
-    title.textContent = t('modal.apiKeyTitle');
-    body.innerHTML =
-      renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
-      '<p class="help-block">' + escapeHtml(t('modal.apiKeyDesc')) + '</p>' +
-      '<div class="help-block">' +
-      '<p>' + escapeHtml(t('apikey.hint')) + '</p>' +
-      '<p class="font-mono text-xs">ksk_xxxxxxxx</p>' +
-      '<p class="font-mono text-xs">ksk_xxxxxxxx|eu-central-1</p>' +
-      '</div>' +
-      '<div class="form-group"><label>' + escapeHtml(t('apikey.label')) + '</label>' +
-      '<textarea id="kiroApiKeyInput" class="font-mono" placeholder="' + escapeAttr(t('apikey.placeholder')) + '"></textarea></div>' +
-      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + ' <small>' + escapeHtml(t('apikey.regionHint')) + '</small></label>' +
-      '<input type="text" id="kiroApiKeyRegion" value="us-east-1" /></div>' +
-      '<div class="form-group"><label>' + escapeHtml(t('apikey.nickname')) + '</label>' +
-      '<input type="text" id="kiroApiKeyNickname" placeholder="' + escapeAttr(t('apikey.nicknamePlaceholder')) + '" /></div>' +
-      '<div class="modal-footer">' +
-      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
-      '<button class="btn btn-primary" id="importApiKeyBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
-      '</div>';
-    $('importApiKeyBtn').addEventListener('click', importApiKey);
-  }
 
   function modalLocal(title, body) {
     title.textContent = t('modal.localTitle');
     body.innerHTML =
-      renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
       '<p class="help-block">' + escapeHtml(t('modal.localDesc')) + '</p>' +
       '<div class="help-block">' +
       '<p><b>' + escapeHtml(t('local.fileLocation')) + '</b></p>' +
@@ -2670,11 +2765,10 @@
   function modalCredentials(title, body) {
     title.textContent = t('modal.credentialsTitle');
     body.innerHTML =
-      renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
       '<p class="help-block">' + escapeHtml(t('modal.credentialsDesc')) + '</p>' +
       '<p class="help-block">' + escapeHtml(t('credentials.batchHint')) + '</p>' +
       '<div class="form-group"><label>' + escapeHtml(t('credentials.label')) + '</label>' +
-      '<textarea id="credJson" class="font-mono" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderID"}]&#10;or&#10;email----password----refreshToken----clientId----clientSecret\'></textarea>' +
+      '<textarea id="credJson" class="font-mono" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderID"}]\'></textarea>' +
       '</div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
@@ -2685,7 +2779,6 @@
   function modalCookie(title, body) {
     title.textContent = t('modal.cookieTitle');
     body.innerHTML =
-      renderApiKeyOwnershipField('pendingApiKeySelect', pendingApiKeyId, true) +
       '<div class="help-block">' +
       '<p><b>' + escapeHtml(t('cookie.howToGet')) + '</b></p>' +
       '<ol class="steps-list">' +
@@ -2709,6 +2802,45 @@
       '</div>';
     $('importCookieBtn').addEventListener('click', importFromCookie);
   }
+  function modalApiKey(title, body) {
+    title.textContent = t('modal.apiKeyTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('apikey.help')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.keysLabel')) + ' <small>' + escapeHtml(t('apikey.keysHint')) + '</small></label>' +
+      '<textarea id="kiroApiKeys" class="font-mono" autocomplete="off" spellcheck="false" placeholder="' + escapeAttr('ksk_...\nksk_...|eu-central-1') + '"></textarea>' +
+      '</div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + ' <small>' + escapeHtml(t('apikey.regionHint')) + '</small></label><input type="text" id="kiroApiKeyRegion" value="us-east-1" autocomplete="off" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importApiKeyBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importApiKeyBtn').addEventListener('click', importKiroApiKeys);
+  }
+  async function importKiroApiKeys() {
+    const keys = $('kiroApiKeys').value.split('\n').map(s => s.trim()).filter(Boolean);
+    if (!keys.length) return toastWarning(t('apikey.keyMissing'));
+    const region = $('kiroApiKeyRegion').value.trim();
+    const btn = $('importApiKeyBtn');
+    btn.disabled = true;
+    let ok = 0;
+    const newIds = [], errs = [];
+    for (const key of keys) {
+      const payload = { kiroApiKey: key, authMethod: 'api_key', region: key.includes('|') ? '' : region };
+      try {
+        const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
+        const d = await res.json();
+        if (d.success) { ok++; if (d.account?.id) newIds.push(d.account.id); }
+        else errs.push(localizedError(d.error));
+      } catch { errs.push(t('common.failed')); }
+    }
+    btn.disabled = false;
+    if (ok === 0) return toastError(t('common.failed') + ': ' + (errs[0] || ''));
+    closeModal(); loadAccounts(); loadStats();
+    let msg = t('sso.importSuccess', ok);
+    if (errs.length) msg += t('sso.importPartial', errs.length);
+    toastPrimary(msg, { duration: 5200 });
+    newIds.forEach(autoRefreshNewAccount);
+  }
   function updateLocalFields() {
     const p = $('localProvider').value;
     $('localClientGroup').classList.toggle('hidden', p === 'Google' || p === 'Github');
@@ -2719,42 +2851,6 @@
     const r = new FileReader();
     r.onload = e => { $(targetId).value = e.target.result; };
     r.readAsText(file);
-  }
-
-  // Import handlers
-  async function importApiKey() {
-    const raw = ($('kiroApiKeyInput') && $('kiroApiKeyInput').value || '').trim();
-    if (!raw) return toastWarning(t('apikey.missing'));
-    let key = raw;
-    let regionFromKey = '';
-    if (raw.includes('|')) {
-      const parts = raw.split('|');
-      key = (parts[0] || '').trim();
-      regionFromKey = (parts[1] || '').trim();
-    }
-    if (!key) return toastWarning(t('apikey.missing'));
-    const region = regionFromKey || ($('kiroApiKeyRegion') && $('kiroApiKeyRegion').value.trim()) || 'us-east-1';
-    const nickname = ($('kiroApiKeyNickname') && $('kiroApiKeyNickname').value.trim()) || '';
-    const apiKeyId = String(pendingApiKeyId || '').trim();
-    const payload = withPendingApiKey({
-      kiroApiKey: key,
-      authMethod: 'api_key',
-      region,
-      nickname
-    }, apiKeyId);
-    try {
-      const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
-      const d = await res.json();
-      if (d.success) {
-        closeModal(); loadAccounts(); loadStats();
-        toastPrimary(t('apikey.importSuccess') + ': ' + (d.account?.email || d.account?.id));
-        autoRefreshNewAccount(d.account?.id);
-      } else {
-        toastError(t('common.failed') + ': ' + (d.error || ''));
-      }
-    } catch (e) {
-      toastError(t('common.failed') + ': ' + (e.message || e));
-    }
   }
   async function importLocalKiro() {
     const provider = $('localProvider').value;
@@ -2771,237 +2867,152 @@
       if (!clientData.clientId || !clientData.clientSecret) return toastWarning(t('local.clientSecretMissing'));
     }
     const authMethod = clientData ? 'idc' : 'social';
-    const apiKeyId = String(pendingApiKeyId || '').trim();
-    const payload = withPendingApiKey({
+    const payload = {
       refreshToken: tokenData.refreshToken,
       accessToken: tokenData.accessToken || '',
       clientId: clientData?.clientId || '',
       clientSecret: clientData?.clientSecret || '',
       region: tokenData.region || '',
       authMethod, provider
-    }, apiKeyId);
+    };
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
     const d = await res.json();
     if (d.success) {
       closeModal(); loadAccounts(); loadStats();
       toastPrimary(t('local.importSuccess') + ': ' + (d.account?.email || d.account?.id));
       autoRefreshNewAccount(d.account?.id);
-    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+    } else toastError(t('common.failed') + ': ' + localizedError(d.error));
   }
   async function importCredentials() {
-    const raw = $('credJson').value.trim();
-    if (!raw) { toastWarning(t('credentials.jsonError')); return; }
-    let items;
-    let skipped = 0;
     try {
-      const json = JSON.parse(raw);
-      const source = json.accounts && Array.isArray(json.accounts)
-        ? json.accounts
-        : (Array.isArray(json) ? json : [json]);
-      items = source.map(normalizeCredentialRecord);
-    } catch {
-      const parsed = parseLineCredentials(raw);
-      items = parsed.items;
-      skipped = parsed.skipped;
-      if (items.length === 0 && skipped === 0) {
-        toastWarning(t('credentials.jsonError'));
-        return;
+      const json = JSON.parse($('credJson').value.trim());
+      let items;
+      if (json.accounts && Array.isArray(json.accounts)) {
+        items = json.accounts.map(a => {
+          const c = a.credentials || {};
+          return {
+            refreshToken: c.refreshToken || a.refreshToken,
+            accessToken: c.accessToken || a.accessToken,
+            kiroApiKey: c.kiroApiKey || a.kiroApiKey,
+            clientId: c.clientId || a.clientId,
+            clientSecret: c.clientSecret || a.clientSecret,
+            region: c.region || a.region,
+            authMethod: c.authMethod || a.authMethod,
+            provider: c.provider || a.provider || a.idp,
+            userId: a.userId,
+            profileArn: a.profileArn,
+            tokenEndpoint: c.tokenEndpoint,
+            issuerUrl: c.issuerUrl,
+            scopes: c.scopes
+          };
+        });
+      } else {
+        items = Array.isArray(json) ? json : [json];
       }
-      if (items.length === 0) {
-        toastWarning(t('credentials.lineParseAllSkipped', skipped));
-        return;
-      }
-    }
-    const selectedApiKeyId = String(pendingApiKeyId || '').trim();
-    let ok = 0, fail = 0, newIds = [];
-    for (const item of items) {
-      const rawMethod = String(item.authMethod || '').trim();
-      const rawProvider = String(item.provider || '').trim();
-      const methodKey = rawMethod.toLowerCase();
-      const providerKey = rawProvider.toLowerCase();
-      const kiroApiKey = String(item.kiroApiKey || '').trim();
-      const targetApiKeyId = selectedApiKeyId || String(item.apiKeyId || '').trim();
-      const isApiKey = Boolean(kiroApiKey) || methodKey === 'api_key' || methodKey === 'apikey' ||
-        (!item.refreshToken && String(item.accessToken || '').trim().startsWith('ksk_'));
-      if (!isApiKey && !item.refreshToken) { fail++; continue; }
-      if (isApiKey) {
-        const payload = withPendingApiKey({
-          id: item.id || '',
-          email: item.email || '',
-          userId: item.userId || '',
-          nickname: item.nickname || '',
-          kiroApiKey: kiroApiKey || item.accessToken || '',
-          authMethod: 'api_key',
-          provider: rawProvider || 'APIKey',
+      let ok = 0, fail = 0, newIds = [];
+      for (const item of items) {
+        const method = String(item.authMethod || '').toLowerCase();
+        const apiKey = item.kiroApiKey || ((method === 'api_key' || method === 'apikey' || String(item.accessToken || '').startsWith('ksk_')) && !item.refreshToken ? item.accessToken : '');
+        if (apiKey) {
+          try {
+            const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify({ kiroApiKey: apiKey, authMethod: 'api_key', region: item.region || '' }) });
+            const d = await res.json();
+            if (d.success) { ok++; if (d.account?.id) newIds.push(d.account.id); }
+            else fail++;
+          } catch { fail++; }
+          continue;
+        }
+        if (!item.refreshToken) { fail++; continue; }
+        //! Entra credentials go through untouched: the server owns alias detection and endpoint recovery.
+        if (isMicrosoftCredential(item)) {
+          const payload = {
+            refreshToken: item.refreshToken, accessToken: item.accessToken || '', clientId: item.clientId || '',
+            authMethod: 'external_idp', provider: 'AzureAD', region: item.region || '',
+            userId: item.userId || '', profileArn: item.profileArn || '',
+            tokenEndpoint: item.tokenEndpoint || '', issuerUrl: item.issuerUrl || '', scopes: item.scopes || ''
+          };
+          try {
+            const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
+            const d = await res.json();
+            if (d.success) { ok++; if (d.account?.id) newIds.push(d.account.id); }
+            else fail++;
+          } catch { fail++; }
+          continue;
+        }
+        let authMethod = item.authMethod || '';
+        if (item.clientId && item.clientSecret) authMethod = 'idc';
+        else if (!authMethod || authMethod === 'social') authMethod = 'social';
+        else authMethod = authMethod.toLowerCase() === 'idc' ? 'idc' : 'social';
+        let provider = item.provider || '';
+        if (!provider && authMethod === 'social') provider = 'Google';
+        if (!provider && authMethod === 'idc') provider = 'BuilderId';
+        const payload = {
+          refreshToken: item.refreshToken,
+          accessToken: item.accessToken || '',
+          clientId: item.clientId || '',
+          clientSecret: item.clientSecret || '',
+          authMethod, provider,
           region: item.region || 'us-east-1'
-        }, targetApiKeyId);
+        };
         try {
           const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
           const d = await res.json();
-          if (d.success) {
-            ok++;
-            if (d.account?.id) {
-              newIds.push(d.account.id);
-            }
-          }
+          if (d.success) { ok++; if (d.account?.id) newIds.push(d.account.id); }
           else fail++;
         } catch { fail++; }
-        continue;
       }
-      const externalAliases = [
-        'external_idp', 'external-idp', 'external', 'microsoft', 'm365', 'office365',
-        'azure', 'azuread', 'azure-ad', 'azure_ad', 'entra', 'entra-id'
-      ];
-      const isExternalIdp = externalAliases.includes(methodKey) ||
-        externalAliases.includes(providerKey) ||
-        Boolean(item.tokenEndpoint || item.issuerUrl);
-      let authMethod;
-      if (isExternalIdp) authMethod = 'external_idp';
-      else if (item.clientId && item.clientSecret) authMethod = 'idc';
-      else if (methodKey === 'idc') authMethod = 'idc';
-      else if (methodKey === 'social' || methodKey === 'google' || methodKey === 'github') authMethod = 'social';
-      else authMethod = methodKey ? 'social' : '';
-      let provider = isExternalIdp ? 'AzureAD' : rawProvider;
-      if (!provider && authMethod === 'social') provider = 'Google';
-      if (!provider && authMethod === 'idc') provider = 'BuilderId';
-      const payload = withPendingApiKey({
-        id: item.id || '',
-        email: item.email || '',
-        userId: item.userId || '',
-        nickname: item.nickname || '',
-        profileArn: item.profileArn || '',
-        refreshToken: item.refreshToken,
-        accessToken: item.accessToken || '',
-        clientId: item.clientId || '',
-        clientSecret: item.clientSecret || '',
-        authMethod, provider,
-        region: item.region || (isExternalIdp ? '' : 'us-east-1'),
-        tokenEndpoint: item.tokenEndpoint || '',
-        issuerUrl: item.issuerUrl || '',
-        scopes: item.scopes || ''
-      }, targetApiKeyId);
-      try {
-        const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
-        const d = await res.json();
-        if (d.success) {
-          ok++;
-          if (d.account?.id) {
-            newIds.push(d.account.id);
-          }
-        }
-        else fail++;
-      } catch { fail++; }
+      closeModal(); loadAccounts(); loadStats();
+      let msg = t('sso.importSuccess', ok);
+      if (fail > 0) msg += t('sso.importPartial', fail);
+      toastPrimary(msg, { duration: 5200 });
+      newIds.forEach(autoRefreshNewAccount);
+    } catch (e) {
+      toastWarning(t('credentials.parseError'));
     }
-    closeModal(); loadAccounts(); loadStats();
-    let msg = t('sso.importSuccess', ok);
-    if (fail > 0) msg += t('sso.importPartial', fail);
-    if (skipped > 0) msg += t('credentials.lineParseSkipped', skipped);
-    toastPrimary(msg, { duration: 5200 });
-    newIds.forEach(autoRefreshNewAccount);
   }
-  function normalizeCredentialRecord(record) {
-    const source = record && typeof record === 'object' ? record : {};
-    const credentials = source.credentials && typeof source.credentials === 'object'
-      ? source.credentials
-      : {};
-    const value = key => {
-      const nested = credentials[key];
-      // Export formats differ: ownership may live on the account object or
-      // inside credentials. Prefer a populated nested value, then fall back
-      // to the top-level field so bindings survive round trips.
-      if (nested !== undefined && nested !== null && nested !== '') return nested;
-      return source[key];
-    };
-    return {
-      id: value('id'),
-      apiKeyId: value('apiKeyId'),
-      email: value('email'),
-      userId: value('userId'),
-      nickname: value('nickname'),
-      profileArn: value('profileArn'),
-      accessToken: value('accessToken'),
-      refreshToken: value('refreshToken'),
-      kiroApiKey: value('kiroApiKey'),
-      clientId: value('clientId'),
-      clientSecret: value('clientSecret'),
-      authMethod: value('authMethod'),
-      provider: value('provider') || source.idp,
-      region: value('region'),
-      tokenEndpoint: value('tokenEndpoint'),
-      issuerUrl: value('issuerUrl'),
-      scopes: value('scopes')
-    };
-  }
-  function parseLineCredentials(text) {
-    const items = [];
-    let skipped = 0;
-    for (const line of text.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let parts;
-      if (trimmed.includes('----')) {
-        parts = trimmed.split('----').map(s => s.trim());
-      } else if (trimmed.includes('\t')) {
-        parts = trimmed.split(/\t+/).map(s => s.trim());
-      } else {
-        parts = trimmed.split(/\s+/).map(s => s.trim());
-      }
-      if (parts.length < 5) { skipped++; continue; }
-      const refreshToken = parts[2];
-      if (!refreshToken) { skipped++; continue; }
-      items.push({
-        refreshToken,
-        clientId: parts[3],
-        clientSecret: parts[4],
-      });
-    }
-    return { items, skipped };
+  function isMicrosoftCredential(item) {
+    const aliases = ['external_idp', 'external-idp', 'external', 'microsoft', 'm365', 'office365', 'azure', 'azuread', 'azure-ad', 'azure_ad', 'entra', 'entra-id'];
+    return aliases.includes(String(item.authMethod || '').toLowerCase()) ||
+      aliases.includes(String(item.provider || '').toLowerCase()) ||
+      Boolean(item.tokenEndpoint || item.issuerUrl);
   }
   async function importFromCookie() {
     const refreshToken = $('cookieRefreshToken').value.trim();
     if (!refreshToken) return toastWarning(t('cookie.refreshTokenMissing'));
     const provider = $('cookieProvider').value;
-    const apiKeyId = String(pendingApiKeyId || '').trim();
-    const payload = withPendingApiKey({ refreshToken, accessToken: '', clientId: '', clientSecret: '', authMethod: 'social', provider }, apiKeyId);
+    const payload = { refreshToken, accessToken: '', clientId: '', clientSecret: '', authMethod: 'social', provider };
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
     const d = await res.json();
     if (d.success) {
       closeModal(); loadAccounts(); loadStats();
       toastPrimary(t('cookie.importSuccess') + ': ' + (d.account?.email || d.account?.id));
       autoRefreshNewAccount(d.account?.id);
-    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+    } else toastError(t('common.failed') + ': ' + localizedError(d.error));
   }
   async function importSsoToken() {
-    const apiKeyId = String(pendingApiKeyId || '').trim();
     const res = await api('/auth/sso-token', {
       method: 'POST', body: JSON.stringify({
         bearerToken: $('ssoToken').value,
-        region: $('ssoRegion').value,
-        apiKeyId
+        region: $('ssoRegion').value
       })
     });
     const d = await res.json();
     if (d.success) {
+      closeModal(); loadAccounts(); loadStats();
       const count = d.accounts?.length || 0;
       const errs = d.errors?.length || 0;
-      closeModal(); loadAccounts(); loadStats();
       let msg = t('sso.importSuccess', count);
       if (errs > 0) msg += t('sso.importPartial', errs);
       toastPrimary(msg, { duration: 5200 });
       if (d.accounts) d.accounts.forEach(a => autoRefreshNewAccount(a.id));
-    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+    } else toastError(t('common.failed') + ': ' + localizedError(d.error));
   }
   async function startBuilderIdLogin() {
     const region = $('builderIdRegion').value || 'us-east-1';
-    builderIdApiKeyId = String(pendingApiKeyId || '').trim();
-    const res = await api('/auth/builderid/start', {
-      method: 'POST',
-      body: JSON.stringify(withPendingApiKey({ region }, builderIdApiKeyId))
-    });
+    const res = await api('/auth/builderid/start', { method: 'POST', body: JSON.stringify({ region }) });
     const d = await res.json();
     if (d.sessionId) {
       builderIdSession = d.sessionId;
-      if (d.apiKeyId !== undefined) builderIdApiKeyId = String(d.apiKeyId || '').trim();
       $('builderIdUserCode').textContent = d.userCode;
       $('builderIdVerifyUrl').textContent = d.verificationUri;
       $('builderIdStep1').classList.add('hidden');
@@ -3013,14 +3024,11 @@
       });
       $('builderIdCancelBtn').addEventListener('click', cancelBuilderIdLogin);
       pollBuilderIdAuth(d.interval || 5);
-    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+    } else toastError(t('common.failed') + ': ' + localizedError(d.error));
   }
   function pollBuilderIdAuth(interval) {
     builderIdPollTimer = setTimeout(async () => {
-      const res = await api('/auth/builderid/poll', {
-        method: 'POST',
-        body: JSON.stringify(withPendingApiKey({ sessionId: builderIdSession }, builderIdApiKeyId))
-      });
+      const res = await api('/auth/builderid/poll', { method: 'POST', body: JSON.stringify({ sessionId: builderIdSession }) });
       const d = await res.json();
       if (d.completed) {
         closeModal(); loadAccounts(); loadStats();
@@ -3030,7 +3038,7 @@
         $('builderIdStatus').textContent = t('builderid.waiting');
         pollBuilderIdAuth(d.interval || interval);
       } else {
-        toastError(t('common.failed') + ': ' + (d.error || ''));
+        toastError(t('common.failed') + ': ' + localizedError(d.error));
         cancelBuilderIdLogin();
       }
     }, interval * 1000);
@@ -3038,17 +3046,13 @@
   function cancelBuilderIdLogin() {
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
-    builderIdApiKeyId = '';
     showModal('add');
   }
   async function startIamSso() {
     if (iamSession) {
-      const apiKeyId = String(iamApiKeyId || '').trim();
       const res = await api('/auth/iam-sso/complete', {
         method: 'POST', body: JSON.stringify({
-          sessionId: iamSession,
-          callbackUrl: $('iamCallback').value,
-          apiKeyId
+          sessionId: iamSession, callbackUrl: $('iamCallback').value
         })
       });
       const d = await res.json();
@@ -3056,19 +3060,16 @@
         closeModal(); loadAccounts(); loadStats();
         toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
         autoRefreshNewAccount(d.account?.id);
-      } else toastError(t('common.failed') + ': ' + (d.error || ''));
+      } else toastError(t('common.failed') + ': ' + localizedError(d.error));
     } else {
-      iamApiKeyId = String(pendingApiKeyId || '').trim();
       const res = await api('/auth/iam-sso/start', {
         method: 'POST', body: JSON.stringify({
-          startUrl: $('iamStartUrl').value, region: $('iamRegion').value,
-          apiKeyId: iamApiKeyId
+          startUrl: $('iamStartUrl').value, region: $('iamRegion').value
         })
       });
       const d = await res.json();
       if (d.authorizeUrl) {
         iamSession = d.sessionId;
-        if (d.apiKeyId !== undefined) iamApiKeyId = String(d.apiKeyId || '').trim();
         $('iamAuthUrl').textContent = d.authorizeUrl;
         $('iamStep2').classList.remove('hidden');
         $('iamBtn').textContent = t('iam.complete');
@@ -3077,204 +3078,14 @@
           await copyText($('iamAuthUrl').textContent);
           toast(t('common.copied'), 'primary');
         });
-      } else toastError(t('common.failed') + ': ' + (d.error || ''));
+      } else toastError(t('common.failed') + ': ' + localizedError(d.error));
     }
-  }
-  function cancelMicrosoftServerSession(sessionId, selectionId) {
-    if (!sessionId && !selectionId) return;
-    api('/auth/microsoft-sso/cancel', {
-      method: 'POST',
-      body: JSON.stringify({
-        sessionId: sessionId || '',
-        selectionId: selectionId || ''
-      })
-    }).catch(() => {});
-  }
-  function resetMicrosoftFlow(notifyServer) {
-    const sessionId = microsoftSession;
-    const selectionId = microsoftSelectionId;
-    microsoftGeneration++;
-    microsoftSession = '';
-    microsoftSelectionId = '';
-    microsoftApiKeyId = '';
-    microsoftStage = 'kiro';
-    microsoftAuthorizeUrl = '';
-    microsoftProfiles = [];
-    microsoftSelectedProfileArn = '';
-    microsoftBusy = false;
-    if (notifyServer) cancelMicrosoftServerSession(sessionId, selectionId);
-  }
-  function syncMicrosoftBusyUI() {
-    const loginAction = $('microsoftBtn');
-    if (loginAction) {
-      loginAction.disabled = microsoftBusy;
-      loginAction.textContent = microsoftBusy
-        ? t('microsoft.processing')
-        : (microsoftAuthorizeUrl ? t('microsoft.complete') : t('microsoft.start'));
-    }
-    const profileAction = $('microsoftSelectProfileBtn');
-    if (profileAction) {
-      profileAction.disabled = microsoftBusy;
-      profileAction.textContent = microsoftBusy ? t('microsoft.processing') : t('microsoft.selectProfile');
-    }
-    qsa('[data-microsoft-back]', $('modalBody')).forEach(button => {
-      button.disabled = microsoftBusy;
-    });
-  }
-  async function startMicrosoftLogin() {
-    if (microsoftBusy) return;
-    microsoftBusy = true;
-    syncMicrosoftBusyUI();
-    const generation = microsoftGeneration;
-    microsoftApiKeyId = String(pendingApiKeyId || '').trim();
-    try {
-      const res = await api('/auth/microsoft-sso/start', {
-        method: 'POST',
-        body: JSON.stringify(withPendingApiKey({}, microsoftApiKeyId))
-      });
-      const d = await res.json().catch(() => ({}));
-      if (generation !== microsoftGeneration) {
-        cancelMicrosoftServerSession(d.sessionId || '', d.selectionId || '');
-        return;
-      }
-      if (!res.ok || !d.sessionId || !d.authorizeUrl) {
-        toastError(t('common.failed') + ': ' + (d.error || res.statusText || ''));
-        return;
-      }
-      microsoftSession = d.sessionId;
-      if (d.apiKeyId !== undefined) microsoftApiKeyId = String(d.apiKeyId || '').trim();
-      microsoftAuthorizeUrl = d.authorizeUrl;
-      microsoftStage = 'kiro';
-      microsoftBusy = false;
-      renderMicrosoftModal();
-    } catch (e) {
-      if (generation === microsoftGeneration) {
-        toastError(t('common.failed') + ': ' + (e.message || ''));
-      }
-    } finally {
-      if (generation === microsoftGeneration && microsoftBusy) {
-        microsoftBusy = false;
-        syncMicrosoftBusyUI();
-      }
-    }
-  }
-  async function completeMicrosoftLogin() {
-    if (microsoftBusy) return;
-    const callback = ($('microsoftCallback')?.value || '').trim();
-    if (!callback) {
-      toastWarning(t('microsoft.callbackRequired'));
-      $('microsoftCallback')?.focus();
-      return;
-    }
-    microsoftBusy = true;
-    syncMicrosoftBusyUI();
-    const generation = microsoftGeneration;
-    const sessionId = microsoftSession;
-    const apiKeyId = String(microsoftApiKeyId || '').trim();
-    try {
-      const res = await api('/auth/microsoft-sso/complete', {
-        method: 'POST',
-        body: JSON.stringify({
-          sessionId: microsoftSession,
-          callbackUrl: callback,
-          apiKeyId
-        })
-      });
-      const d = await res.json().catch(() => ({}));
-      if (generation !== microsoftGeneration) {
-        cancelMicrosoftServerSession(sessionId, d.selectionId || '');
-        return;
-      }
-      if (!res.ok || d.error) {
-        toastError(t('common.failed') + ': ' + (d.error || res.statusText || ''));
-        return;
-      }
-      if (d.requiresProfileSelection && d.selectionId && Array.isArray(d.profiles) && d.profiles.length) {
-        microsoftSelectionId = d.selectionId;
-        microsoftProfiles = d.profiles;
-        microsoftSelectedProfileArn = String(d.profiles[0]?.arn || '');
-        microsoftBusy = false;
-        renderMicrosoftModal();
-        return;
-      }
-      if (d.account) {
-        await finishMicrosoftLogin(d.account, d.warning);
-        return;
-      }
-      if (d.stage === 'microsoft' && d.authorizeUrl) {
-        microsoftStage = 'microsoft';
-        microsoftAuthorizeUrl = d.authorizeUrl;
-        microsoftBusy = false;
-        renderMicrosoftModal();
-        return;
-      }
-      toastError(t('common.failed') + ': ' + (d.error || t('microsoft.invalidResponse')));
-    } catch (e) {
-      if (generation === microsoftGeneration) {
-        toastError(t('common.failed') + ': ' + (e.message || ''));
-      }
-    } finally {
-      if (generation === microsoftGeneration && microsoftBusy) {
-        microsoftBusy = false;
-        syncMicrosoftBusyUI();
-      }
-    }
-  }
-  async function selectMicrosoftProfile() {
-    if (microsoftBusy) return;
-    const selected = qsa('input[name="microsoftProfile"]:checked', $('modalBody'))[0];
-    const profileArn = (selected?.value || microsoftSelectedProfileArn || '').trim();
-    if (!profileArn) {
-      toastWarning(t('microsoft.profileRequired'));
-      return;
-    }
-    microsoftBusy = true;
-    syncMicrosoftBusyUI();
-    const generation = microsoftGeneration;
-    const apiKeyId = String(microsoftApiKeyId || '').trim();
-    try {
-      const res = await api('/auth/microsoft-sso/select-profile', {
-        method: 'POST',
-        body: JSON.stringify({
-          selectionId: microsoftSelectionId,
-          profileArn,
-          apiKeyId
-        })
-      });
-      const d = await res.json().catch(() => ({}));
-      if (generation !== microsoftGeneration) return;
-      if (!res.ok || !d.account) {
-        toastError(t('common.failed') + ': ' + (d.error || res.statusText || ''));
-        return;
-      }
-      await finishMicrosoftLogin(d.account, d.warning);
-    } catch (e) {
-      if (generation === microsoftGeneration) {
-        toastError(t('common.failed') + ': ' + (e.message || ''));
-      }
-    } finally {
-      if (generation === microsoftGeneration && microsoftBusy) {
-        microsoftBusy = false;
-        syncMicrosoftBusyUI();
-      }
-    }
-  }
-  async function finishMicrosoftLogin(account, warning) {
-    resetMicrosoftFlow(false);
-    closeModal();
-    loadAccounts();
-    loadStats();
-    toastPrimary(t('microsoft.success') + ': ' + (account?.email || account?.id || ''));
-    if (warning) toastWarning(String(warning));
-    autoRefreshNewAccount(account?.id);
   }
   async function autoRefreshNewAccount(id) {
     if (!id) return;
     try { await api('/accounts/' + id + '/refresh', { method: 'POST' }); } catch (e) { }
-    await Promise.all([loadAccounts(), loadApiKeys()]);
+    loadAccounts();
   }
-
-  // Export modal
   function showExportModal() {
     if (!accountsData.length) return toastWarning(t('accounts.empty'));
     exportSelectedIds = new Set(accountsData.map(a => a.id));
@@ -3330,7 +3141,7 @@
     const res = await api('/export', { method: 'POST', body: JSON.stringify({ ids: Array.from(exportSelectedIds) }) });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      toastError(t('common.failed') + ': ' + (err.error || t('common.unknownError')));
+      toastError(t('common.failed') + ': ' + (localizedError(err.error) || t('common.unknownError')));
       return null;
     }
     return res.json();
@@ -3345,7 +3156,11 @@
     if (exportSelectedIds.size === 0) { toastWarning(t('export.noSelection')); return; }
     const jsonPromise = getExportData().then(data => {
       if (!data) throw new Error('no-data');
-      const filtered = (data.accounts || []).map(credentialImportPayloadFromExportAccount);
+      const filtered = (data.accounts || []).map(a => {
+        const { clientId, clientSecret, accessToken, refreshToken, authMethod, region } = a.credentials || {};
+        if (authMethod === 'api_key') return { kiroApiKey: accessToken, region, authMethod };
+        return { clientId, clientSecret, accessToken, refreshToken };
+      });
       return JSON.stringify(filtered, null, 2);
     });
     try {
@@ -3366,8 +3181,6 @@
     a.click();
     URL.revokeObjectURL(url);
   }
-
-  // Version and update
   function renderVersionBadge() {
     const badge = $('versionBadge');
     if (badge && currentVersion) badge.textContent = currentVersion.replace(/^v/i, '');
@@ -3407,7 +3220,7 @@
       if (!currentVersion) await loadVersion();
       const current = currentVersion.replace(/^v/i, '');
       if (!current) throw new Error('Current version missing');
-      const res = await fetch('https://raw.githubusercontent.com/Quorinex/Kiro-Go/main/version.json?t=' + Date.now());
+      const res = await fetch('https://raw.githubusercontent.com/tanu360/kiro-reverse-api/main/version.json?t=' + Date.now());
       if (!res.ok) throw new Error('Fetch failed');
       const d = await res.json();
       const latest = (d.version || '').replace(/^v/i, '');
@@ -3485,19 +3298,17 @@
     openDialog('updateModal');
   }
   function closeUpdateModal() { closeDialog('updateModal'); }
-
-  // Tabs
   function switchTab(tab) {
+    currentTab = tab;
     qsa('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     qsa('.tab-content').forEach(c => c.classList.add('hidden'));
     $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
-    if (tab === 'logs') loadLogs();
+    if (tab === 'observe') loadObserve();
+    else if (tab === 'requests') loadRequests();
+    else if (tab === 'backups') loadBackups();
   }
-
-  // Event wiring
   function bindLoginEvents() {
-    $('loginBtn').addEventListener('click', login);
-    $('pwdField').addEventListener('keypress', e => { if (e.key === 'Enter') login(); });
+    $('loginForm').addEventListener('submit', e => { e.preventDefault(); login(); });
 
     const pwdToggle = $('pwdToggle');
     if (pwdToggle) {
@@ -3545,25 +3356,6 @@
         toast(t('common.failed'), 'error');
       }
     }));
-
-    // API View buttons
-    $('viewModelsBtn').addEventListener('click', showModelsView);
-    $('viewStatsBtn').addEventListener('click', showStatsView);
-    $('apiViewModalClose').addEventListener('click', closeApiViewModal);
-    bindDialogBackdropClose('apiViewModal', closeApiViewModal);
-
-    // Logs tab
-    const logsRefreshBtn = $('logsRefreshBtn');
-    if (logsRefreshBtn) logsRefreshBtn.addEventListener('click', loadLogs);
-    const logsClearBtn = $('logsClearBtn');
-    if (logsClearBtn) logsClearBtn.addEventListener('click', clearLogs);
-    const logsAuto = $('logsAutoRefresh');
-    if (logsAuto) logsAuto.addEventListener('change', toggleLogsAutoRefresh);
-    const logsFilterSel = $('logsFilterSelect');
-    if (logsFilterSel) logsFilterSel.addEventListener('change', e => {
-      logsFilter = e.target.value;
-      loadLogs();
-    });
   }
 
   function bindAccountEvents() {
@@ -3571,21 +3363,19 @@
       privacyModeEnabled = e.target.checked;
       localStorage.setItem('privacyMode', privacyModeEnabled);
       renderAccounts();
+      renderObserveCached();
+      renderRequestsCached();
+      renderBackupsCached();
     });
 
     $('exportBtn').addEventListener('click', showExportModal);
     $('refreshAllModelsBtn').addEventListener('click', refreshAllModels);
-    $('addAccountBtn').addEventListener('click', () => {
-      clearPendingApiKey();
-      showModal('add');
-      loadApiKeys();
-    });
+    $('addAccountBtn').addEventListener('click', () => showModal('add'));
 
     $('selectAllCheckbox').addEventListener('change', e => toggleSelectAll(e.target.checked));
     qsa('[data-batch]').forEach(b => b.addEventListener('click', () => {
       const a = b.dataset.batch;
       if (a === 'refreshModels') batchRefreshModels();
-      else if (a === 'delete') batchDelete();
       else batchAction(a);
     }));
 
@@ -3614,20 +3404,85 @@
   }
 
   function bindSettingsEvents() {
-    $('saveRequireApiKeyBtn').addEventListener('click', saveRequireApiKey);
-    $('savePromptCacheBtn').addEventListener('click', savePromptCacheSettings);
-    $('promptCacheMode').addEventListener('change', onPromptCacheModeChange);
-    $('promptCacheRatio').addEventListener('input', () => {
-      if ($('promptCacheMode').value === 'uniform') renderPromptCacheSettings();
+    $('requireApiKey').addEventListener('change', syncApiKeyManagementVisibility);
+    $('saveApiSettingsBtn').addEventListener('click', saveApiSettings);
+    $('refreshApiKeysBtn').addEventListener('click', loadApiKeys);
+    $('createApiKeyBtn').addEventListener('click', createApiKey);
+    $('cancelApiKeyEditBtn').addEventListener('click', clearApiKeyEditor);
+    $('copyCreatedApiKeyBtn').addEventListener('click', async () => {
+      await copyText($('createdApiKeyValue').textContent || '');
+      toast(t('common.copied'), 'primary');
+    });
+    $('apiKeysList').addEventListener('click', e => {
+      const btn = e.target.closest('[data-api-key-action]');
+      if (!btn) return;
+      const id = btn.dataset.id;
+      const action = btn.dataset.apiKeyAction;
+      if (action === 'copy') {
+        copyApiKey(id).catch(e => toast((e && e.message) || t('common.failed'), 'error'));
+      } else if (action === 'edit') beginEditApiKey(id);
+      else if (action === 'toggle') toggleApiKey(id, btn.dataset.enabled === 'true');
+      else if (action === 'reset') resetApiKeyUsage(id);
+      else if (action === 'delete') deleteApiKey(id);
     });
     $('saveOverUsageBtn').addEventListener('click', saveOverUsageConfig);
+    $('saveStreamIntegrityBtn').addEventListener('click', saveStreamIntegrityConfig);
+    $('saveRoutingBtn').addEventListener('click', saveRoutingConfig);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);
     $('saveEndpointBtn').addEventListener('click', saveEndpointConfig);
     $('changePasswordBtn').addEventListener('click', changePassword);
     $('proxyType').addEventListener('change', onProxyTypeChange);
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
     $('resetStatsBtn').addEventListener('click', resetStats);
-    bindApiKeyEvents();
+  }
+
+  function bindFeatureEvents() {
+    $('refreshObserveBtn').addEventListener('click', loadObserve);
+    $('observeErrors').addEventListener('click', e => {
+      if (e.target.closest('[data-observe-view-requests]')) switchTab('requests');
+    });
+    $('refreshRequestsBtn').addEventListener('click', loadRequests);
+    $('requestSearchInput').addEventListener('input', queueRequestsSearch);
+    $('requestStatusFilter').addEventListener('change', e => {
+      requestsQuery.status = e.target.value;
+      requestsQuery.page = 1;
+      loadRequests();
+    });
+    $('requestPageSize').addEventListener('change', e => {
+      requestsQuery.pageSize = parseInt(e.target.value, 10) || 25;
+      requestsQuery.page = 1;
+      loadRequests();
+    });
+    $('requestsPrevBtn').addEventListener('click', () => {
+      if (requestsQuery.page <= 1) return;
+      requestsQuery.page--;
+      loadRequests();
+    });
+    $('requestsNextBtn').addEventListener('click', () => {
+      requestsQuery.page++;
+      loadRequests();
+    });
+    $('requestsTable').addEventListener('click', e => {
+      const btn = e.target.closest('[data-request-sort]');
+      if (btn) setRequestSort(btn.dataset.requestSort);
+    });
+    $('refreshBackupsBtn').addEventListener('click', loadBackups);
+    $('createBackupBtn').addEventListener('click', createBackup);
+    $('saveBackupScheduleBtn').addEventListener('click', saveBackupSchedule);
+    $('uploadBackupBtn').addEventListener('click', () => $('backupUploadInput').click());
+    $('backupUploadInput').addEventListener('change', e => {
+      uploadBackupFile(e.target.files && e.target.files[0]);
+      e.target.value = '';
+    });
+    $('backupsTable').addEventListener('click', e => {
+      const dl = e.target.closest('[data-backup-download]');
+      const restore = e.target.closest('[data-backup-restore]');
+      const del = e.target.closest('[data-backup-delete]');
+      if (dl) downloadBackup(dl.dataset.backupDownload);
+      else if (restore) restoreBackup(restore.dataset.backupRestore);
+      else if (del) deleteBackup(del.dataset.backupDelete);
+    });
+
   }
 
   function bindPromptFilterEvents() {
@@ -3652,6 +3507,89 @@
     });
   }
 
+  function bindModelMappingEvents() {
+    $('addModelMappingBtn').addEventListener('click', addModelMapping);
+    $('resetModelMappingsBtn').addEventListener('click', resetModelMappingsToDefaults);
+    $('saveModelMappingsBtn').addEventListener('click', saveModelMappings);
+
+    $('modelMappings').addEventListener('input', e => {
+      const idx = e.target.dataset.modelMappingIdx;
+      const field = e.target.dataset.modelMappingField;
+      if (idx != null && field && modelMappings[idx]) {
+        modelMappings[idx][field] = e.target.value;
+      }
+    });
+    $('modelMappings').addEventListener('click', e => {
+      const rm = e.target.closest('[data-model-mapping-remove]');
+      if (rm) {
+        modelMappings.splice(parseInt(rm.dataset.modelMappingRemove, 10), 1);
+        renderModelMappings();
+      }
+    });
+    $('modelMappings').addEventListener('dragstart', e => {
+      const handle = e.target.closest('[data-model-mapping-handle]');
+      if (!handle) return;
+      const row = handle.closest('[data-model-mapping-row]');
+      draggedModelMappingIndex = parseInt(handle.dataset.modelMappingHandle, 10);
+      modelMappingDropIndex = draggedModelMappingIndex;
+      if (e.dataTransfer) {
+        if (row) {
+          const dragImage = row.cloneNode(true);
+          dragImage.classList.add('model-mapping-drag-image');
+          dragImage.style.width = row.offsetWidth + 'px';
+          document.body.appendChild(dragImage);
+          e.dataTransfer.setDragImage(dragImage, 24, Math.max(18, row.offsetHeight / 2));
+          setTimeout(() => dragImage.remove(), 0);
+        }
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', String(draggedModelMappingIndex));
+      }
+      if (row) row.classList.add('dragging');
+      $('modelMappings').classList.add('drag-active');
+    });
+    $('modelMappings').addEventListener('dragover', e => {
+      const row = e.target.closest('[data-model-mapping-row]');
+      if (!row || draggedModelMappingIndex == null) return;
+      e.preventDefault();
+      const rowIndex = parseInt(row.dataset.modelMappingRow, 10);
+      const rect = row.getBoundingClientRect();
+      const placeAfter = e.clientY > rect.top + rect.height / 2;
+      modelMappingDropIndex = placeAfter ? rowIndex + 1 : rowIndex;
+      clearModelMappingDropState();
+      row.classList.add('drag-over', placeAfter ? 'drop-after' : 'drop-before');
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    });
+    $('modelMappings').addEventListener('dragleave', e => {
+      const row = e.target.closest('[data-model-mapping-row]');
+      if (row && !row.contains(e.relatedTarget)) row.classList.remove('drag-over', 'drop-before', 'drop-after');
+    });
+    $('modelMappings').addEventListener('drop', e => {
+      const row = e.target.closest('[data-model-mapping-row]');
+      if (!row || draggedModelMappingIndex == null) return;
+      e.preventDefault();
+      let insertIndex = modelMappingDropIndex == null ? parseInt(row.dataset.modelMappingRow, 10) : modelMappingDropIndex;
+      if (insertIndex !== draggedModelMappingIndex && insertIndex !== draggedModelMappingIndex + 1) {
+        const item = modelMappings.splice(draggedModelMappingIndex, 1)[0];
+        if (insertIndex > draggedModelMappingIndex) insertIndex--;
+        insertIndex = Math.max(0, Math.min(insertIndex, modelMappings.length));
+        modelMappings.splice(insertIndex, 0, item);
+        renderModelMappings();
+        markModelMappingDropped(insertIndex);
+      } else {
+        clearModelMappingDropState();
+      }
+      draggedModelMappingIndex = null;
+      modelMappingDropIndex = null;
+      $('modelMappings').classList.remove('drag-active');
+    });
+    $('modelMappings').addEventListener('dragend', () => {
+      draggedModelMappingIndex = null;
+      modelMappingDropIndex = null;
+      $('modelMappings').classList.remove('drag-active');
+      qsa('.model-mapping-row', $('modelMappings')).forEach(row => row.classList.remove('dragging', 'drag-over', 'drop-before', 'drop-after'));
+    });
+  }
+
   function bindModalEvents() {
     $('addModalClose').addEventListener('click', closeModal);
     $('detailModalClose').addEventListener('click', closeDetailModal);
@@ -3670,25 +3608,10 @@
     $('modalBody').addEventListener('click', e => {
       const m = e.target.closest('[data-method]');
       if (m) { showModal(m.dataset.method); return; }
-      const microsoftBack = e.target.closest('[data-microsoft-back]');
-      if (microsoftBack) {
-        resetMicrosoftFlow(true);
-        showModal('add');
-        return;
-      }
+      if (e.target.closest('[data-microsoft-back]')) { resetMicrosoftFlow(true); showModal('add'); return; }
       const g = e.target.closest('[data-modal-goto]');
       if (g) { showModal(g.dataset.modalGoto); return; }
       if (e.target.dataset.closeAdd) closeModal();
-    });
-    $('modalBody').addEventListener('change', e => {
-      if (e.target.id === 'pendingApiKeySelect') {
-        pendingApiKeyId = String(e.target.value || '').trim();
-        // Once an async flow has started, keep its ownership selection in the
-        // flow snapshot as the modal is re-rendered between steps.
-        if (builderIdSession) builderIdApiKeyId = pendingApiKeyId;
-        if (iamSession) iamApiKeyId = pendingApiKeyId;
-        if (microsoftSession || microsoftSelectionId) microsoftApiKeyId = pendingApiKeyId;
-      }
     });
   }
 
@@ -3701,12 +3624,15 @@
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
       else if (a === 'saveWeight') saveWeight(id);
-      else if (a === 'saveApiKey') saveAccountApiKey(id);
-      else if (a === 'toggleOverage') toggleOverageSwitch(id, b);
-      else if (a === 'refreshOverage') refreshAccountOverage(id);
+      else if (a === 'refreshOverage') refreshOverage(id);
       else if (a === 'saveProxyURL') saveProxyURL(id);
       else if (a === 'loadModels') loadModels(id);
       else if (a === 'refreshModels') refreshAccountModels(id);
+    });
+    $('detailBody').addEventListener('change', e => {
+      if (e.target && e.target.id === 'overageSwitchInput') {
+        setAccountOverage(e.target.dataset.id, e.target.checked);
+      }
     });
   }
 
@@ -3727,234 +3653,22 @@
     });
   }
 
-  // ── API View Modal ──
-  function closeApiViewModal() {
-    closeDialog('apiViewModal');
-  }
-
-  function formatUptime(seconds) {
-    const d = Math.floor(seconds / 86400);
-    const h = Math.floor((seconds % 86400) / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    const parts = [];
-    if (d > 0) parts.push(d + (currentLang === 'zh' ? '天' : 'd'));
-    if (h > 0) parts.push(h + (currentLang === 'zh' ? '时' : 'h'));
-    if (m > 0) parts.push(m + (currentLang === 'zh' ? '分' : 'm'));
-    parts.push(s + (currentLang === 'zh' ? '秒' : 's'));
-    return parts.join(' ');
-  }
-
-  async function showModelsView() {
-    const title = $('apiViewTitle');
-    const body = $('apiViewBody');
-    title.textContent = t('api.viewModelsTitle');
-    body.innerHTML = '<div class="api-view-loading"><i class="fa-solid fa-spinner fa-spin"></i> ' + escapeHtml(t('api.loading')) + '</div>';
-    openDialog('apiViewModal');
-
-    try {
-      const res = await fetch(baseUrl + '/v1/models');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      const models = data.data || [];
-      renderModelsView(body, models);
-    } catch (e) {
-      body.innerHTML = '<div class="api-view-error"><i class="fa-solid fa-circle-exclamation"></i> ' + escapeHtml(t('api.fetchError') + ': ' + e.message) + '</div>';
-    }
-  }
-
-  function renderModelsView(container, models) {
-    const thinkingSuffix = '-thinking';
-    let html = '<div class="api-view-toolbar">';
-    html += '<span class="api-view-count">' + escapeHtml(t('api.totalModels').replace('{count}', models.length)) + '</span>';
-    html += '<input type="text" class="api-view-search" id="modelsSearchInput" placeholder="' + escapeAttr(t('api.searchModels')) + '" />';
-    html += '</div>';
-    html += '<div id="modelsGridContainer">';
-    html += buildModelsGroupedHtml(models, thinkingSuffix);
-    html += '</div>';
-    container.innerHTML = html;
-
-    const searchInput = $('modelsSearchInput');
-    if (searchInput) {
-      searchInput.addEventListener('input', () => {
-        const kw = searchInput.value.toLowerCase().trim();
-        const filtered = kw ? models.filter(m => (m.id || '').toLowerCase().includes(kw) || (m.owned_by || '').toLowerCase().includes(kw)) : models;
-        $('modelsGridContainer').innerHTML = buildModelsGroupedHtml(filtered, thinkingSuffix);
-      });
-    }
-  }
-
-  // SVG icons for model providers (inline style forces size over Tailwind preflight)
-  const _svgStyle = 'style="width:1.375rem;height:1.375rem;max-width:1.375rem;max-height:1.375rem;flex:none;display:block"';
-  const MODEL_SVGS = {
-    claude: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"/></svg>',
-    openai: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M9.205 8.658v-2.26c0-.19.072-.333.238-.428l4.543-2.616c.619-.357 1.356-.523 2.117-.523 2.854 0 4.662 2.212 4.662 4.566 0 .167 0 .357-.024.547l-4.71-2.759a.797.797 0 00-.856 0l-5.97 3.473zm10.609 8.8V12.06c0-.333-.143-.57-.429-.737l-5.97-3.473 1.95-1.118a.433.433 0 01.476 0l4.543 2.617c1.309.76 2.189 2.378 2.189 3.948 0 1.808-1.07 3.473-2.76 4.163zM7.802 12.703l-1.95-1.142c-.167-.095-.239-.238-.239-.428V5.899c0-2.545 1.95-4.472 4.591-4.472 1 0 1.927.333 2.712.928L8.23 5.067c-.285.166-.428.404-.428.737v6.898zM12 15.128l-2.795-1.57v-3.33L12 8.658l2.795 1.57v3.33L12 15.128zm1.796 7.23c-1 0-1.927-.332-2.712-.927l4.686-2.712c.285-.166.428-.404.428-.737v-6.898l1.974 1.142c.167.095.238.238.238.428v5.233c0 2.545-1.974 4.472-4.614 4.472zm-5.637-5.303l-4.544-2.617c-1.308-.761-2.188-2.378-2.188-3.948A4.482 4.482 0 014.21 6.327v5.423c0 .333.143.571.428.738l5.947 3.449-1.95 1.118a.432.432 0 01-.476 0zm-.262 3.9c-2.688 0-4.662-2.021-4.662-4.519 0-.19.024-.38.047-.57l4.686 2.71c.286.167.571.167.856 0l5.97-3.448v2.26c0 .19-.07.333-.237.428l-4.543 2.616c-.619.357-1.356.523-2.117.523zm5.899 2.83a5.947 5.947 0 005.827-4.756C22.287 18.339 24 15.84 24 13.296c0-1.665-.713-3.282-1.998-4.448.119-.5.19-.999.19-1.498 0-3.401-2.759-5.947-5.946-5.947-.642 0-1.26.095-1.88.31A5.962 5.962 0 0010.205 0a5.947 5.947 0 00-5.827 4.757C1.713 5.447 0 7.945 0 10.49c0 1.666.713 3.283 1.998 4.448-.119.5-.19 1-.19 1.499 0 3.401 2.759 5.946 5.946 5.946.642 0 1.26-.095 1.88-.309a5.96 5.96 0 004.162 1.713z"/></svg>',
-    deepseek: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z"/></svg>',
-    qwen: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M12.604 1.34c.393.69.784 1.382 1.174 2.075a.18.18 0 00.157.091h5.552c.174 0 .322.11.446.327l1.454 2.57c.19.337.24.478.024.837-.26.43-.513.864-.76 1.3l-.367.658c-.106.196-.223.28-.04.512l2.652 4.637c.172.301.111.494-.043.77-.437.785-.882 1.564-1.335 2.34-.159.272-.352.375-.68.37-.777-.016-1.552-.01-2.327.016a.099.099 0 00-.081.05 575.097 575.097 0 01-2.705 4.74c-.169.293-.38.363-.725.364-.997.003-2.002.004-3.017.002a.537.537 0 01-.465-.271l-1.335-2.323a.09.09 0 00-.083-.049H4.982c-.285.03-.553-.001-.805-.092l-1.603-2.77a.543.543 0 01-.002-.54l1.207-2.12a.198.198 0 000-.197 550.951 550.951 0 01-1.875-3.272l-.79-1.395c-.16-.31-.173-.496.095-.965.465-.813.927-1.625 1.387-2.436.132-.234.304-.334.584-.335a338.3 338.3 0 012.589-.001.124.124 0 00.107-.063l2.806-4.895a.488.488 0 01.422-.246c.524-.001 1.053 0 1.583-.006L11.704 1c.341-.003.724.032.9.34zm-3.432.403a.06.06 0 00-.052.03L6.254 6.788a.157.157 0 01-.135.078H3.253c-.056 0-.07.025-.041.074l5.81 10.156c.025.042.013.062-.034.063l-2.795.015a.218.218 0 00-.2.116l-1.32 2.31c-.044.078-.021.118.068.118l5.716.008c.046 0 .08.02.104.061l1.403 2.454c.046.081.092.082.139 0l5.006-8.76.783-1.382a.055.055 0 01.096 0l1.424 2.53a.122.122 0 00.107.062l2.763-.02a.04.04 0 00.035-.02.041.041 0 000-.04l-2.9-5.086a.108.108 0 010-.113l.293-.507 1.12-1.977c.024-.041.012-.062-.035-.062H9.2c-.059 0-.073-.026-.043-.077l1.434-2.505a.107.107 0 000-.114L9.225 1.774a.06.06 0 00-.053-.031zm6.29 8.02c.046 0 .058.02.034.06l-.832 1.465-2.613 4.585a.056.056 0 01-.05.029.058.058 0 01-.05-.029L8.498 9.841c-.02-.034-.01-.052.028-.054l.216-.012 6.722-.012z"/></svg>',
-    mistral: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path clip-rule="evenodd" fill="currentColor" d="M3.428 3.4h3.429v3.428h3.429v3.429h-.002 3.431V6.828h3.427V3.4h3.43v13.714H24v3.429H13.714v-3.428h-3.428v-3.429h-3.43v3.428h3.43v3.429H0v-3.429h3.428V3.4zm10.286 13.715h3.428v-3.429h-3.427v3.429z"/></svg>',
-    gemini: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M20.616 10.835a14.147 14.147 0 01-4.45-3.001 14.111 14.111 0 01-3.678-6.452.503.503 0 00-.975 0 14.134 14.134 0 01-3.679 6.452 14.155 14.155 0 01-4.45 3.001c-.65.28-1.318.505-2.002.678a.502.502 0 000 .975c.684.172 1.35.397 2.002.677a14.147 14.147 0 014.45 3.001 14.112 14.112 0 013.679 6.453.502.502 0 00.975 0c.172-.685.397-1.351.677-2.003a14.145 14.145 0 013.001-4.45 14.113 14.113 0 016.453-3.678.503.503 0 000-.975 13.245 13.245 0 01-2.003-.678z"/></svg>',
-    meta: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M6.897 4c1.915 0 3.516.932 5.43 3.376l.282-.373c.19-.246.383-.484.58-.71l.313-.35C14.588 4.788 15.792 4 17.225 4c1.273 0 2.469.557 3.491 1.516l.218.213c1.73 1.765 2.917 4.71 3.053 8.026l.011.392.002.25c0 1.501-.28 2.759-.818 3.7l-.14.23-.108.153c-.301.42-.664.758-1.086 1.009l-.265.142-.087.04a3.493 3.493 0 01-.302.118 4.117 4.117 0 01-1.33.208c-.524 0-.996-.067-1.438-.215-.614-.204-1.163-.56-1.726-1.116l-.227-.235c-.753-.812-1.534-1.976-2.493-3.586l-1.43-2.41-.544-.895-1.766 3.13-.343.592C7.597 19.156 6.227 20 4.356 20c-1.21 0-2.205-.42-2.936-1.182l-.168-.184c-.484-.573-.837-1.311-1.043-2.189l-.067-.32a8.69 8.69 0 01-.136-1.288L0 14.468c.002-.745.06-1.49.174-2.23l.1-.573c.298-1.53.828-2.958 1.536-4.157l.209-.34c1.177-1.83 2.789-3.053 4.615-3.16L6.897 4zm-.033 2.615l-.201.01c-.83.083-1.606.673-2.252 1.577l-.138.199-.01.018c-.67 1.017-1.185 2.378-1.456 3.845l-.004.022a12.591 12.591 0 00-.207 2.254l.002.188c.004.18.017.36.04.54l.043.291c.092.503.257.908.486 1.208l.117.137c.303.323.698.492 1.17.492 1.1 0 1.796-.676 3.696-3.641l2.175-3.4.454-.701-.139-.198C9.11 7.3 8.084 6.616 6.864 6.616zm10.196-.552l-.176.007c-.635.048-1.223.359-1.82.933l-.196.198c-.439.462-.887 1.064-1.367 1.807l.266.398c.18.274.362.56.55.858l.293.475 1.396 2.335.695 1.114c.583.926 1.03 1.6 1.408 2.082l.213.262c.282.326.529.54.777.673l.102.05c.227.1.457.138.718.138.176.002.35-.023.518-.073.338-.104.61-.32.813-.637l.095-.163.077-.162c.194-.459.29-1.06.29-1.785l-.006-.449c-.08-2.871-.938-5.372-2.2-6.798l-.176-.189c-.67-.683-1.444-1.074-2.27-1.074z"/></svg>',
-    zhipu: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M11.991 23.503a.24.24 0 00-.244.248.24.24 0 00.244.249.24.24 0 00.245-.249.24.24 0 00-.22-.247l-.025-.001zM9.671 5.365a1.697 1.697 0 011.099 2.132l-.071.172-.016.04-.018.054c-.07.16-.104.32-.104.498-.035.71.47 1.279 1.186 1.314h.366c1.309.053 2.338 1.173 2.286 2.523-.052 1.332-1.152 2.38-2.478 2.327h-.174c-.715.018-1.274.64-1.239 1.368 0 .124.018.23.053.337.209.373.54.658.96.8.75.23 1.517-.125 1.9-.782l.018-.035c.402-.64 1.17-.96 1.92-.711.854.284 1.378 1.226 1.099 2.167a1.661 1.661 0 01-2.077 1.102 1.711 1.711 0 01-.907-.711l-.017-.035c-.2-.323-.463-.58-.851-.711l-.056-.018a1.646 1.646 0 00-1.954.746 1.66 1.66 0 01-1.065.764 1.677 1.677 0 01-1.989-1.279c-.209-.906.332-1.83 1.257-2.043a1.51 1.51 0 01.296-.035h.018c.68-.071 1.151-.622 1.116-1.333a1.307 1.307 0 00-.227-.693 2.515 2.515 0 01-.366-1.403 2.39 2.39 0 01.366-1.208c.14-.195.21-.444.227-.693.018-.71-.506-1.261-1.186-1.332l-.07-.018a1.43 1.43 0 01-.299-.07l-.05-.019a1.7 1.7 0 01-1.047-2.114 1.68 1.68 0 012.094-1.101zm-5.575 10.11c.26-.264.639-.367.994-.27.355.096.633.379.728.74.095.362-.007.748-.267 1.013-.402.41-1.053.41-1.455 0a1.062 1.062 0 010-1.482zm14.845-.294c.359-.09.738.024.992.297.254.274.344.665.237 1.025-.107.36-.396.634-.756.718-.551.128-1.1-.22-1.23-.781a1.05 1.05 0 01.757-1.26zm-.064-4.39c.314.32.49.753.49 1.206 0 .452-.176.886-.49 1.206-.315.32-.74.5-1.185.5-.444 0-.87-.18-1.184-.5a1.727 1.727 0 010-2.412 1.654 1.654 0 012.369 0zm-11.243.163c.364.484.447 1.128.218 1.691a1.665 1.665 0 01-2.188.923c-.855-.36-1.26-1.358-.907-2.228a1.68 1.68 0 011.33-1.038c.593-.08 1.183.169 1.547.652zm11.545-4.221c.368 0 .708.2.892.524.184.324.184.724 0 1.048a1.026 1.026 0 01-.892.524c-.568 0-1.03-.47-1.03-1.048 0-.579.462-1.048 1.03-1.048zm-14.358 0c.368 0 .707.2.891.524.184.324.184.724 0 1.048a1.026 1.026 0 01-.891.524c-.569 0-1.03-.47-1.03-1.048 0-.579.461-1.048 1.03-1.048zm10.031-1.475c.925 0 1.675.764 1.675 1.706s-.75 1.705-1.675 1.705-1.674-.763-1.674-1.705c0-.942.75-1.706 1.674-1.706zm-2.626-.684c.362-.082.653-.356.761-.718a1.062 1.062 0 00-.238-1.028 1.017 1.017 0 00-.996-.294c-.547.14-.881.7-.752 1.257.13.558.675.907 1.225.783zm0 16.876c.359-.087.644-.36.75-.72a1.062 1.062 0 00-.237-1.019 1.018 1.018 0 00-.985-.301 1.037 1.037 0 00-.762.717c-.108.361-.017.754.239 1.028.245.263.606.377.953.305l.043-.01zM17.19 3.5a.631.631 0 00.628-.64c0-.355-.279-.64-.628-.64a.631.631 0 00-.628.64c0 .355.28.64.628.64zm-10.38 0a.631.631 0 00.628-.64c0-.355-.28-.64-.628-.64a.631.631 0 00-.628.64c0 .355.279.64.628.64zm-5.182 7.852a.631.631 0 00-.628.64c0 .354.28.639.628.639a.63.63 0 00.627-.606l.001-.034a.62.62 0 00-.628-.64zm5.182 9.13a.631.631 0 00-.628.64c0 .355.279.64.628.64a.631.631 0 00.628-.64c0-.355-.28-.64-.628-.64zm10.38.018a.631.631 0 00-.628.64c0 .355.28.64.628.64a.631.631 0 00.628-.64c0-.355-.279-.64-.628-.64zm5.182-9.148a.631.631 0 00-.628.64c0 .354.279.639.628.639a.631.631 0 00.628-.64c0-.355-.28-.64-.628-.64zm-.384-4.992a.24.24 0 00.244-.249.24.24 0 00-.244-.249.24.24 0 00-.244.249c0 .142.122.249.244.249zM11.991.497a.24.24 0 00.245-.248A.24.24 0 0011.99 0a.24.24 0 00-.244.249c0 .133.108.236.223.247l.021.001zM2.011 6.36a.24.24 0 00.245-.249.24.24 0 00-.244-.249.24.24 0 00-.244.249.24.24 0 00.244.249zm0 11.263a.24.24 0 00-.243.248.24.24 0 00.244.249.24.24 0 00.244-.249.252.252 0 00-.244-.248zm19.995-.018a.24.24 0 00-.245.248.24.24 0 00.245.25.24.24 0 00.244-.25.252.252 0 00-.244-.248z"/></svg>',
-    minimax: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M16.278 2c1.156 0 2.093.927 2.093 2.07v12.501a.74.74 0 00.744.709.74.74 0 00.743-.709V9.099a2.06 2.06 0 012.071-2.049A2.06 2.06 0 0124 9.1v6.561a.649.649 0 01-.652.645.649.649 0 01-.653-.645V9.1a.762.762 0 00-.766-.758.762.762 0 00-.766.758v7.472a2.037 2.037 0 01-2.048 2.026 2.037 2.037 0 01-2.048-2.026v-12.5a.785.785 0 00-.788-.753.785.785 0 00-.789.752l-.001 15.904A2.037 2.037 0 0113.441 22a2.037 2.037 0 01-2.048-2.026V18.04c0-.356.292-.645.652-.645.36 0 .652.289.652.645v1.934c0 .263.142.506.372.638.23.131.514.131.744 0a.734.734 0 00.372-.638V4.07c0-1.143.937-2.07 2.093-2.07zm-5.674 0c1.156 0 2.093.927 2.093 2.07v11.523a.648.648 0 01-.652.645.648.648 0 01-.652-.645V4.07a.785.785 0 00-.789-.78.785.785 0 00-.789.78v14.013a2.06 2.06 0 01-2.07 2.048 2.06 2.06 0 01-2.071-2.048V9.1a.762.762 0 00-.766-.758.762.762 0 00-.766.758v3.8a2.06 2.06 0 01-2.071 2.049A2.06 2.06 0 010 12.9v-1.378c0-.357.292-.646.652-.646.36 0 .653.29.653.646V12.9c0 .418.343.757.766.757s.766-.339.766-.757V9.099a2.06 2.06 0 012.07-2.048 2.06 2.06 0 012.071 2.048v8.984c0 .419.343.758.767.758.423 0 .766-.339.766-.758V4.07c0-1.143.937-2.07 2.093-2.07z"/></svg>',
-    proxy: '<svg ' + _svgStyle + ' viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>'
-  };
-
-  function getModelFamily(id) {
-    const lower = id.toLowerCase();
-    if (lower.startsWith('claude-') || lower.startsWith('anthropic')) return 'claude';
-    if (lower.startsWith('gpt-') || lower === 'o1' || lower.startsWith('o1-') || lower.startsWith('o3-') || lower.startsWith('o4-')) return 'openai';
-    if (lower.startsWith('deepseek')) return 'deepseek';
-    if (lower.startsWith('qwen') || lower.startsWith('qwq') || lower.startsWith('qvq')) return 'qwen';
-    if (lower.startsWith('glm') || lower.startsWith('chatglm') || lower.startsWith('zhipu') || lower.startsWith('codegeex')) return 'zhipu';
-    if (lower.startsWith('minimax') || lower.startsWith('abab')) return 'minimax';
-    if (lower.startsWith('mistral') || lower.startsWith('mixtral') || lower.startsWith('codestral')) return 'mistral';
-    if (lower.startsWith('gemini') || lower.startsWith('gemma')) return 'gemini';
-    if (lower.startsWith('llama') || lower.startsWith('meta-') || lower.startsWith('codellama')) return 'meta';
-    if (lower === 'auto' || lower.startsWith('auto')) return 'proxy';
-    return 'other';
-  }
-
-  function getModelFamilyLabel(family) {
-    const labels = {
-      claude: 'Claude (Anthropic)',
-      openai: 'OpenAI',
-      deepseek: 'DeepSeek',
-      qwen: 'Qwen (Alibaba)',
-      zhipu: 'GLM (Zhipu)',
-      minimax: 'MiniMax',
-      mistral: 'Mistral AI',
-      gemini: 'Gemini (Google)',
-      meta: 'LLaMA (Meta)',
-      proxy: 'Proxy Aliases',
-      other: currentLang === 'zh' ? '其他模型' : 'Other'
-    };
-    return labels[family] || family;
-  }
-
-  function getModelFamilyColor(family) {
-    const colors = {
-      claude: '#d97757',
-      openai: '#10a37f',
-      deepseek: '#4d6bfe',
-      qwen: '#615ced',
-      zhipu: '#3859ff',
-      minimax: '#e1474f',
-      mistral: '#ff7000',
-      gemini: '#4285f4',
-      meta: '#0668e1',
-      proxy: '#888888',
-      other: '#6b7280'
-    };
-    return colors[family] || '#6b7280';
-  }
-
-  function buildModelsGroupedHtml(models, thinkingSuffix) {
-    if (models.length === 0) {
-      return '<div class="api-view-loading">' + escapeHtml(t('api.noModels')) + '</div>';
-    }
-
-    // Group models by family
-    const groups = {};
-    const familyOrder = ['claude', 'openai', 'deepseek', 'qwen', 'zhipu', 'minimax', 'mistral', 'gemini', 'meta', 'proxy', 'other'];
-    for (const m of models) {
-      const family = getModelFamily(m.id || '');
-      if (!groups[family]) groups[family] = [];
-      groups[family].push(m);
-    }
-
-    let html = '';
-    for (const family of familyOrder) {
-      if (!groups[family] || groups[family].length === 0) continue;
-      const familyModels = groups[family];
-      const color = getModelFamilyColor(family);
-      const svg = MODEL_SVGS[family] || MODEL_SVGS.proxy;
-      const label = getModelFamilyLabel(family);
-
-      html += '<div class="model-group">';
-      html += '<div class="model-group-header">';
-      html += '<span class="model-group-icon" style="color:' + color + '">' + svg + '</span>';
-      html += '<span class="model-group-title">' + escapeHtml(label) + '</span>';
-      html += '<span class="model-group-count">' + familyModels.length + '</span>';
-      html += '</div>';
-      html += '<div class="model-group-grid">';
-
-      for (const m of familyModels) {
-        const id = m.id || '';
-        const isThinking = id.endsWith(thinkingSuffix);
-        const supportsImage = m.supports_image || false;
-
-        html += '<div class="model-item">';
-        html += '<div class="model-info">';
-        html += '<div class="model-name">' + escapeHtml(id) + '</div>';
-        html += '<div class="model-badges">';
-        if (isThinking) html += '<span class="model-badge model-badge--thinking"><i class="fa-solid fa-brain"></i> thinking</span>';
-        if (supportsImage) html += '<span class="model-badge model-badge--image"><i class="fa-solid fa-image"></i> vision</span>';
-        html += '</div>';
-        html += '</div>';
-        html += '</div>';
-      }
-
-      html += '</div></div>';
-    }
-    return html;
-  }
-
-  async function showStatsView() {
-    const title = $('apiViewTitle');
-    const body = $('apiViewBody');
-    title.textContent = t('api.viewStatsTitle');
-    body.innerHTML = '<div class="api-view-loading"><i class="fa-solid fa-spinner fa-spin"></i> ' + escapeHtml(t('api.loading')) + '</div>';
-    openDialog('apiViewModal');
-
-    try {
-      const res = await api('/status');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const d = await res.json();
-      renderStatsView(body, d);
-    } catch (e) {
-      body.innerHTML = '<div class="api-view-error"><i class="fa-solid fa-circle-exclamation"></i> ' + escapeHtml(t('api.fetchError') + ': ' + e.message) + '</div>';
-    }
-  }
-
-  function renderStatsView(container, d) {
-    const version = String(d.version || currentVersion || '-').replace(/^v/i, '');
-    let html = '<div class="stats-view-grid">';
-    html += statsCard(t('api.statsVersion'), version, '');
-    html += statsCard(t('api.statsAccounts'), d.accounts || 0, '');
-    html += statsCard(t('api.statsAvailable'), d.available || 0, 'success');
-    html += statsCard(t('api.statsTotalReqs'), formatNum(d.totalRequests || 0), 'info');
-    html += statsCard(t('api.statsSuccessReqs'), formatNum(d.successRequests || 0), 'success');
-    html += statsCard(t('api.statsFailedReqs'), formatNum(d.failedRequests || 0), 'danger');
-    html += statsCard(t('api.statsTotalTokens'), formatNum(d.totalTokens || 0), '');
-    html += statsCard(t('api.statsTotalCredits'), (d.totalCredits || 0).toFixed(2), 'info');
-    html += '</div>';
-    if (d.uptime !== undefined) {
-      html += '<div class="stats-view-uptime"><i class="fa-solid fa-clock"></i> ' + escapeHtml(t('api.statsUptime')) + ': <strong>' + escapeHtml(formatUptime(d.uptime)) + '</strong></div>';
-    }
-    container.innerHTML = html;
-  }
-
-  function statsCard(label, value, variant) {
-    const cls = variant ? ' stats-view-item--' + variant : '';
-    return '<div class="stats-view-item' + cls + '"><div class="stats-view-value">' + escapeHtml(String(value)) + '</div><div class="stats-view-label">' + escapeHtml(label) + '</div></div>';
-  }
-
   function wireEvents() {
     bindLoginEvents();
     bindShellEvents();
     bindAccountEvents();
     bindSettingsEvents();
+    bindFeatureEvents();
     bindPromptFilterEvents();
+    bindModelMappingEvents();
     bindModalEvents();
     bindDetailEvents();
     bindTestEvents();
   }
-
-  // Init
   async function init() {
     initTheme();
     await loadLocale(currentLang);
-    if (currentLang !== 'zh') await loadLocale('zh');
+    if (currentLang !== 'en') await loadLocale('en');
     applyTranslations();
     initCustomSelectObserver();
     initPrivacyMode();
@@ -3962,7 +3676,8 @@
     const yr = $('footerYear');
     if (yr) yr.textContent = new Date().getFullYear();
     wireEvents();
-    if (password) tryAutoLogin();
+    if (adminToken) tryAutoLogin();
+    else loadFirstRunPassword();
     setInterval(() => {
       if (!$('mainPage').classList.contains('hidden')) loadStats();
     }, 10000);

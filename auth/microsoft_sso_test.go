@@ -1,11 +1,12 @@
 package auth
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"kiro-go/config"
+	"kiro-proxy/config"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -145,7 +146,7 @@ func TestMicrosoftSSOTwoStageManualCallback(t *testing.T) {
 	})}
 	restoreMicrosoftAuthClient(t, client)
 
-	sessionID, _, _, err := StartMicrosoftSSOLogin("key-a")
+	sessionID, _, _, err := StartMicrosoftSSOLogin()
 	if err != nil {
 		t.Fatalf("StartMicrosoftSSOLogin() error = %v", err)
 	}
@@ -166,9 +167,6 @@ func TestMicrosoftSSOTwoStageManualCallback(t *testing.T) {
 	}
 	if progress == nil || progress.AuthorizationURL == "" || progress.Result != nil {
 		t.Fatalf("first progress = %#v, want a provider authorization URL only", progress)
-	}
-	if progress.ApiKeyID != "key-a" || !progress.ApiKeyIDSet {
-		t.Fatalf("first progress api-key snapshot = (%q, %v), want (key-a, true)", progress.ApiKeyID, progress.ApiKeyIDSet)
 	}
 
 	providerURL := mustParseMicrosoftURL(t, progress.AuthorizationURL)
@@ -204,9 +202,6 @@ func TestMicrosoftSSOTwoStageManualCallback(t *testing.T) {
 		result.IssuerURL != issuer ||
 		result.Scopes != scopes {
 		t.Errorf("unexpected Microsoft SSO result: %#v", result)
-	}
-	if result.ApiKeyID != "key-a" || !result.ApiKeyIDSet {
-		t.Errorf("completed result api-key snapshot = (%q, %v), want (key-a, true)", result.ApiKeyID, result.ApiKeyIDSet)
 	}
 	if result.Email != "developer@example.com" {
 		t.Errorf("result.Email = %q", result.Email)
@@ -578,7 +573,7 @@ func TestPostExternalIdpTokenStrictResponseValidation(t *testing.T) {
 			client := &http.Client{Transport: microsoftRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 				return microsoftTextResponse(request, testCase.statusCode, testCase.body), nil
 			})}
-			_, err := postExternalIdpToken(client, tokenEndpoint, issuer, url.Values{"grant_type": {"test"}})
+			_, err := postExternalIdpToken(context.Background(), client, tokenEndpoint, issuer, url.Values{"grant_type": {"test"}})
 			if err == nil || !strings.Contains(err.Error(), testCase.contains) {
 				t.Fatalf("postExternalIdpToken() error = %v, want substring %q", err, testCase.contains)
 			}
@@ -640,6 +635,7 @@ func TestRefreshExternalIdpTokenRotatesAndPreservesRefreshToken(t *testing.T) {
 
 	beforeFirst := time.Now().Unix()
 	access, refresh, expiresAt, region, err := refreshExternalIdpToken(
+		context.Background(),
 		"refresh-one",
 		testMicrosoftClientID,
 		tokenEndpoint,
@@ -662,6 +658,7 @@ func TestRefreshExternalIdpTokenRotatesAndPreservesRefreshToken(t *testing.T) {
 	}
 	beforeSecond := time.Now().Unix()
 	access, refresh, expiresAt, region, err = refreshExternalIdpToken(
+		context.Background(),
 		"refresh-two",
 		testMicrosoftClientID,
 		tokenEndpoint,

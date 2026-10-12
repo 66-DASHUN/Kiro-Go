@@ -3,9 +3,9 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
-	"kiro-go/auth"
-	"kiro-go/config"
-	accountpool "kiro-go/pool"
+	"kiro-proxy/auth"
+	"kiro-proxy/config"
+	accountpool "kiro-proxy/pool"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,11 +13,6 @@ import (
 	"time"
 )
 
-// installCleanAuthClient replaces the global auth HTTP client with one whose
-// Transport does not consult http.ProxyFromEnvironment — that function caches
-// env vars on first call and would otherwise poison TestBuildKiroTransport*
-// when tests run in the default order. Returns a cleanup that restores the
-// previous client.
 func installCleanAuthClient(t *testing.T) func() {
 	t.Helper()
 	c := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
@@ -25,13 +20,6 @@ func installCleanAuthClient(t *testing.T) func() {
 	return func() { auth.SetGlobalAuthClientForTest(prev) }
 }
 
-// TestApiImportCredentialsRejectsWhenRefreshFails verifies the regression:
-// previously, when auth.RefreshToken failed and the user supplied an accessToken,
-// the handler stored that accessToken with ExpiresAt = now+300, producing an
-// account that the pool would skip (Pick uses now > ExpiresAt-120 → ~3 min) and
-// that the on-demand refresh path could never repair (Pick filters it out before
-// ensureValidToken runs). The fix is to reject the import outright; the caller
-// must provide a refreshToken that actually works.
 func TestApiImportCredentialsRejectsWhenRefreshFails(t *testing.T) {
 	cfgFile := t.TempDir() + "/config.json"
 	if err := config.Init(cfgFile); err != nil {
@@ -39,19 +27,16 @@ func TestApiImportCredentialsRejectsWhenRefreshFails(t *testing.T) {
 	}
 	defer installCleanAuthClient(t)()
 
-	// Stand up a fake OIDC endpoint that always 400s, simulating an unreachable
-	// or invalid refresh.
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid_grant"}`, http.StatusBadRequest)
 	}))
 	defer fake.Close()
 
-	oldOIDC := authOidcURL()
+	oldOIDC := auth.GetOIDCTokenURLForTest()
 	auth.SetOIDCTokenURLForTest(func(string) string { return fake.URL })
 	defer auth.SetOIDCTokenURLForTest(oldOIDC)
 
 	h := &Handler{pool: accountpool.GetPool()}
-
 	body := `{"refreshToken":"rt-broken","accessToken":"at-still-valid-elsewhere","clientId":"c","clientSecret":"s","authMethod":"idc","region":"us-east-1"}`
 	req := httptest.NewRequest("POST", "/auth/credentials", strings.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -61,7 +46,6 @@ func TestApiImportCredentialsRejectsWhenRefreshFails(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 when refresh fails, got %d body=%s", rec.Code, rec.Body.String())
 	}
-
 	var resp map[string]string
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -69,17 +53,11 @@ func TestApiImportCredentialsRejectsWhenRefreshFails(t *testing.T) {
 	if !strings.Contains(resp["error"], "Token refresh failed") {
 		t.Fatalf("expected refresh-failed error, got %q", resp["error"])
 	}
-
-	// Crucial: no account should have been created. The previous bug stored a
-	// half-broken account with ExpiresAt ~now+300 that would die in 3 minutes.
 	if accs := config.GetAccounts(); len(accs) != 0 {
 		t.Fatalf("expected no accounts to be persisted on failed import, got %+v", accs)
 	}
 }
 
-// TestApiImportCredentialsUsesUpstreamExpiresAt verifies the happy path: when
-// refresh succeeds, the persisted ExpiresAt reflects the upstream expiresIn,
-// not a hard-coded 300s.
 func TestApiImportCredentialsUsesUpstreamExpiresAt(t *testing.T) {
 	cfgFile := t.TempDir() + "/config.json"
 	if err := config.Init(cfgFile); err != nil {
@@ -94,12 +72,11 @@ func TestApiImportCredentialsUsesUpstreamExpiresAt(t *testing.T) {
 	}))
 	defer fake.Close()
 
-	oldOIDC := authOidcURL()
+	oldOIDC := auth.GetOIDCTokenURLForTest()
 	auth.SetOIDCTokenURLForTest(func(string) string { return fake.URL })
 	defer auth.SetOIDCTokenURLForTest(oldOIDC)
 
 	h := &Handler{pool: accountpool.GetPool()}
-
 	before := time.Now().Unix()
 	body := `{"refreshToken":"rt-good","clientId":"c","clientSecret":"s","authMethod":"idc","region":"us-east-1"}`
 	req := httptest.NewRequest("POST", "/auth/credentials", strings.NewReader(body))
@@ -111,7 +88,6 @@ func TestApiImportCredentialsUsesUpstreamExpiresAt(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 on successful refresh, got %d body=%s", rec.Code, rec.Body.String())
 	}
-
 	accs := config.GetAccounts()
 	if len(accs) != 1 {
 		t.Fatalf("expected exactly one account persisted, got %d", len(accs))
@@ -123,103 +99,145 @@ func TestApiImportCredentialsUsesUpstreamExpiresAt(t *testing.T) {
 	if got.RefreshToken != "rt-rotated" {
 		t.Fatalf("expected rotated refreshToken to be persisted, got %q", got.RefreshToken)
 	}
-	// Allow ±5s of drift but require the value to clearly come from upstream's
-	// expiresIn rather than the old 300s fallback.
 	expectMin := before + upstreamExpiresIn - 5
 	expectMax := after + upstreamExpiresIn + 5
 	if got.ExpiresAt < expectMin || got.ExpiresAt > expectMax {
-		t.Fatalf("expected ExpiresAt ≈ now+%d ([%d..%d]), got %d", upstreamExpiresIn, expectMin, expectMax, got.ExpiresAt)
-	}
-	if got.ExpiresAt-time.Now().Unix() < 1500 {
-		t.Fatalf("ExpiresAt too short — looks like the 300s fallback is still in play: %d (delta %d)", got.ExpiresAt, got.ExpiresAt-time.Now().Unix())
+		t.Fatalf("expected ExpiresAt around now+%d ([%d..%d]), got %d", upstreamExpiresIn, expectMin, expectMax, got.ExpiresAt)
 	}
 }
 
-// authOidcURL captures the current oidc URL builder so the test can restore it.
-func authOidcURL() func(string) string { return auth.GetOIDCTokenURLForTest() }
+// stubImportNetwork blocks every outbound call an API key import could make.
+// OAuth refresh must never run for an API key, so reaching it fails the test.
+// The returned channel receives the Authorization header of the background
+// model-list request, which lets a test wait for that goroutine to finish.
+func stubImportNetwork(t *testing.T) <-chan string {
+	t.Helper()
+	t.Cleanup(installCleanAuthClient(t))
+	refresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("API key import must not call OAuth refresh (%s)", r.URL)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	t.Cleanup(refresh.Close)
+	oldOIDC := auth.GetOIDCTokenURLForTest()
+	auth.SetOIDCTokenURLForTest(func(string) string { return refresh.URL })
+	t.Cleanup(func() { auth.SetOIDCTokenURLForTest(oldOIDC) })
 
-func TestApiImportCredentialsAPIKeySuccess(t *testing.T) {
-	cfgFile := t.TempDir() + "/config.json"
-	if err := config.Init(cfgFile); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	// The import handler spawns a background, un-awaited model-list refresh
-	// for enabled accounts. Route it through a stub transport with no Proxy
-	// configured (rather than the real http.ProxyFromEnvironment-backed
-	// client) and restore to an equally inert stub afterward — never back to
-	// the real client — since the goroutine may still be in flight after this
-	// test returns and would otherwise poison TestBuildKiroTransport*, which
-	// relies on http.ProxyFromEnvironment reading env vars for the first time.
-	kiroRestHttpStore.Store(&http.Client{
-		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return nil, fmt.Errorf("network disabled in test")
-		}),
+	modelCalls := make(chan string, 4)
+	stubRestTransport(t, func(req *http.Request) (*http.Response, error) {
+		modelCalls <- req.Header.Get("Authorization")
+		return nil, fmt.Errorf("network disabled in test")
 	})
-	t.Cleanup(func() {
-		kiroRestHttpStore.Store(&http.Client{Transport: &http.Transport{}})
-	})
+	return modelCalls
+}
 
-	h := &Handler{pool: accountpool.GetPool()}
-	body := `{"kiroApiKey":"ksk_test_import|eu-central-1","authMethod":"api_key","nickname":"cli-key"}`
+func importCredentials(h *Handler, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", "/auth/credentials", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.apiImportCredentials(rec, req)
+	return rec
+}
 
+func waitForModelRefresh(t *testing.T, calls <-chan string, wantAuth string) {
+	t.Helper()
+	select {
+	case got := <-calls:
+		if got != wantAuth {
+			t.Fatalf("model refresh Authorization = %q, want %q", got, wantAuth)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the background model refresh to run")
+	}
+}
+
+func TestApiImportCredentialsAPIKeySuccess(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	modelCalls := stubImportNetwork(t)
+	h := &Handler{pool: accountpool.GetPool()}
+
+	rec := importCredentials(h, `{"kiroApiKey":"ksk_test_import|eu-central-1","authMethod":"api_key","nickname":"cli-key"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
+	waitForModelRefresh(t, modelCalls, "Bearer ksk_test_import")
+
 	accs := config.GetAccounts()
 	if len(accs) != 1 {
 		t.Fatalf("expected 1 account, got %d", len(accs))
 	}
 	got := accs[0]
-	if got.AuthMethod != "api_key" || got.KiroApiKey != "ksk_test_import" {
-		t.Fatalf("unexpected account: %+v", got)
+	if got.AuthMethod != config.AuthMethodAPIKey || got.KiroApiKey != "ksk_test_import" || got.AccessToken != "ksk_test_import" {
+		t.Fatalf("unexpected account: authMethod=%q key=%q accessToken=%q", got.AuthMethod, got.KiroApiKey, got.AccessToken)
 	}
-	if got.AccessToken != "ksk_test_import" {
-		t.Fatalf("accessToken should mirror api key, got %q", got.AccessToken)
-	}
-	if got.Region != "eu-central-1" {
-		t.Fatalf("region = %q", got.Region)
+	if got.Region != "eu-central-1" || got.Nickname != "cli-key" {
+		t.Fatalf("region=%q nickname=%q", got.Region, got.Nickname)
 	}
 	if got.RefreshToken != "" || got.ExpiresAt != 0 || got.ProfileArn != "" {
-		t.Fatalf("oauth fields should be empty: %+v", got)
+		t.Fatalf("oauth fields should be empty: refresh=%q expiresAt=%d profileArn=%q", got.RefreshToken, got.ExpiresAt, got.ProfileArn)
 	}
 	if got.MachineId != config.MachineIdFromAPIKey("ksk_test_import") {
 		t.Fatalf("machineId = %q", got.MachineId)
 	}
+	if strings.Contains(rec.Body.String(), "ksk_") {
+		t.Fatalf("import response must not echo the key: %s", rec.Body.String())
+	}
+}
+
+func TestApiImportCredentialsBareAPIKeyInAccessToken(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	modelCalls := stubImportNetwork(t)
+	h := &Handler{pool: accountpool.GetPool()}
+
+	//! A Kiro CLI export pasted into the generic token field, with no refresh token.
+	rec := importCredentials(h, `{"accessToken":"ksk_pasted"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	waitForModelRefresh(t, modelCalls, "Bearer ksk_pasted")
+	accs := config.GetAccounts()
+	if len(accs) != 1 || accs[0].KiroApiKey != "ksk_pasted" || accs[0].Region != "us-east-1" {
+		t.Fatalf("expected one API key account in us-east-1, got %+v", accs)
+	}
 }
 
 func TestApiImportCredentialsAPIKeyDuplicateRejected(t *testing.T) {
-	cfgFile := t.TempDir() + "/config.json"
-	if err := config.Init(cfgFile); err != nil {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
-	// See TestApiImportCredentialsAPIKeySuccess: avoid ever restoring the real
-	// http.ProxyFromEnvironment-backed client, since the background model
-	// refresh goroutine may still be in flight after this test returns.
-	kiroRestHttpStore.Store(&http.Client{
-		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return nil, fmt.Errorf("network disabled in test")
-		}),
-	})
-	t.Cleanup(func() {
-		kiroRestHttpStore.Store(&http.Client{Transport: &http.Transport{}})
-	})
-
+	modelCalls := stubImportNetwork(t)
 	h := &Handler{pool: accountpool.GetPool()}
+
 	body := `{"kiroApiKey":"ksk_dup_import","authMethod":"api_key"}`
-	req := httptest.NewRequest("POST", "/auth/credentials", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	h.apiImportCredentials(rec, req)
-	if rec.Code != http.StatusOK {
+	if rec := importCredentials(h, body); rec.Code != http.StatusOK {
 		t.Fatalf("first import expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
+	waitForModelRefresh(t, modelCalls, "Bearer ksk_dup_import")
 
-	req2 := httptest.NewRequest("POST", "/auth/credentials", strings.NewReader(body))
-	rec2 := httptest.NewRecorder()
-	h.apiImportCredentials(rec2, req2)
-	if rec2.Code != http.StatusConflict {
-		t.Fatalf("duplicate expected 409, got %d body=%s", rec2.Code, rec2.Body.String())
+	rec := importCredentials(h, body)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if n := len(config.GetAccounts()); n != 1 {
+		t.Fatalf("expected 1 account after duplicate, got %d", n)
+	}
+}
+
+func TestApiImportCredentialsAPIKeyRejectsInvalidRegion(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	stubImportNetwork(t)
+	h := &Handler{pool: accountpool.GetPool()}
+
+	//! The region becomes part of a hostname, so a host-like value must never be stored.
+	rec := importCredentials(h, `{"kiroApiKey":"ksk_region","region":"evil.example.com/x"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if n := len(config.GetAccounts()); n != 0 {
+		t.Fatalf("expected no account on invalid region, got %d", n)
 	}
 }

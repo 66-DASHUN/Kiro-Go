@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"kiro-go/auth"
-	"kiro-go/config"
-	accountpool "kiro-go/pool"
+	"kiro-proxy/auth"
+	"kiro-proxy/config"
+	accountpool "kiro-proxy/pool"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -31,10 +31,6 @@ func (fn handlerMicrosoftRoundTripFunc) RoundTrip(request *http.Request) (*http.
 
 func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t *testing.T) {
 	h := newMicrosoftHandlerForTest(t)
-	key, err := config.AddApiKey(config.ApiKeyEntry{ID: "microsoft-flow-key", Key: "sk-microsoft-flow", Enabled: true})
-	if err != nil {
-		t.Fatalf("seed Microsoft flow API key: %v", err)
-	}
 
 	issuerURL := handlerMicrosoftIssuerURL()
 	tokenEndpoint := handlerMicrosoftTokenEndpoint()
@@ -133,7 +129,7 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 	startRecorder := httptest.NewRecorder()
 	h.apiStartMicrosoftSSO(
 		startRecorder,
-		httptest.NewRequest(http.MethodPost, "/auth/microsoft-sso/start", strings.NewReader(`{"apiKeyId":"`+key.ID+`"}`)),
+		httptest.NewRequest(http.MethodPost, "/auth/microsoft-sso/start", strings.NewReader("{}")),
 	)
 	if startRecorder.Code != http.StatusOK {
 		t.Fatalf("start status = %d, body=%s", startRecorder.Code, startRecorder.Body.String())
@@ -142,14 +138,10 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 		SessionID    string `json:"sessionId"`
 		AuthorizeURL string `json:"authorizeUrl"`
 		Stage        string `json:"stage"`
-		ApiKeyID     string `json:"apiKeyId"`
 	}
 	decodeHandlerMicrosoftJSON(t, startRecorder, &startResponse)
 	if startResponse.SessionID == "" || startResponse.Stage != "kiro" {
 		t.Fatalf("unexpected start response: %+v", startResponse)
-	}
-	if startResponse.ApiKeyID != key.ID {
-		t.Fatalf("start response apiKeyId = %q, want %q", startResponse.ApiKeyID, key.ID)
 	}
 	t.Cleanup(func() { auth.CancelMicrosoftSSOLogin(startResponse.SessionID) })
 	portalAuthorizeURL := mustHandlerMicrosoftURL(t, startResponse.AuthorizeURL)
@@ -211,15 +203,13 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 		t.Fatalf("second callback status = %d, body=%s", secondCompleteRecorder.Code, secondCompleteRecorder.Body.String())
 	}
 	var profileResponse struct {
-		Success                  bool          `json:"success"`
-		Stage                    string        `json:"stage"`
-		RequiresProfileSelection bool          `json:"requiresProfileSelection"`
-		SelectionID              string        `json:"selectionId"`
-		Profiles                 []KiroProfile `json:"profiles"`
+		Success     bool          `json:"success"`
+		Stage       string        `json:"stage"`
+		SelectionID string        `json:"selectionId"`
+		Profiles    []KiroProfile `json:"profiles"`
 	}
 	decodeHandlerMicrosoftJSON(t, secondCompleteRecorder, &profileResponse)
-	if !profileResponse.Success || profileResponse.Stage != "profile" ||
-		!profileResponse.RequiresProfileSelection || profileResponse.SelectionID == "" {
+	if !profileResponse.Success || profileResponse.Stage != "profile" || profileResponse.SelectionID == "" {
 		t.Fatalf("unexpected profile response: %+v", profileResponse)
 	}
 	if len(profileResponse.Profiles) != 2 {
@@ -228,7 +218,7 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 	if len(config.GetAccounts()) != 0 {
 		t.Fatal("account was persisted before the required profile selection")
 	}
-	if h.getMicrosoftProfileSelection(profileResponse.SelectionID) == nil {
+	if pendingMicrosoftSelection(profileResponse.SelectionID) == nil {
 		t.Fatal("profile selection was not retained by the handler")
 	}
 
@@ -242,7 +232,7 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 	if len(config.GetAccounts()) != 0 {
 		t.Fatal("unoffered profile selection persisted an account")
 	}
-	if h.getMicrosoftProfileSelection(profileResponse.SelectionID) == nil {
+	if pendingMicrosoftSelection(profileResponse.SelectionID) == nil {
 		t.Fatal("invalid profile choice consumed the pending selection")
 	}
 
@@ -257,9 +247,6 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 		t.Fatalf("accounts = %+v, want one persisted account", accounts)
 	}
 	got := accounts[0]
-	if got.ApiKeyID != key.ID {
-		t.Fatalf("account apiKeyId = %q, want %q after omitted callback fields", got.ApiKeyID, key.ID)
-	}
 	if got.Region != "us-east-1" {
 		t.Fatalf("auth Region changed to %q during profile selection", got.Region)
 	}
@@ -282,7 +269,7 @@ func TestMicrosoftSSOHandlerTwoStageProfileSelectionPersistsOnlyOfferedProfile(t
 		got.UserId != issuerURL+"."+handlerMicrosoftObjectID {
 		t.Fatalf("unexpected persisted token identity: email=%q userId=%q", got.Email, got.UserId)
 	}
-	if h.getMicrosoftProfileSelection(profileResponse.SelectionID) != nil {
+	if pendingMicrosoftSelection(profileResponse.SelectionID) != nil {
 		t.Fatal("completed profile selection was not consumed")
 	}
 	if discoveryRequests != 1 || tokenRequests != 1 {
@@ -305,10 +292,7 @@ func TestExternalIdpJSONImportRefreshesAndRoundTripsCompleteFields(t *testing.T)
 		"email": "refreshed@example.com",
 		"exp":   time.Now().Add(90 * time.Minute).Unix(),
 	})
-	const (
-		accountID  = "12345678-1234-4123-8123-123456789012"
-		profileARN = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/imported-profile"
-	)
+	const profileARN = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/imported-profile"
 
 	var refreshRequests int
 	authClient := &http.Client{
@@ -361,7 +345,6 @@ func TestExternalIdpJSONImportRefreshesAndRoundTripsCompleteFields(t *testing.T)
 	t.Cleanup(func() { kiroRestHttpStore.Store(previousRestClient) })
 
 	importPayload := map[string]interface{}{
-		"id":            accountID,
 		"email":         "stale@example.com",
 		"userId":        "stale-user-id",
 		"nickname":      "Imported Microsoft",
@@ -389,8 +372,8 @@ func TestExternalIdpJSONImportRefreshesAndRoundTripsCompleteFields(t *testing.T)
 		t.Fatalf("accounts = %+v, want one imported account", accounts)
 	}
 	got := accounts[0]
-	if got.ID != accountID ||
-		got.Nickname != "Imported Microsoft" ||
+	accountID := got.ID
+	if got.Nickname != "Imported Microsoft" ||
 		got.AuthMethod != auth.MicrosoftSSOAuthMethod ||
 		got.Provider != auth.MicrosoftSSOProvider ||
 		got.Region != "ap-southeast-2" {
@@ -489,30 +472,34 @@ func TestExternalIdpJSONImportRefreshesAndRoundTripsCompleteFields(t *testing.T)
 		"issuerUrl":     issuerURL,
 		"scopes":        scopes,
 	})
+	// The Entra object ID only shows after a refresh, so the duplicate is
+	// caught then, before anything is saved.
 	if duplicateRecorder.Code != http.StatusConflict {
-		t.Fatalf("duplicate rotated refresh token status = %d, want 409; body=%s",
+		t.Fatalf("duplicate Entra user import status = %d, want 409; body=%s",
 			duplicateRecorder.Code, duplicateRecorder.Body.String())
 	}
-	if refreshRequests != 1 {
-		t.Fatalf("refresh requests after duplicate import = %d, want duplicate rejected before refresh", refreshRequests)
-	}
 	if len(config.GetAccounts()) != 1 {
-		t.Fatal("duplicate refresh token import persisted a second account")
+		t.Fatal("duplicate Entra user import persisted a second account")
 	}
 }
 
 func newMicrosoftHandlerForTest(t *testing.T) *Handler {
 	t.Helper()
-	cfgFile := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Init(cfgFile); err != nil {
+	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
+	previousFlows := microsoftSSOFlows
+	microsoftSSOFlows = newMicrosoftFlows()
+	t.Cleanup(func() { microsoftSSOFlows = previousFlows })
 	p := accountpool.GetPool()
 	p.Reload()
-	return &Handler{
-		pool:                p,
-		microsoftSelections: make(map[string]*microsoftProfileSelection),
-	}
+	return &Handler{pool: p}
+}
+
+func pendingMicrosoftSelection(selectionID string) *microsoftSelection {
+	microsoftSSOFlows.mu.Lock()
+	defer microsoftSSOFlows.mu.Unlock()
+	return microsoftSSOFlows.selections[selectionID]
 }
 
 func callMicrosoftCompleteHandler(t *testing.T, h *Handler, sessionID, callbackURL string) *httptest.ResponseRecorder {

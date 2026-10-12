@@ -2,13 +2,15 @@ package pool
 
 import (
 	"errors"
-	"kiro-go/config"
+	"kiro-proxy/config"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
 
-func TestOverLimitAccountsAreSkippedByDefault(t *testing.T) {
+func TestOverageAccountsAreSkippedByDefault(t *testing.T) {
 	p := &AccountPool{}
 	normal := config.Account{ID: "normal"}
 	overLimit := config.Account{ID: "over", UsageCurrent: 10, UsageLimit: 10}
@@ -21,12 +23,12 @@ func TestOverLimitAccountsAreSkippedByDefault(t *testing.T) {
 			t.Fatalf("expected an account")
 		}
 		if acc.ID == "over" {
-			t.Fatalf("expected over-limit account to be skipped when upstream OverageStatus is empty")
+			t.Fatalf("expected over-limit account to be skipped by default")
 		}
 	}
 }
 
-func TestOverLimitAccountsCanBeSelectedWhenUpstreamOverageEnabled(t *testing.T) {
+func TestOverageAccountsCanBeSelectedWhenAllowed(t *testing.T) {
 	p := &AccountPool{}
 	overLimit := config.Account{
 		ID:            "over",
@@ -39,26 +41,44 @@ func TestOverLimitAccountsCanBeSelectedWhenUpstreamOverageEnabled(t *testing.T) 
 
 	acc := p.GetNext()
 	if acc == nil {
-		t.Fatalf("expected upstream-enabled overage account to be selectable")
+		t.Fatalf("expected allowed overage account")
 	}
 	if acc.ID != "over" {
 		t.Fatalf("expected overage account, got %q", acc.ID)
 	}
 }
 
-func TestOverLimitAccountsRemainSkippedWhenUpstreamOverageDisabled(t *testing.T) {
-	p := &AccountPool{}
-	overLimit := config.Account{
-		ID:            "over",
-		UsageCurrent:  10,
-		UsageLimit:    10,
-		OverageStatus: "DISABLED",
+func TestGlobalAllowOverUsageKeepsOverLimitAccountsInReloadedPool(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.UpdateAllowOverUsage(true); err != nil {
+		t.Fatalf("enable allow over usage: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "over", Enabled: true, UsageCurrent: 10, UsageLimit: 10}); err != nil {
+		t.Fatalf("add account: %v", err)
 	}
 
-	p.accounts = []config.Account{overLimit}
+	p := newTestPool()
+	p.Reload()
+	acc := p.GetNext()
+	if acc == nil {
+		t.Fatalf("expected over-limit account when global allow over-usage is enabled")
+	}
+	if acc.ID != "over" {
+		t.Fatalf("expected over account, got %q", acc.ID)
+	}
+}
 
-	if acc := p.GetNext(); acc != nil {
-		t.Fatalf("expected nil when upstream OverageStatus=DISABLED, got %q", acc.ID)
+func TestUpstreamOverageEnabledOnlyAcceptsEnabledStatus(t *testing.T) {
+	if !isUpstreamOverageEnabled(config.Account{OverageStatus: "ENABLED"}) {
+		t.Fatalf("expected ENABLED overage status to be accepted")
+	}
+	if isUpstreamOverageEnabled(config.Account{OverageStatus: "DISABLED"}) {
+		t.Fatalf("expected DISABLED overage status to be rejected")
+	}
+	if isUpstreamOverageEnabled(config.Account{}) {
+		t.Fatalf("expected empty overage status to be rejected")
 	}
 }
 
@@ -81,9 +101,152 @@ func TestGetNextKeepsFiveMinuteTokenAvailable(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// IsAuthFailure
-// ---------------------------------------------------------------------------
+func TestGetNextKeepsRefreshableNearExpiryTokenAvailable(t *testing.T) {
+	p := &AccountPool{}
+	account := config.Account{
+		ID:           "acct-refreshable",
+		AccessToken:  "access-token",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Unix() + 60,
+	}
+
+	p.accounts = []config.Account{account}
+
+	got := p.GetNext()
+	if got == nil {
+		t.Fatalf("expected near-expiry account with refresh token to be available")
+	}
+	if got.ID != account.ID {
+		t.Fatalf("expected account %q, got %q", account.ID, got.ID)
+	}
+}
+
+func TestGetNextSkipsNearExpiryTokenWithoutRefreshToken(t *testing.T) {
+	p := &AccountPool{}
+	p.accounts = []config.Account{
+		{
+			ID:          "acct-no-refresh",
+			AccessToken: "access-token",
+			ExpiresAt:   time.Now().Unix() + 60,
+		},
+	}
+
+	if got := p.GetNext(); got != nil {
+		t.Fatalf("expected near-expiry account without refresh token to be skipped, got %q", got.ID)
+	}
+}
+
+func TestGetNextRotatesAcrossUsableAccounts(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "a"},
+		config.Account{ID: "b"},
+		config.Account{ID: "c"},
+	)
+
+	var got []string
+	for i := 0; i < 6; i++ {
+		acc := p.GetNext()
+		if acc == nil {
+			t.Fatalf("selection %d returned nil", i)
+		}
+		got = append(got, acc.ID)
+	}
+
+	want := []string{"a", "b", "c", "a", "b", "c"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected rotation: got %v want %v", got, want)
+		}
+	}
+}
+
+func TestReloadDoesNotRestartRotationAtFirstAccount(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "a", Enabled: true}); err != nil {
+		t.Fatalf("add account a: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "b", Enabled: true}); err != nil {
+		t.Fatalf("add account b: %v", err)
+	}
+
+	p := newTestPool()
+	p.Reload()
+	first := p.GetNext()
+	if first == nil || first.ID != "a" {
+		t.Fatalf("expected first account a, got %#v", first)
+	}
+
+	p.Reload()
+	second := p.GetNext()
+	if second == nil || second.ID != "b" {
+		t.Fatalf("expected reload to preserve rotation and select b, got %#v", second)
+	}
+}
+
+func TestWeightedAccountDoesNotRepeatWhenAnotherUsableAccountExists(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "kiro.db")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "heavy", Enabled: true, Weight: 5}); err != nil {
+		t.Fatalf("add heavy account: %v", err)
+	}
+	if err := config.AddAccount(config.Account{ID: "normal", Enabled: true}); err != nil {
+		t.Fatalf("add normal account: %v", err)
+	}
+
+	p := newTestPool()
+	p.Reload()
+	var previous string
+	for i := 0; i < 6; i++ {
+		acc := p.GetNext()
+		if acc == nil {
+			t.Fatalf("selection %d returned nil", i)
+		}
+		if previous != "" && acc.ID == previous {
+			t.Fatalf("expected weighted rotation to avoid repeating %q while another account is usable", acc.ID)
+		}
+		previous = acc.ID
+	}
+}
+
+func TestGetNextForModelRotatesAcrossMatchingAccounts(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "a"},
+		config.Account{ID: "b"},
+		config.Account{ID: "c"},
+	)
+	p.SetModelList("a", []string{"claude-sonnet"})
+	p.SetModelList("b", []string{"other-model"})
+	p.SetModelList("c", []string{"claude-sonnet"})
+
+	var got []string
+	for i := 0; i < 4; i++ {
+		acc := p.GetNextForModel("claude-sonnet")
+		if acc == nil {
+			t.Fatalf("selection %d returned nil", i)
+		}
+		got = append(got, acc.ID)
+	}
+
+	want := []string{"a", "c", "a", "c"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected model rotation: got %v want %v", got, want)
+		}
+	}
+}
+
+func TestSingleUsableAccountCanRepeat(t *testing.T) {
+	p := newTestPool(config.Account{ID: "only"})
+
+	first := p.GetNext()
+	second := p.GetNext()
+	if first == nil || second == nil || first.ID != "only" || second.ID != "only" {
+		t.Fatalf("expected single account to remain selectable, got %#v then %#v", first, second)
+	}
+}
 
 func TestIsAuthFailureRecognizes401And403(t *testing.T) {
 	positives := []string{
@@ -104,11 +267,11 @@ func TestIsAuthFailureRecognizes401And403(t *testing.T) {
 }
 
 func TestIsAuthFailureIgnoresFalsePositives(t *testing.T) {
-	// hasStatusToken only excludes digit boundaries; e.g. "4011" contains "401"
-	// but the trailing '1' is a digit so it does NOT match.
+
 	negatives := []string{
-		"status code 4011 found", // digit immediately after 401 → not a standalone token
-		"error 14013 exceeded",   // digit before and after 401
+		"status code 4011 found",
+		"error 14013 exceeded",
+		"request id req-401abc failed upstream",
 		"some random error",
 		"status 200 OK",
 	}
@@ -125,16 +288,12 @@ func TestIsAuthFailureNilError(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// IsSuspensionError
-// ---------------------------------------------------------------------------
-
 func TestIsSuspensionErrorDetectsKnownMessages(t *testing.T) {
 	positives := []string{
 		"account temporarily_suspended",
 		"account temporarily suspended",
 		"no available kiro profile",
-		"No Available Kiro Profile", // case-insensitive
+		"No Available Kiro Profile",
 	}
 	for _, msg := range positives {
 		if !IsSuspensionError(errors.New(msg)) {
@@ -161,10 +320,6 @@ func TestIsSuspensionErrorNilError(t *testing.T) {
 		t.Fatal("IsSuspensionError(nil) = true, want false")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// GetNextForModelExcluding
-// ---------------------------------------------------------------------------
 
 func newTestPool(accounts ...config.Account) *AccountPool {
 	p := &AccountPool{
@@ -209,49 +364,75 @@ func TestGetNextForModelExcludingReturnsNilOnEmptyPool(t *testing.T) {
 	}
 }
 
-func TestGetNextForModelForAPIKeyFiltersAccounts(t *testing.T) {
-	p := newTestPool(
-		config.Account{ID: "key-a", ApiKeyID: "key-a"},
-		config.Account{ID: "key-b", ApiKeyID: "key-b"},
-	)
+func TestReturnedAccountsAreSnapshots(t *testing.T) {
+	p := newTestPool(config.Account{
+		ID:           "acct",
+		AccessToken:  "pool-access",
+		RefreshToken: "pool-refresh",
+	})
 
-	acc := p.GetNextForModelForAPIKeyExcluding("key-a", "model", nil)
-	if acc == nil || acc.ID != "key-a" {
-		t.Fatalf("expected account bound to key-a, got %#v", acc)
+	next := p.GetNext()
+	if next == nil {
+		t.Fatal("expected account from GetNext")
+	}
+	next.AccessToken = "request-local-access"
+	next.RefreshToken = "request-local-refresh"
+
+	byID := p.GetByID("acct")
+	if byID == nil {
+		t.Fatal("expected account from GetByID")
+	}
+	if byID.AccessToken != "pool-access" || byID.RefreshToken != "pool-refresh" {
+		t.Fatalf("GetNext returned shared account pointer, pool now has access=%q refresh=%q", byID.AccessToken, byID.RefreshToken)
+	}
+
+	p.cooldowns["acct"] = time.Now().Add(time.Minute)
+	cooldown := p.GetNext()
+	if cooldown != nil {
+		t.Fatalf("expected active cooldown to block selection, got %#v", cooldown)
 	}
 }
 
-func TestGetNextForModelForAPIKeyExcludingHonorsRetryExclusions(t *testing.T) {
-	p := newTestPool(
-		config.Account{ID: "key-a-1", ApiKeyID: "key-a"},
-		config.Account{ID: "key-a-2", ApiKeyID: "key-a"},
-		config.Account{ID: "key-b", ApiKeyID: "key-b"},
-	)
-	// The selector increments before reading; start at max so the first
-	// candidate is index 0 (key-a-1), which is explicitly excluded below.
-	p.currentIndex = ^uint64(0)
+func TestGetNextAndUpdateTokenCanRunConcurrently(t *testing.T) {
+	p := newTestPool(config.Account{
+		ID:           "acct",
+		AccessToken:  "initial-access",
+		RefreshToken: "initial-refresh",
+		ExpiresAt:    time.Now().Add(time.Hour).Unix(),
+	})
 
-	acc := p.GetNextForModelForAPIKeyExcluding("key-a", "model", map[string]bool{"key-a-1": true})
-	if acc == nil || acc.ID != "key-a-2" {
-		t.Fatalf("expected second account bound to key-a after exclusion, got %#v", acc)
-	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			p.UpdateToken("acct", "access-"+strconv.Itoa(i), "refresh-"+strconv.Itoa(i), time.Now().Add(time.Hour).Unix())
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			acc := p.GetNext()
+			if acc == nil {
+				t.Errorf("expected account on iteration %d", i)
+				return
+			}
+			_ = len(acc.AccessToken)
+			acc.AccessToken = "request-local-" + strconv.Itoa(i)
+			if latest := p.GetByID(acc.ID); latest != nil {
+				_ = len(latest.AccessToken)
+			}
+		}
+	}()
+
+	wg.Wait()
 }
-
-func TestGetNextForModelForAPIKeyExcludingReturnsNilWithoutBinding(t *testing.T) {
-	p := newTestPool(config.Account{ID: "legacy", ApiKeyID: ""})
-
-	if acc := p.GetNextForModelForAPIKeyExcluding("key-a", "model", nil); acc != nil {
-		t.Fatalf("expected nil when no account is bound to key-a, got %#v", acc)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// DisableAccount
-// ---------------------------------------------------------------------------
 
 func TestDisableAccountSetsCooldown(t *testing.T) {
-	// Initialize a temporary config so SetAccountBanStatus can persist safely.
-	cfgFile := filepath.Join(t.TempDir(), "config.json")
+
+	cfgFile := filepath.Join(t.TempDir(), "kiro.db")
 	if err := config.Init(cfgFile); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
@@ -266,7 +447,7 @@ func TestDisableAccountSetsCooldown(t *testing.T) {
 	if !ok {
 		t.Fatal("expected cooldown to be set after DisableAccount")
 	}
-	// Safety-net cooldown must be at least 23 hours from now.
+
 	minExpected := time.Now().Add(23 * time.Hour)
 	if cooldown.Before(minExpected) {
 		t.Fatalf("expected cooldown >= 23h in future, got %v", cooldown)
@@ -308,56 +489,5 @@ func TestGetNextForModelExcludingSkipsExcludedAccount(t *testing.T) {
 	acc := p.GetNextForModelExcluding("claude-sonnet-4.5", map[string]bool{"a": true})
 	if acc == nil || acc.ID != "b" {
 		t.Fatalf("expected account b, got %#v", acc)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Reload over-usage filtering
-// ---------------------------------------------------------------------------
-
-func TestReloadKeepsOverQuotaAccountWhenAllowOverUsage(t *testing.T) {
-	cfgFile := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Init(cfgFile); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	if err := config.AddAccount(config.Account{
-		ID:           "over",
-		Enabled:      true,
-		UsageCurrent: 10,
-		UsageLimit:   10,
-	}); err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
-	if err := config.UpdateAllowOverUsage(true); err != nil {
-		t.Fatalf("UpdateAllowOverUsage: %v", err)
-	}
-
-	p := newTestPool()
-	p.Reload()
-
-	if got := p.GetNext(); got == nil || got.ID != "over" {
-		t.Fatalf("expected over-quota account to remain routable when allowOverUsage=true, got %#v", got)
-	}
-}
-
-func TestReloadDropsOverQuotaAccountWhenAllowOverUsageDisabled(t *testing.T) {
-	cfgFile := filepath.Join(t.TempDir(), "config.json")
-	if err := config.Init(cfgFile); err != nil {
-		t.Fatalf("config.Init: %v", err)
-	}
-	if err := config.AddAccount(config.Account{
-		ID:           "over",
-		Enabled:      true,
-		UsageCurrent: 10,
-		UsageLimit:   10,
-	}); err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
-
-	p := newTestPool()
-	p.Reload()
-
-	if got := p.GetNext(); got != nil {
-		t.Fatalf("expected over-quota account to be dropped, got %q", got.ID)
 	}
 }
