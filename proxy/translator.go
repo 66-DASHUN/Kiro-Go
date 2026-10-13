@@ -142,11 +142,12 @@ type ImageSource struct {
 
 type ClaudeTool struct {
 	//! Type is set only on Anthropic server tools such as "web_search_20250305"; client tools leave it empty.
-	Type        string      `json:"type,omitempty"`
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	InputSchema interface{} `json:"input_schema"`
-	MaxUses     int         `json:"max_uses,omitempty"`
+	Type         string                 `json:"type,omitempty"`
+	Name         string                 `json:"name"`
+	Description  string                 `json:"description"`
+	InputSchema  interface{}            `json:"input_schema"`
+	MaxUses      int                    `json:"max_uses,omitempty"`
+	CacheControl map[string]interface{} `json:"cache_control,omitempty"`
 }
 
 type ClaudeResponse struct {

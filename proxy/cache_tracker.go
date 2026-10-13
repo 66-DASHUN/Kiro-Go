@@ -15,6 +15,7 @@ import (
 )
 
 const defaultPromptCacheTTL = 5 * time.Minute
+const maxPromptCacheTTL = time.Hour
 
 const promptCacheRatioVariation = 0.05
 
@@ -71,8 +72,9 @@ type promptCacheTracker struct {
 
 func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
 	if maxTTL <= 0 {
-		maxTTL = defaultPromptCacheTTL
+		maxTTL = maxPromptCacheTTL
 	}
+	maxTTL = normalizePromptCacheTTL(maxTTL)
 	return &promptCacheTracker{
 		entriesByAccount: make(map[string]map[[32]byte]promptCacheEntry),
 		maxSupportedTTL:  maxTTL,
@@ -80,6 +82,9 @@ func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
 }
 
 func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
+	if t == nil || req == nil {
+		return nil
+	}
 	blocks := flattenClaudeCacheBlocks(req)
 	if len(blocks) == 0 {
 		return nil
@@ -167,30 +172,26 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 }
 
 // BuildOpenAIProfile creates a conservative, local-only cache profile for an
-// OpenAI request after it has been translated to Kiro's wire payload. Only
-// stable conversation material is fingerprinted: model, previous history,
-// tool definitions, and inference configuration. Conversations reuse stable
-// history prefixes; a single-turn request gets a final-prompt fallback so
-// repeated prompts retain the existing cache emulation behavior.
+// OpenAI request after it has been translated to Kiro's wire payload. Prefixes
+// cover the effective input, including the current turn. Transport identifiers
+// are excluded, and user messages retain the same shape when moved into history.
 func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInputTokens int) *promptCacheProfile {
 	if t == nil || payload == nil || totalInputTokens <= 0 {
 		return nil
 	}
 
 	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	var tools []KiroToolWrapper
+	if current.UserInputMessageContext != nil {
+		tools = current.UserInputMessageContext.Tools
+	}
 	stable := map[string]interface{}{
 		"model":            current.ModelID,
 		"inference_config": payload.InferenceConfig,
-	}
-	if current.UserInputMessageContext != nil {
-		// Tools are stable prompt material. Tool results belong to the current
-		// dynamic turn and must not participate in a cache-hit estimate.
-		stable["tools"] = current.UserInputMessageContext.Tools
+		"model_context":    payload.AdditionalModelRequestFields,
+		"tools":            tools,
 	}
 
-	// Keep a cumulative breakpoint after every historic message. A follow-up
-	// request may append new history, but it can still reuse an earlier stable
-	// prefix. The current dynamic message is intentionally never appended.
 	hasher := sha256.New()
 	cumulativeTokens := 0
 	appendStableBlock := func(value interface{}) {
@@ -200,47 +201,59 @@ func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInput
 	}
 	appendStableBlock(stable)
 
-	breakpoints := make([]promptCacheBreakpoint, 0, len(payload.ConversationState.History)+1)
+	breakpoints := make([]promptCacheBreakpoint, 0, len(payload.ConversationState.History)+2)
 	appendBreakpoint := func() {
-		if cumulativeTokens < minCacheableTokensForModel(current.ModelID) {
-			return
-		}
 		fingerprint := [32]byte{}
 		copy(fingerprint[:], hasher.Sum(nil))
 		breakpoints = append(breakpoints, promptCacheBreakpoint{
 			Fingerprint:      fingerprint,
-			CumulativeTokens: minInt(cumulativeTokens, totalInputTokens),
+			CumulativeTokens: cumulativeTokens,
 			TTL:              defaultPromptCacheTTL,
 		})
 	}
 	appendBreakpoint()
 	for _, historyMessage := range payload.ConversationState.History {
-		appendStableBlock(historyMessage)
-		appendBreakpoint()
-	}
-	if len(payload.ConversationState.History) == 0 {
-		appendStableBlock(current)
-		if cumulativeTokens >= minCacheableTokensForModel(current.ModelID) {
-			fingerprint := [32]byte{}
-			copy(fingerprint[:], hasher.Sum(nil))
-			breakpoints = append(breakpoints, promptCacheBreakpoint{Fingerprint: fingerprint, CumulativeTokens: totalInputTokens, TTL: defaultPromptCacheTTL})
+		if historyMessage.UserInputMessage != nil {
+			appendStableBlock(openAIUserCacheValue(*historyMessage.UserInputMessage))
+			appendBreakpoint()
+		}
+		if historyMessage.AssistantResponseMessage != nil {
+			appendStableBlock(map[string]interface{}{
+				"role": "assistant", "message": historyMessage.AssistantResponseMessage,
+			})
+			appendBreakpoint()
 		}
 	}
-	if len(breakpoints) == 0 {
+	appendStableBlock(openAIUserCacheValue(current))
+	appendBreakpoint()
+	if cumulativeTokens <= 0 || totalInputTokens < minCacheableTokensForModel(current.ModelID) {
 		return nil
 	}
+	for i := range breakpoints {
+		breakpoints[i].CumulativeTokens = minInt(totalInputTokens, int(math.Round(float64(breakpoints[i].CumulativeTokens)*float64(totalInputTokens)/float64(cumulativeTokens))))
+	}
 
-	// The dynamic current turn is included only in the variation seed;
-	// it remains excluded from stable-history cache matching.
-	inputFingerprint := sha256.Sum256([]byte(canonicalizeCacheValue(map[string]interface{}{
-		"stable": stable, "history": payload.ConversationState.History, "current": current,
-	})))
+	var inputFingerprint [32]byte
+	copy(inputFingerprint[:], hasher.Sum(nil))
 	return &promptCacheProfile{
 		Breakpoints:      breakpoints,
 		TotalInputTokens: totalInputTokens,
 		Model:            current.ModelID,
 		InputFingerprint: inputFingerprint,
 	}
+}
+
+func openAIUserCacheValue(message KiroUserInputMessage) map[string]interface{} {
+	value := map[string]interface{}{
+		"role": "user", "content": message.Content,
+		"images": message.Images, "documents": message.Documents,
+	}
+	var results []KiroToolResult
+	if message.UserInputMessageContext != nil {
+		results = message.UserInputMessageContext.ToolResults
+	}
+	value["tool_results"] = results
+	return value
 }
 
 // Compute uses a full-ratio policy; all request paths use the effective key policy.
@@ -288,8 +301,6 @@ func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *prom
 		if !ok || !entry.ExpiresAt.After(now) {
 			continue
 		}
-		entry.ExpiresAt = now.Add(entry.TTL)
-		entries[bp.Fingerprint] = entry
 		matched = minInt(bp.CumulativeTokens, lastTokens)
 		break
 	}
@@ -365,10 +376,17 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 		if breakpoint.CumulativeTokens < minTokens {
 			continue
 		}
-		entries[breakpoint.Fingerprint] = promptCacheEntry{
-			ExpiresAt: now.Add(breakpoint.TTL),
-			TTL:       breakpoint.TTL,
+		ttl := min(normalizePromptCacheTTL(breakpoint.TTL), t.maxSupportedTTL)
+		if ttl <= 0 {
+			continue
 		}
+		entry := entries[breakpoint.Fingerprint]
+		ttl = max(ttl, entry.TTL)
+		expiresAt := now.Add(ttl)
+		if entry.ExpiresAt.After(expiresAt) {
+			expiresAt = entry.ExpiresAt
+		}
+		entries[breakpoint.Fingerprint] = promptCacheEntry{ExpiresAt: expiresAt, TTL: ttl}
 	}
 }
 
@@ -403,6 +421,8 @@ func flattenClaudeCacheBlocks(req *ClaudeRequest) []cacheablePromptBlock {
 			"name":         tool.Name,
 			"description":  tool.Description,
 			"input_schema": tool.InputSchema,
+			"type":         tool.Type,
+			"max_uses":     tool.MaxUses,
 		}
 		fingerprintValue := stripCachePositionKeys(toolValue)
 		blocks = append(blocks, cacheablePromptBlock{
@@ -426,6 +446,8 @@ func buildCachePreludeBlock(req *ClaudeRequest) cacheablePromptBlock {
 		"kind":        "request_prelude",
 		"model":       req.Model,
 		"tool_choice": req.ToolChoice,
+		"thinking":    req.Thinking,
+		"output":      req.OutputConfig,
 	}
 	return cacheablePromptBlock{
 		Value:  prelude,

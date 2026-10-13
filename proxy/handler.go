@@ -228,7 +228,7 @@ func NewHandler() *Handler {
 		startTime:      time.Now().Unix(),
 		stopRefresh:    make(chan struct{}),
 		stopStatsSaver: make(chan struct{}),
-		promptCache:    newPromptCacheTracker(defaultPromptCacheTTL),
+		promptCache:    newPromptCacheTracker(maxPromptCacheTTL),
 		affinity:       newSessionAffinity(),
 		adminSessions:  newAdminSessionStore(),
 	}

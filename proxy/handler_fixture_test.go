@@ -18,6 +18,6 @@ func newHandlerWithoutBackgroundForTest(t *testing.T) *Handler {
 	return &Handler{
 		pool: pool.GetPool(), startTime: time.Now().Unix(),
 		stopRefresh: make(chan struct{}), stopStatsSaver: make(chan struct{}),
-		promptCache: newPromptCacheTracker(defaultPromptCacheTTL), affinity: newSessionAffinity(), adminSessions: newAdminSessionStore(),
+		promptCache: newPromptCacheTracker(maxPromptCacheTTL), affinity: newSessionAffinity(), adminSessions: newAdminSessionStore(),
 	}
 }

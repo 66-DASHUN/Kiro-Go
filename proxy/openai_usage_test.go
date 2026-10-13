@@ -109,15 +109,14 @@ func TestResolveOpenAICacheUsageEstimatedLifecycle(t *testing.T) {
 		t.Fatalf("first cache details = %#v, want write-only estimate", first)
 	}
 
-	// Current message text is deliberately excluded from the stable-prefix
-	// fingerprint, so a subsequent turn can reuse the stored prefix.
+	// A changed current turn reuses the stable history and creates the new tail.
 	secondPayload := estimatedOpenAIPayload("different dynamic user turn")
 	second := resolveOpenAICacheUsage(tracker, "account-a", secondPayload, 4096)
 	if second == nil {
 		t.Fatalf("second cache usage = %#v, want estimated details", second)
 	}
-	if second.CachedTokens <= 0 || second.CacheWriteTokens != 0 {
-		t.Fatalf("second cache details = %#v, want read-only estimate", second)
+	if second.CachedTokens <= 0 || second.CacheWriteTokens <= 0 || second.CachedTokens+second.CacheWriteTokens != 4096 {
+		t.Fatalf("second cache details = %#v, want prefix read and new-tail write", second)
 	}
 
 	otherAccount := resolveOpenAICacheUsage(tracker, "account-b", secondPayload, 4096)
@@ -135,8 +134,7 @@ func TestResolveOpenAICacheUsageHitsEarlierPrefixWhenHistoryGrows(t *testing.T) 
 	}
 
 	// The next turn adds history after the already stored stable prefix. The
-	// current user turn remains excluded, so the tracker must still find the
-	// earlier cumulative history breakpoint.
+	// current user turn is new; the tracker must still find the earlier prefix.
 	grownPayload := estimatedOpenAIPayload("second dynamic user turn")
 	grownPayload.ConversationState.History = append(grownPayload.ConversationState.History,
 		KiroHistoryMessage{UserInputMessage: &KiroUserInputMessage{

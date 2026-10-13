@@ -18,6 +18,12 @@ With API key authentication enabled, requests can select only accounts bound to 
 
 Per-key cache fields inherit the corresponding global value when omitted. A key can restore all cache defaults with clearPromptCacheOverrides. Policy changes do not replace other omitted account or settings fields.
 
+Cache matching uses cumulative content prefixes and is isolated by account, model, tool definitions and effective reasoning context. Claude tool-level cache_control survives request decoding. Five-minute and one-hour entries are supported; a shorter TTL cannot downgrade an existing live one-hour entry. Lookup does not renew cache state: only successful upstream completion stores or renews prefixes, so failed attempts cannot keep a prefix alive.
+
+Chat Completions and Responses profiles include the current message as well as history. Complete repeated requests can reuse the full eligible input. When the current turn changes or history grows, only unchanged earlier prefixes are read and the new tail is counted as creation. Prefix weights are normalized into total input token space, then scaled at completion to native upstream input usage. Current user messages have the same semantic fingerprint shape when moved into history; routing/conversation identifiers are excluded, while tool results, images and documents participate in content matching.
+
+The dispatch snapshot fixes the cache hit/miss decision and effective ratios for the entire request, including concurrent requests. Claude ordinary input plus cache creation plus cache reads equals total input. OpenAI cache details are subsets of inclusive input/prompt totals. Output tokens do not participate in input cache policy. These are in-memory local usage estimates, not upstream cache telemetry; restarting the service clears the simulated cache.
+
 ## Production scope
 
 The service keeps the kiro-go container name, existing Docker networks, aliases, localhost port and data mount. The release process tests a copied data directory on a separate loopback port before replacing only Kiro. It does not require changes to Sub2API, Nginx, DNS, firewall or other containers.
