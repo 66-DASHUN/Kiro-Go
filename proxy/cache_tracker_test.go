@@ -23,7 +23,7 @@ func TestPromptCacheTrackerComputeAndUpdate(t *testing.T) {
 		Messages: []ClaudeMessage{{Role: "user", Content: "hello world"}},
 	}
 
-	profile := tracker.BuildClaudeProfile(req, 120)
+	profile := tracker.BuildClaudeProfile(req, estimateClaudeRequestInputTokens(req))
 	if profile == nil {
 		t.Fatalf("expected cache profile to be built")
 	}

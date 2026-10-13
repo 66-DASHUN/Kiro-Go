@@ -985,7 +985,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 
 			var inputTokens, outputTokens int
 			var credits float64
-			var realInputTokens int
 			var toolUses []KiroToolUse
 			var nextContentIndex int
 			var rawContentBuilder strings.Builder
@@ -1249,10 +1248,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				},
 				OnToolUse: func(tu KiroToolUse) {
 					processClaudeText("", false, true)
-					rawContentBuilder.WriteString(tu.Name)
-					if b, err := json.Marshal(tu.Input); err == nil {
-						rawContentBuilder.Write(b)
-					}
 
 					toolUses = append(toolUses, tu)
 					ensureMessageStart()
@@ -1293,9 +1288,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				},
 				OnCredits: func(c float64) {
 					credits = c
-				},
-				OnContextUsage: func(pct float64) {
-					realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 				},
 				OnStopReason: func(reason string) {
 					upstreamStopReason = reason
@@ -1351,7 +1343,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				thinkingOutput = ""
 			}
 			estimatedOutputTokens := estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, realInputTokens, estimatedOutputTokens)
+			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
 			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
 			cacheProfile = cacheProfileWithInputTokens(cacheProfile, inputTokens)
 
@@ -1409,13 +1401,10 @@ func (h *Handler) recordSuccessForApiKey(apiKeyReservation *apiKeyUsageReservati
 	}
 }
 
-func finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, contextInputTokens, estimatedOutputTokens int) (int, int) {
+// Prefer native usage when available; context occupancy is not input usage.
+func finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens int) (int, int) {
 	if inputTokens <= 0 {
-		if contextInputTokens > 0 {
-			inputTokens = contextInputTokens
-		} else {
-			inputTokens = estimatedInputTokens
-		}
+		inputTokens = estimatedInputTokens
 	}
 	if outputTokens <= 0 {
 		outputTokens = estimatedOutputTokens
@@ -1493,7 +1482,6 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			var toolUses []KiroToolUse
 			var inputTokens, outputTokens int
 			var credits float64
-			var realInputTokens int
 			var upstreamStopReason string
 
 			callback := &KiroStreamCallback{
@@ -1513,9 +1501,6 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 				},
 				OnCredits: func(c float64) {
 					credits = c
-				},
-				OnContextUsage: func(pct float64) {
-					realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
 				},
 				OnStopReason: func(reason string) {
 					upstreamStopReason = reason
@@ -1553,7 +1538,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			}
 
 			estimatedOutputTokens := estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, realInputTokens, estimatedOutputTokens)
+			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
 			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
 			cacheProfile = cacheProfileWithInputTokens(cacheProfile, inputTokens)
 
@@ -1659,6 +1644,9 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	req.Model = actualModel
 	thinking = resolveThinkingWithEffort(thinking, req.ReasoningEffort)
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
+	if thinking {
+		estimatedInputTokens += estimateApproxTokens(ThinkingModePrompt)
+	}
 	apiKeyReservation, err := reserveApiKeyUsage(apiKeyID, apiKeyValue, tokenBudget(estimatedInputTokens))
 	if err != nil {
 		recordFinalRequestWithAPIKey(r.Context(), apiKeyID, apiKeyValue, nil, req.Model, 0, 0, 0, false, http.StatusTooManyRequests, err.Error())
@@ -1729,7 +1717,6 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 			var toolCallIndex int
 			var inputTokens, outputTokens int
 			var credits float64
-			var realInputTokens int
 			var upstreamStopReason string
 			var rawContentBuilder strings.Builder
 			var rawReasoningBuilder strings.Builder
@@ -1961,8 +1948,6 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 					processText("", false, true)
 
 					args, _ := json.Marshal(tu.Input)
-					rawContentBuilder.WriteString(tu.Name)
-					rawContentBuilder.Write(args)
 					tc := ToolCall{ID: tu.ToolUseID, Type: "function"}
 					tc.Function.Name = tu.Name
 					tc.Function.Arguments = string(args)
@@ -2002,15 +1987,12 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 				OnCredits: func(c float64) {
 					credits = c
 				},
-				OnContextUsage: func(pct float64) {
-					realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
-				},
 				OnStopReason: func(reason string) {
 					upstreamStopReason = reason
 				},
 			}
 
-			err := callKiroWithHostedSearch(r.Context(), account, payload, callback)
+			hostedCache, err := callKiroWithHostedSearch(r.Context(), account, payload, callback, h.promptCache, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()), thinking)
 			if err != nil {
 				if isContextCanceledError(err) {
 					recordClientDisconnect(r.Context(), apiKeyReservation, account, model)
@@ -2062,7 +2044,11 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 				estimatedOutputTokens += estimateApproxTokens(tc.Function.Name)
 				estimatedOutputTokens += estimateApproxTokens(tc.Function.Arguments)
 			}
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, realInputTokens, estimatedOutputTokens)
+			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			cacheDetails := hostedCache
+			if len(payload.HostedSearchTools) == 0 {
+				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)
+			}
 
 			h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 			getObserveStore().RecordSuccess(account.ID, model, inputTokens, outputTokens, credits)
@@ -2083,7 +2069,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 					"delta":         map[string]interface{}{},
 					"finish_reason": finishReason,
 				}},
-				"usage": buildOpenAIUsage(inputTokens, outputTokens, finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)),
+				"usage": buildOpenAIUsage(inputTokens, outputTokens, cacheDetails),
 			}
 			data, _ := json.Marshal(chunk)
 			fmt.Fprintf(w, "data: %s\n\n", string(data))
@@ -2144,7 +2130,6 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, r *http.Request, 
 			var toolUses []KiroToolUse
 			var inputTokens, outputTokens int
 			var credits float64
-			var realInputTokens int
 			var upstreamStopReason string
 
 			callback := &KiroStreamCallback{
@@ -2158,15 +2143,12 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, r *http.Request, 
 				OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
 				OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 				OnCredits:  func(c float64) { credits = c },
-				OnContextUsage: func(pct float64) {
-					realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
-				},
 				OnStopReason: func(reason string) {
 					upstreamStopReason = reason
 				},
 			}
 
-			err := callKiroWithHostedSearch(r.Context(), account, payload, callback)
+			hostedCache, err := callKiroWithHostedSearch(r.Context(), account, payload, callback, h.promptCache, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()), thinking)
 			if err != nil {
 				if isContextCanceledError(err) {
 					recordClientDisconnect(r.Context(), apiKeyReservation, account, model)
@@ -2194,7 +2176,11 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, r *http.Request, 
 			}
 
 			estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, realInputTokens, estimatedOutputTokens)
+			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			cacheDetails := hostedCache
+			if len(payload.HostedSearchTools) == 0 {
+				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)
+			}
 
 			h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 			getObserveStore().RecordSuccess(account.ID, model, inputTokens, outputTokens, credits)
@@ -2205,7 +2191,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, r *http.Request, 
 
 			thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 			resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
-			resp["usage"] = buildOpenAIUsage(inputTokens, outputTokens, finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens))
+			resp["usage"] = buildOpenAIUsage(inputTokens, outputTokens, cacheDetails)
 			if choices, ok := resp["choices"].([]map[string]interface{}); ok && len(choices) > 0 {
 				choices[0]["finish_reason"] = mapOpenAIFinishReason(upstreamStopReason, len(toolUses))
 			}

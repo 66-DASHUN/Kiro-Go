@@ -718,21 +718,21 @@ func TestRecordSuccessForApiKeyAttributesUsage(t *testing.T) {
 }
 
 func TestFinalizeUsageTokensPrefersProviderUsage(t *testing.T) {
-	in, out := finalizeUsageTokens(120, 34, 999, 5000, 88)
+	in, out := finalizeUsageTokens(120, 34, 999, 88)
 	if in != 120 || out != 34 {
 		t.Fatalf("expected provider usage to win, got input=%d output=%d", in, out)
 	}
 }
 
 func TestFinalizeUsageTokensFallsBackWhenProviderUsageMissing(t *testing.T) {
-	in, out := finalizeUsageTokens(0, 0, 999, 5000, 88)
-	if in != 5000 || out != 88 {
-		t.Fatalf("expected context input and estimated output fallback, got input=%d output=%d", in, out)
+	in, out := finalizeUsageTokens(0, 0, 999, 88)
+	if in != 999 || out != 88 {
+		t.Fatalf("context occupancy must not replace local input, got input=%d output=%d", in, out)
 	}
 
-	in, out = finalizeUsageTokens(0, 0, 999, 0, 88)
-	if in != 999 || out != 88 {
-		t.Fatalf("expected estimated input fallback, got input=%d output=%d", in, out)
+	in, out = finalizeUsageTokens(120, 0, 999, 88)
+	if in != 120 || out != 88 {
+		t.Fatalf("expected missing output fallback, got input=%d output=%d", in, out)
 	}
 }
 

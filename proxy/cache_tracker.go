@@ -140,11 +140,8 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	if totalInputTokens <= 0 {
 		totalInputTokens = cumulativeTokens
 	}
-	if totalInputTokens < cumulativeTokens {
-		totalInputTokens = cumulativeTokens
-	}
 	// Normalize estimated cumulative tokens into the caller's total-input
-	// token space so cache usage is reported against upstream billing totals.
+	// token space. Fingerprint metadata must not inflate the caller's count.
 	if len(breakpoints) > 0 {
 		normalizationBase := cumulativeTokens
 		if normalizationBase > 0 && totalInputTokens != normalizationBase {

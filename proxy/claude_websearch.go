@@ -548,7 +548,7 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 	}
 	var text, reasoning string
 	var toolUses []KiroToolUse
-	var inputTokens, outputTokens, realInputTokens int
+	var inputTokens, outputTokens int
 	var credits float64
 	var stopReason string
 	callback := &KiroStreamCallback{
@@ -559,12 +559,9 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 				text += t
 			}
 		},
-		OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
-		OnComplete: func(inTok, outTok int) { inputTokens, outputTokens = inTok, outTok },
-		OnCredits:  func(c float64) { credits = c },
-		OnContextUsage: func(pct float64) {
-			realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
-		},
+		OnToolUse:    func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+		OnComplete:   func(inTok, outTok int) { inputTokens, outputTokens = inTok, outTok },
+		OnCredits:    func(c float64) { credits = c },
 		OnStopReason: func(reason string) { stopReason = reason },
 	}
 	if err := CallKiroAPIContext(ctx, account, payload, callback); err != nil {
@@ -577,7 +574,7 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 	if !thinking {
 		reasoning = ""
 	}
-	inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, realInputTokens, estimateClaudeOutputTokens(text, reasoning, toolUses))
+	inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimateClaudeOutputTokens(text, reasoning, toolUses))
 	return &claudeWebSearchRound{
 		text:         text,
 		thinking:     reasoning,

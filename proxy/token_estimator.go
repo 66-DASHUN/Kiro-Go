@@ -6,6 +6,15 @@ import (
 )
 
 func estimateApproxTokens(text string) int {
+	n, err := countLocalTokens(text)
+	if err == nil {
+		return n
+	}
+	// A counting failure must not drop content from the usage estimate.
+	return estimateCharacterTokens(text)
+}
+
+func estimateCharacterTokens(text string) int {
 	if text == "" {
 		return 0
 	}
@@ -193,4 +202,40 @@ func estimateOpenAIContentTokens(content interface{}) int {
 
 func estimateOpenAIOutputTokens(content, reasoningContent string, toolUses []KiroToolUse) int {
 	return estimateClaudeOutputTokens(content, reasoningContent, toolUses)
+}
+
+// Hosted-search follow-ups have no public request object. Count their semantic
+// content, excluding transport identifiers/wrappers, with the same local engine.
+func estimateKiroPayloadInputTokens(payload *KiroPayload) int {
+	if payload == nil {
+		return 0
+	}
+	total := 0
+	addUser := func(msg *KiroUserInputMessage) {
+		if msg == nil {
+			return
+		}
+		total += estimateApproxTokens(msg.Content)
+		if msg.UserInputMessageContext == nil {
+			return
+		}
+		for _, tool := range msg.UserInputMessageContext.Tools {
+			total += estimateApproxTokens(tool.ToolSpecification.Name)
+			total += estimateApproxTokens(tool.ToolSpecification.Description)
+			total += estimateJSONTokens(tool.ToolSpecification.InputSchema.JSON)
+		}
+		for _, result := range msg.UserInputMessageContext.ToolResults {
+			for _, content := range result.Content {
+				total += estimateApproxTokens(content.Text)
+			}
+		}
+	}
+	for _, history := range payload.ConversationState.History {
+		addUser(history.UserInputMessage)
+		if msg := history.AssistantResponseMessage; msg != nil {
+			total += estimateClaudeOutputTokens(msg.Content, "", msg.ToolUses)
+		}
+	}
+	addUser(&payload.ConversationState.CurrentMessage.UserInputMessage)
+	return total
 }

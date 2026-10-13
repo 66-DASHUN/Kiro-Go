@@ -285,6 +285,14 @@ If an old/deleted account still has rows in `requests`, dashboard app credits ca
 
 Token labels may display compactly (`54.5M`, `476.5K`), but backend math and quota checks use raw numbers.
 
+When Kiro supplies positive native input/output Token counts, those values take precedence. Otherwise, input (system, history, tools/results and the current message) and actual output (text, thinking and tool arguments) use the same offline `o200k_base` BPE estimator. The vocabulary is compiled into the binary; no official API key, external counting request or runtime download is needed. Context-window occupancy (`contextUsagePercentage`) is diagnostic data and never substitutes for input usage.
+
+This is approximate local counting, not Claude's official tokenizer or billing. Text is counted in UTF-8-safe chunks of at most 4096 bytes to bound the cost of uninterrupted strings; chunk boundaries may change counts slightly. Counting errors fall back to the previous character estimator. Image/document estimation retains its existing limitations, and historical usage is not recalculated.
+
+Hosted web search counts each model round separately, including hidden search calls and follow-up inputs containing search results. Each round prefers native usage and has its own local fallback/cache snapshot, so new search results cannot inherit a cache hit merely from the initial request. Streaming tool output is counted once, consistently with non-streaming output.
+
+Cache remains a local simulation: each API key can override the configured ratio, which varies by input content/length within ±5 percentage points (clamped to 0–100%). Only eligible, unexpired prefixes on the same account can be read, and entries update after successful requests. Fingerprint metadata does not inflate the input total. Claude reports ordinary input + cache read + cache creation = total input; Chat Completions and Responses report total input with cache read/write as subsets. Output is counted separately. Small prefixes below the model's cache threshold produce no simulated cache tokens.
+
 ---
 
 ## 🧠 Thinking Mode
