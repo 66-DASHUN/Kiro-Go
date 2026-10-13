@@ -2,7 +2,7 @@
 
 This fork merges tanu360/kiro-reverse-api at 9290b3565528677085ff75d174f996d120e81a6d with the deployed Kiro-Go ef60b42 history.
 
-The new admin interface, SQLite, Responses endpoint, documents, backups, audit and stream completion fixes come from upstream. This fork retains account ownership by API key, global/per-key prompt cache policy, independent creation/read ratios, and the 90 percent cache read cap.
+The new admin interface, SQLite, Responses endpoint, documents, backups, audit and stream completion fixes come from upstream. This fork retains account ownership by API key, global/per-key prompt cache policy, and independent creation/read ratios. Cache policy values are references for local usage emulation: eligible creation/read portions vary deterministically with request input by up to five percentage points, without a fixed 90 percent cap. Endpoint settings of 0 and 100 percent remain exact. Partial-prefix hits and cold requests can have an overall read rate below that reference. Output tokens remain independent.
 
 ## Existing deployments
 

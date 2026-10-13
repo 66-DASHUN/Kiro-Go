@@ -24,21 +24,21 @@ func initRuntimeParityConfig(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 }
 
-func TestRuntimeCachePolicyRatiosDisableAndNinetyPercentCap(t *testing.T) {
+func TestRuntimeCachePolicyRatiosDisableAndConfiguredReference(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := &promptCacheProfile{TotalInputTokens: 10000, Model: "claude-sonnet-4.5", Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour}}}
 	policy := config.PromptCacheSettings{Enabled: true, Mode: config.PromptCacheModeIndependent, CreationRatio: 0.25, ReadRatio: 1}
 	first := tracker.ComputeWithSettings("a", profile, policy)
-	if first.CacheCreationInputTokens != 2500 || first.CacheCreation1hInputTokens != 2500 {
+	if first.CacheCreationInputTokens < 2000 || first.CacheCreationInputTokens > 3000 || first.CacheCreation1hInputTokens != first.CacheCreationInputTokens {
 		t.Fatalf("creation=%+v", first)
 	}
 	tracker.Update("a", profile)
 	second := tracker.ComputeWithSettings("a", profile, policy)
-	if second.CacheReadInputTokens != 9000 || second.CacheCreationInputTokens != 0 {
+	if second.CacheReadInputTokens != 10000 || second.CacheCreationInputTokens != 0 {
 		t.Fatalf("read=%+v", second)
 	}
 	policy.ReadRatio = 0.5
-	if got := tracker.ComputeWithSettings("a", profile, policy); got.CacheReadInputTokens != 5000 {
+	if got := tracker.ComputeWithSettings("a", profile, policy); got.CacheReadInputTokens < 4500 || got.CacheReadInputTokens > 5500 {
 		t.Fatalf("ratio=%+v", got)
 	}
 	policy.Enabled = false
@@ -256,7 +256,7 @@ func TestRuntimeOpenAIDefaultCacheForRepeatedSingleTurn(t *testing.T) {
 	}
 	tracker.Update("account", profile)
 	got := tracker.Compute("account", profile)
-	if got.CacheReadInputTokens != 9000 {
+	if got.CacheReadInputTokens != 10000 {
 		t.Fatalf("read=%+v", got)
 	}
 }
@@ -343,15 +343,7 @@ func TestRuntimeEveryProtocolPreservesNativeCountersAndEffectiveCachePolicy(t *t
 							if usage["input_tokens"].(float64)+creation+cached != 10000 || usage["output_tokens"] != float64(10) {
 								t.Fatalf("native counters changed: %v", usage)
 							}
-							expectedCreate, expectedRead := float64(0), float64(0)
-							if enabled {
-								if i == 0 {
-									expectedCreate = 2500
-								} else {
-									expectedRead = 5000
-								}
-							}
-							if creation != expectedCreate || cached != expectedRead {
+							if !enabled && (creation != 0 || cached != 0) || enabled && (i == 0 && (creation < 2000 || creation > 3000 || cached != 0) || i == 1 && (cached < 4500 || cached > 5500 || creation != 0)) {
 								t.Fatalf("policy iteration %d usage=%v", i, usage)
 							}
 						} else {
@@ -370,10 +362,12 @@ func TestRuntimeEveryProtocolPreservesNativeCountersAndEffectiveCachePolicy(t *t
 								if details == nil {
 									t.Fatalf("cache details missing: %v", usage)
 								}
-								if i == 0 && details["cache_write_tokens"] != float64(2500) {
+								creation := details["cache_write_tokens"].(float64)
+								cached := details["cached_tokens"].(float64)
+								if i == 0 && (creation < 2000 || creation > 3000 || cached != 0) {
 									t.Fatalf("creation ratio wrong: %v", details)
 								}
-								if i == 1 && details["cached_tokens"] != float64(5000) {
+								if i == 1 && (cached < 4500 || cached > 5500 || creation != 0) {
 									t.Fatalf("read ratio wrong: %v", details)
 								}
 							}
@@ -585,7 +579,7 @@ func TestRuntimeConcurrentColdRequestsKeepDispatchCacheMiss(t *testing.T) {
 					creation, _ = details["cache_write_tokens"].(float64)
 					cached, _ = details["cached_tokens"].(float64)
 				}
-				if creation != float64(2500) || cached != float64(0) {
+				if creation < 2000 || creation > 3000 || cached != float64(0) {
 					t.Fatalf("request %d changed dispatch miss after concurrent completion: %v", i, usage)
 				}
 			}
@@ -614,7 +608,7 @@ func TestRuntimeNativeWebSearchLoopUsesEffectiveCachePolicy(t *testing.T) {
 		usage := runtimeProtocolUsage(t, rec, false)
 		creation, _ := usage["cache_creation_input_tokens"].(float64)
 		cached, _ := usage["cache_read_input_tokens"].(float64)
-		if (i == 0 && creation != 2500) || (i == 1 && cached != 5000) || usage["input_tokens"].(float64)+creation+cached != 10000 {
+		if (i == 0 && (creation < 2000 || creation > 3000 || cached != 0)) || (i == 1 && (cached < 4500 || cached > 5500 || creation != 0)) || usage["input_tokens"].(float64)+creation+cached != 10000 {
 			t.Fatalf("round %d usage=%v", i, usage)
 		}
 	}

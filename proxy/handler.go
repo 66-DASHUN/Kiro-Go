@@ -980,7 +980,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				break
 			}
 			cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, cacheSettings)
-			messageStartUsage = cacheUsage
+			messageStartUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, startInputTokens)
 
 			var inputTokens, outputTokens int
 			var credits float64
