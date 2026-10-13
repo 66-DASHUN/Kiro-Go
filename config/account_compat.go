@@ -80,6 +80,12 @@ func AccountIDExists(id string) bool {
 // backup/restore lock order. This also makes ownership validation atomic with
 // enabling, disabling or deleting its API key.
 func addAccount(account Account, separate bool) error {
+	if account.MaxConcurrency < 0 || account.MaxConcurrency > MaxAccountMaxConcurrency {
+		return ErrInvalidAccountConcurrency
+	}
+	if account.MaxConcurrency == 0 {
+		account.MaxConcurrency = DefaultAccountMaxConcurrency
+	}
 	if IsAPIKeyAccount(&account) {
 		if err := NormalizeAPIKeyAccount(&account); err != nil {
 			return err
@@ -170,6 +176,12 @@ func mutateAccount(id string, separate bool, mutate func(*Account) error) (Accou
 
 func UpdateAccountPatch(id string, patch AccountPatch) (Account, error) {
 	return mutateAccount(id, false, func(updated *Account) error {
+		if patch.MaxConcurrency != nil {
+			if *patch.MaxConcurrency < 1 || *patch.MaxConcurrency > MaxAccountMaxConcurrency {
+				return ErrInvalidAccountConcurrency
+			}
+			updated.MaxConcurrency = *patch.MaxConcurrency
+		}
 		if patch.ApiKeyID != nil {
 			keyID := strings.TrimSpace(*patch.ApiKeyID)
 			if keyID != "" && !isApiKeyIDValidLocked(keyID) {

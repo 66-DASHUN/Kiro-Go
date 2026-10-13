@@ -25,7 +25,7 @@ func accountBindingName(id string) string {
 
 func (h *Handler) writeAddAccountError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
-	if errors.Is(err, config.ErrInvalidAccountApiKey) {
+	if errors.Is(err, config.ErrInvalidAccountApiKey) || errors.Is(err, config.ErrInvalidAccountConcurrency) {
 		status = http.StatusBadRequest
 	}
 	if errors.Is(err, config.ErrDuplicateKiroAPIKey) || errors.Is(err, config.ErrDuplicateRefreshToken) || errors.Is(err, config.ErrDuplicateAccountID) {

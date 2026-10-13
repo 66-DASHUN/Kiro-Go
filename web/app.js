@@ -1326,6 +1326,14 @@
       '<button class="btn btn-sm btn-primary" data-detail-action="saveWeight" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div>' +
 
+      '<div class="detail-section"><h4>' + escapeHtml(t('detail.maxConcurrency')) + '</h4>' +
+      '<div class="form-group">' +
+      '<input type="number" id="maxConcurrencyInput" value="' + escapeAttr(a.maxConcurrency || 5) + '" min="1" max="2147483647" step="1" />' +
+      '<small>' + escapeHtml(t('detail.maxConcurrencyHint')) + '</small>' +
+      '</div>' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveMaxConcurrency" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '</div>' +
+
       '<div class="detail-section detail-section-overage">' +
       '<div class="detail-section-header">' +
       '<h4>' + escapeHtml(t('detail.overage')) + '</h4>' +
@@ -1435,6 +1443,13 @@
   async function saveWeight(id) {
     const weight = parseInt($('weightInput').value, 10) || 0;
     await putAccount(id, { weight }, t('detail.saved'));
+  }
+  async function saveMaxConcurrency(id) {
+    const maxConcurrency = Number($('maxConcurrencyInput').value);
+    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 2147483647) {
+      toast(t('detail.maxConcurrencyError'), 'warning'); return;
+    }
+    await putAccount(id, { maxConcurrency }, t('detail.saved'));
   }
   async function saveAccountApiKey(id) {
     const apiKeyId = $('detailApiKeySelect').value;
@@ -3906,6 +3921,7 @@
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
       else if (a === 'saveWeight') saveWeight(id);
+      else if (a === 'saveMaxConcurrency') saveMaxConcurrency(id);
       else if (a === 'saveApiKey') saveAccountApiKey(id);
       else if (a === 'refreshOverage') refreshOverage(id);
       else if (a === 'saveProxyURL') saveProxyURL(id);

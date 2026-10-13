@@ -14,6 +14,7 @@ import (
 	"kiro-proxy/db"
 	"kiro-proxy/logger"
 	"kiro-proxy/pool"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -2502,6 +2503,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, _ *http.Request) {
 			"hasToken":          a.AccessToken != "",
 			"machineId":         a.MachineId,
 			"weight":            a.Weight,
+			"maxConcurrency":    a.ConcurrencyLimit(),
 			"overageStatus":     a.OverageStatus,
 			"overageCapability": a.OverageCapability,
 			"overageCap":        a.OverageCap,
@@ -2646,6 +2648,15 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		weight := int(v)
 		patch.Weight = &weight
 	}
+	if raw, present := updates["maxConcurrency"]; present {
+		v, ok := raw.(float64)
+		if !ok || v < 1 || v > config.MaxAccountMaxConcurrency || v != math.Trunc(v) {
+			h.writeAddAccountError(w, config.ErrInvalidAccountConcurrency)
+			return
+		}
+		limit := int(v)
+		patch.MaxConcurrency = &limit
+	}
 	if v, ok := updates["proxyURL"].(string); ok {
 		patch.ProxyURL = &v
 	}
@@ -2679,6 +2690,9 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	h.pool.Reload()
+	if patch.MaxConcurrency != nil {
+		upstreamAccountConcurrency.notify(&updated)
+	}
 
 	if !oldEnabled && updated.Enabled && updated.AccessToken != "" {
 		go func(acc config.Account) {
@@ -3856,6 +3870,7 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, _ *http.Request, id s
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
 		"weight":            account.Weight,
+		"maxConcurrency":    account.ConcurrencyLimit(),
 		"overageStatus":     account.OverageStatus,
 		"overageCapability": account.OverageCapability,
 		"overageCap":        account.OverageCap,

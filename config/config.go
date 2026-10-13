@@ -53,7 +53,8 @@ type Account struct {
 
 	ProxyURL string `json:"proxyURL,omitempty"`
 
-	Weight int `json:"weight,omitempty"`
+	Weight         int `json:"weight,omitempty"`
+	MaxConcurrency int `json:"maxConcurrency,omitempty"`
 
 	OverageStatus      string  `json:"overageStatus,omitempty"`
 	OverageCapability  string  `json:"overageCapability,omitempty"`
@@ -109,18 +110,19 @@ type ModelMappingRule struct {
 }
 
 type AccountPatch struct {
-	ApiKeyID     *string
-	Nickname     *string
-	Enabled      *bool
-	MachineID    *string
-	Weight       *int
-	ProxyURL     *string
-	Silent       *bool
-	SilentReason *string
-	SilentTime   *int64
-	BanStatus    *string
-	BanReason    *string
-	BanTime      *int64
+	ApiKeyID       *string
+	Nickname       *string
+	Enabled        *bool
+	MachineID      *string
+	Weight         *int
+	MaxConcurrency *int
+	ProxyURL       *string
+	Silent         *bool
+	SilentReason   *string
+	SilentTime     *int64
+	BanStatus      *string
+	BanReason      *string
+	BanTime        *int64
 }
 
 type PromptCacheSettings struct {
@@ -504,6 +506,7 @@ func preserveAccountCredentials(account *Account, current Account) {
 		account.RefreshTokenFingerprint = RefreshTokenFingerprint(current.RefreshToken)
 	}
 	account.ApiKeyID = current.ApiKeyID
+	account.MaxConcurrency = current.MaxConcurrency
 	account.KiroApiKey = current.KiroApiKey
 	account.ClientID = current.ClientID
 	account.ClientSecret = current.ClientSecret

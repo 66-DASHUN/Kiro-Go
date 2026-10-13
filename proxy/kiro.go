@@ -317,6 +317,11 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	release, err := upstreamAccountConcurrency.acquire(ctx, account)
+	if err != nil {
+		return err
+	}
+	defer release()
 	originalProfileArn := ""
 	if payload != nil {
 		originalProfileArn = payload.ProfileArn

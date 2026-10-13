@@ -164,6 +164,11 @@ func performKiroWebSearch(ctx context.Context, account *config.Account, query st
 	if query == "" {
 		return nil, fmt.Errorf("query is required")
 	}
+	release, err := upstreamAccountConcurrency.acquire(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	reqCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	if !config.IsAPIKeyAccount(account) {
