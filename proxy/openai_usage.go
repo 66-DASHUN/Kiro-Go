@@ -19,13 +19,13 @@ func resolveOpenAICacheUsageWithSettings(tracker *promptCacheTracker, accountID 
 	if tracker == nil || !settings.Enabled {
 		return nil
 	}
-	profile := tracker.BuildOpenAIProfile(payload, inputTokens)
+	profile := tracker.BuildOpenAIProfileWithSettings(payload, inputTokens, settings)
 	if profile == nil {
 		return nil
 	}
 	estimated := tracker.ComputeWithSettings(accountID, profile, settings)
 	// Store only after a successful upstream response.
-	tracker.Update(accountID, profile)
+	tracker.UpdateWithSettings(accountID, profile, settings, estimated)
 	if estimated.CacheReadInputTokens == 0 && estimated.CacheCreationInputTokens == 0 {
 		return nil
 	}
@@ -76,7 +76,7 @@ func beginOpenAICacheUsage(tracker *promptCacheTracker, accountID string, payloa
 	if tracker == nil || !settings.Enabled {
 		return openAICacheSnapshot{}
 	}
-	profile := tracker.BuildOpenAIProfile(payload, inputTokens)
+	profile := tracker.BuildOpenAIProfileWithSettings(payload, inputTokens, settings)
 	return openAICacheSnapshot{profile: profile, usage: tracker.ComputeWithSettings(accountID, profile, settings), settings: settings}
 }
 
@@ -85,7 +85,7 @@ func finishOpenAICacheUsage(tracker *promptCacheTracker, accountID string, snaps
 		return nil
 	}
 	usage := scalePromptCacheUsage(snapshot.usage, snapshot.profile, inputTokens)
-	tracker.Update(accountID, cacheProfileWithInputTokens(snapshot.profile, inputTokens))
+	tracker.UpdateWithSettings(accountID, cacheProfileWithInputTokens(snapshot.profile, inputTokens), snapshot.settings, usage)
 	if usage.CacheCreationInputTokens == 0 && usage.CacheReadInputTokens == 0 {
 		return nil
 	}

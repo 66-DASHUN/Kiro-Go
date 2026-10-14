@@ -1354,7 +1354,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 			h.rememberAccount(payload, account)
 			h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 			if cacheSettings.Enabled {
-				h.promptCache.Update(account.ID, cacheProfile)
+				h.promptCache.UpdateWithSettings(account.ID, cacheProfile, cacheSettings, cacheUsage)
 			}
 
 			stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
@@ -1549,7 +1549,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			h.rememberAccount(payload, account)
 			h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 			if cacheSettings.Enabled {
-				h.promptCache.Update(account.ID, cacheProfile)
+				h.promptCache.UpdateWithSettings(account.ID, cacheProfile, cacheSettings, cacheUsage)
 			}
 
 			responseThinkingContent := rawThinkingContent
@@ -2375,6 +2375,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetSettings(w, r)
 	case path == "/settings" && r.Method == "POST":
 		h.apiUpdateSettings(w, r)
+	case path == "/prompt-cache/diagnostics" && r.Method == "GET":
+		h.apiPromptCacheDiagnostics(w, r)
 	case path == "/stats" && r.Method == "GET":
 		h.apiGetStats(w, r)
 	case path == "/stats/reset" && r.Method == "POST":

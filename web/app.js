@@ -23,7 +23,7 @@
   let iamApiKeyId = '';
   let pendingApiKeyId = '';
   let accountModalGeneration = 0;
-  let promptCacheSettings = { enabled: true, mode: 'prefix', ratio: 0.95, creationRatio: 1, readRatio: 0.95 };
+  let promptCacheSettings = { enabled: true, mode: 'prefix_total', ratio: 0.95, creationRatio: 1, readRatio: 0.95 };
   // Microsoft SSO: 'kiro' (portal callback) then 'microsoft' (Entra callback), then maybe a profile pick.
   let ms = { session: '', stage: 'kiro', authorizeUrl: '', selectionId: '', profiles: [], busy: false, generation: 0, apiKeyId: '' };
   let exportSelectedIds = new Set();
@@ -1679,7 +1679,7 @@
     promptCacheSettings = normalizePromptCacheSettings(d);
     setCacheForm('promptCache', promptCacheSettings);
     if (!editingApiKeyId) resetApiKeyCacheEditor();
-    await Promise.all([loadApiKeys(), loadThinkingConfig(), loadModelMappings(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter()]);
+    await Promise.all([loadApiKeys(), loadThinkingConfig(), loadModelMappings(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadCacheDiagnostics()]);
     syncApiKeyManagementVisibility();
     refreshCustomSelects();
   }
@@ -1692,8 +1692,8 @@
     return (clampRatio(value) * 100).toFixed(1).replace(/\.0$/, '');
   }
   function normalizePromptCacheSettings(source) {
-    const mode = ['prefix', 'uniform', 'independent'].includes(source.promptCacheEmulationMode) ? source.promptCacheEmulationMode : 'prefix';
-    const ratio = clampRatio(source.promptCacheEmulationRatio, mode === 'prefix' ? 0.95 : 1);
+    const mode = ['prefix_total', 'prefix', 'uniform', 'independent'].includes(source.promptCacheEmulationMode) ? source.promptCacheEmulationMode : 'prefix_total';
+    const ratio = clampRatio(source.promptCacheEmulationRatio, (mode === 'prefix' || mode === 'prefix_total') ? 0.95 : 1);
     return {
       enabled: source.promptCacheEmulationEnabled !== false, mode, ratio,
       creationRatio: clampRatio(source.promptCacheCreationEmulationRatio),
@@ -1707,7 +1707,7 @@
   }
   function rawApiKeyCacheSettings(entry) {
     const inherited = promptCacheSettings;
-    const mode = entry && ['prefix', 'uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
+    const mode = entry && ['prefix_total', 'prefix', 'uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
     const ratio = clampRatio(entry && entry.promptCacheEmulationRatio, inherited.ratio);
     return {
       enabled: entry && entry.promptCacheEmulationEnabled != null ? entry.promptCacheEmulationEnabled : inherited.enabled,
@@ -1731,7 +1731,8 @@
   function apiKeyCacheSummary(entry) {
     const effective = effectiveApiKeyCacheSettings(entry);
     const scope = t(hasApiKeyCacheOverride(entry) ? 'apiKeys.cacheIndependent' : 'apiKeys.cacheInherited');
-    const policy = !effective.enabled ? t('apiKeys.cacheDisabled') : effective.mode === 'prefix'
+    const policy = !effective.enabled ? t('apiKeys.cacheDisabled') : effective.mode === 'prefix_total'
+      ? t('apiKeys.cacheTotal', ratioToPercent(effective.ratio)) : effective.mode === 'prefix'
       ? t('apiKeys.cachePrefix', ratioToPercent(effective.ratio)) : effective.mode === 'uniform'
       ? t('apiKeys.cacheUniform', ratioToPercent(effective.ratio))
       : t('apiKeys.cacheIndependentRatios', ratioToPercent(effective.creationRatio), ratioToPercent(effective.readRatio));
@@ -1747,6 +1748,12 @@
   }
   function syncCacheForm(prefix, inherited) {
     const independent = $(prefix + 'Mode').value === 'independent';
+    const totalMode = $(prefix + 'Mode').value === 'prefix_total';
+    const ratioLabel = document.querySelector('label[for="' + prefix + 'Ratio"]');
+    ratioLabel.dataset.i18n = totalMode ? 'settings.totalCacheRatio' : 'settings.promptCacheRatio';
+    ratioLabel.textContent = t(ratioLabel.dataset.i18n);
+    $(prefix + 'CreationRatio').closest('.form-group').hidden = totalMode;
+    $(prefix + 'ReadRatio').closest('.form-group').hidden = totalMode;
     $(prefix + 'Enabled').disabled = inherited;
     $(prefix + 'Mode').disabled = inherited;
     $(prefix + 'Ratio').disabled = inherited || independent;
@@ -1756,7 +1763,7 @@
   }
   function cacheFormValues(prefix) {
     const selected = $(prefix + 'Mode').value;
-    const mode = ['prefix', 'uniform', 'independent'].includes(selected) ? selected : 'prefix';
+    const mode = ['prefix_total', 'prefix', 'uniform', 'independent'].includes(selected) ? selected : 'prefix_total';
     const readRatio = field => {
       const raw = $(prefix + field).value.trim();
       const percent = Number(raw);
@@ -1771,6 +1778,25 @@
       promptCacheCreationEmulationRatio: readRatio('CreationRatio'),
       promptCacheReadEmulationRatio: readRatio('ReadRatio')
     };
+  }
+  async function loadCacheDiagnostics() {
+    const container = $('cacheDiagnostics');
+    try {
+      const res = await api('/prompt-cache/diagnostics');
+      if (!res.ok) throw new Error(t('common.loadFailed'));
+      const data = await res.json();
+      const records = (data.records || []).slice(-20).reverse();
+      if (!records.length) { container.textContent = t('settings.cacheDiagnosticsEmpty'); return; }
+      const percent = (part, total) => total > 0 ? (part / total * 100).toFixed(2) + '%' : '0%';
+      const cell = value => '<td>' + escapeHtml(String(value)) + '</td>';
+      const headers = ['cacheDiagnosticId', 'cacheDiagnosticTime', 'cacheDiagnosticTotal', 'cacheDiagnosticPrefix', 'cacheDiagnosticMatched', 'totalCacheRatio', 'cacheDiagnosticActual', 'cacheDiagnosticRead', 'cacheDiagnosticWrite', 'cacheDiagnosticOrdinary', 'cacheDiagnosticTTL', 'cacheDiagnosticReason'];
+      container.innerHTML = '<table><thead><tr>' + headers.map(key => '<th>' + escapeHtml(t('settings.' + key)) + '</th>').join('') + '</tr></thead><tbody>' + records.map(row => '<tr>' +
+        cell(row.id) + cell(new Date(row.time).toLocaleTimeString()) + cell(row.total) + cell(row.cacheable) + cell(row.matched) +
+        cell(percent(row.ratio, 1)) + cell(percent(row.budget, row.total)) +
+        cell(row.read + ' (' + percent(row.read, row.total) + ')') + cell(row.write + ' (' + percent(row.write, row.total) + ')') +
+        cell(row.ordinary) + cell(row.write5m + ' / ' + row.write1h) +
+        cell(t('settings.cacheReason.' + (row.limitation || 'eligible')) + ' · ' + row.rule) + '</tr>').join('') + '</tbody></table>';
+    } catch (e) { container.textContent = (e && e.message) || t('common.loadFailed'); }
   }
   async function savePromptCacheSettings() {
     const button = $('savePromptCacheBtn');
@@ -3691,6 +3717,7 @@
 
   function bindSettingsEvents() {
     $('savePromptCacheBtn').addEventListener('click', savePromptCacheSettings);
+    $('refreshCacheDiagnosticsBtn').addEventListener('click', loadCacheDiagnostics);
     $('promptCacheMode').addEventListener('change', () => syncCacheForm('promptCache', false));
     $('promptCacheRatio').addEventListener('input', () => syncCacheForm('promptCache', false));
     $('apiKeyCacheScope').addEventListener('change', () => {

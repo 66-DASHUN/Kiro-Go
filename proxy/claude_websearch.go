@@ -513,7 +513,7 @@ func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRe
 			if err == nil {
 				round.cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, round.inputTokens)
 				if cacheSettings.Enabled {
-					h.promptCache.Update(account.ID, cacheProfileWithInputTokens(cacheProfile, round.inputTokens))
+					h.promptCache.UpdateWithSettings(account.ID, cacheProfileWithInputTokens(cacheProfile, round.inputTokens), cacheSettings, round.cacheUsage)
 				}
 				h.rememberAccount(payload, account)
 				return round, account, nil

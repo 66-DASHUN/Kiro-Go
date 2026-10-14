@@ -362,10 +362,14 @@ func callKiroWithHostedSearch(ctx context.Context, account *config.Account, payl
 	totalIn, totalOut := 0, 0
 	totalCredits := 0.0
 	var totalCache *OpenAITokenDetails
-	var pendingProfiles []*promptCacheProfile
+	type pendingCacheUpdate struct {
+		profile *promptCacheProfile
+		usage   promptCacheUsage
+	}
+	var pendingProfiles []pendingCacheUpdate
 	commitCache := func() {
-		for _, profile := range pendingProfiles {
-			tracker.Update(account.ID, profile)
+		for _, pending := range pendingProfiles {
+			tracker.UpdateWithSettings(account.ID, pending.profile, settings, pending.usage)
 		}
 	}
 	for round := 0; round <= maxRounds; round++ {
@@ -412,7 +416,7 @@ func callKiroWithHostedSearch(ctx context.Context, account *config.Account, payl
 		// follow-up must not create or renew a prefix for the next client request.
 		if cacheSnapshot.profile != nil && cacheSnapshot.settings.Enabled {
 			roundUsage := scalePromptCacheUsage(cacheSnapshot.usage, cacheSnapshot.profile, roundIn)
-			pendingProfiles = append(pendingProfiles, cacheProfileWithInputTokens(cacheSnapshot.profile, roundIn))
+			pendingProfiles = append(pendingProfiles, pendingCacheUpdate{profile: cacheProfileWithInputTokens(cacheSnapshot.profile, roundIn), usage: roundUsage})
 			if totalCache == nil {
 				totalCache = &OpenAITokenDetails{Estimated: true}
 			}

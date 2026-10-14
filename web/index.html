@@ -447,6 +447,7 @@
                 <div class="form-group">
                   <label for="apiKeyCacheMode" data-i18n="apiKeys.cacheMode"></label>
                   <select id="apiKeyCacheMode">
+                    <option value="prefix_total" data-i18n="apiKeys.cacheModePrefixTotal"></option>
                     <option value="prefix" data-i18n="apiKeys.cacheModePrefix"></option>
                     <option value="uniform" data-i18n="apiKeys.cacheModeUniform"></option>
                     <option value="independent" data-i18n="apiKeys.cacheModeIndependent"></option>
@@ -495,6 +496,7 @@
           <div class="form-group">
             <label for="promptCacheMode" data-i18n="settings.promptCacheMode"></label>
             <select id="promptCacheMode">
+              <option value="prefix_total" data-i18n="settings.promptCacheModePrefixTotal"></option>
               <option value="prefix" data-i18n="settings.promptCacheModePrefix"></option>
               <option value="uniform" data-i18n="settings.promptCacheModeUniform"></option>
               <option value="independent" data-i18n="settings.promptCacheModeIndependent"></option>
@@ -517,6 +519,9 @@
           </div>
           <p class="help-block" data-i18n="settings.promptCacheRatioHint"></p>
           <button class="btn btn-primary" id="savePromptCacheBtn" type="button" data-i18n="settings.savePromptCache"></button>
+          <p class="help-block" data-i18n="settings.cacheDiagnosticsHint"></p>
+          <button class="btn" id="refreshCacheDiagnosticsBtn" type="button" data-i18n="settings.refreshCacheDiagnostics"></button>
+          <div id="cacheDiagnostics" class="table-wrap" aria-live="polite"></div>
         </div>
 
         <div class="card">

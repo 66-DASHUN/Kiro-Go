@@ -26,6 +26,14 @@ const (
 )
 
 type promptCacheUsage struct {
+	totalCacheRate             bool
+	totalRatio                 float64
+	startedAt                  time.Time
+	matchedFingerprint         [32]byte
+	matchedTTL                 time.Duration
+	finalCacheable             int
+	finalMatched               int
+	limitation                 string
 	prefixReadWrite            bool
 	rawCacheable               int
 	rawRead                    int
@@ -44,10 +52,12 @@ type promptCacheBreakpoint struct {
 	Fingerprint      [32]byte
 	CumulativeTokens int
 	TTL              time.Duration
+	Position         int
 }
 
 type promptCacheProfile struct {
 	Breakpoints      []promptCacheBreakpoint
+	LookupCandidates []promptCacheBreakpoint
 	TotalInputTokens int
 	Model            string
 	InputFingerprint [32]byte
@@ -55,6 +65,9 @@ type promptCacheProfile struct {
 
 func minCacheableTokensForModel(model string) int {
 	lower := strings.ToLower(model)
+	if strings.Contains(strings.ReplaceAll(lower, ".", "-"), "haiku-4-5") {
+		return 4096
+	}
 	if strings.Contains(lower, "opus") {
 		return opusMinCacheableTokens
 	}
@@ -70,6 +83,8 @@ type promptCacheTracker struct {
 	mu               sync.Mutex
 	entriesByAccount map[string]map[[32]byte]promptCacheEntry
 	maxSupportedTTL  time.Duration
+	diagnostics      []promptCacheDiagnostic
+	diagnosticSeq    uint64
 }
 
 func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
@@ -84,14 +99,14 @@ func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
 }
 
 func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
-	return t.buildClaudeProfile(req, totalInputTokens, false)
+	return t.buildClaudeProfile(req, totalInputTokens, false, false)
 }
 
 func (t *promptCacheTracker) BuildClaudeProfileWithSettings(req *ClaudeRequest, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
-	return t.buildClaudeProfile(req, totalInputTokens, settings.Mode == config.PromptCacheModePrefix)
+	return t.buildClaudeProfile(req, totalInputTokens, settings.Mode == config.PromptCacheModePrefix || settings.Mode == config.PromptCacheModePrefixTotal, settings.Mode == config.PromptCacheModePrefixTotal)
 }
 
-func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTokens int, strictBreakpoints bool) *promptCacheProfile {
+func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTokens int, strictBreakpoints, totalCacheRate bool) *promptCacheProfile {
 	if t == nil || req == nil {
 		return nil
 	}
@@ -102,7 +117,10 @@ func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTo
 
 	hasher := sha256.New()
 	breakpoints := make([]promptCacheBreakpoint, 0)
+	candidates := make([]promptCacheBreakpoint, 0)
 	cumulativeTokens := 0
+	position := 0
+	previousGroup := ""
 	var activeTTL time.Duration
 	hasExplicitBreakpoint := false
 	for _, block := range blocks {
@@ -116,6 +134,19 @@ func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTo
 		canonical := canonicalizeCacheValue(block.Value)
 		writeHashChunk(hasher, canonical)
 		cumulativeTokens += block.Tokens
+		if !block.IsMetadata {
+			group := promptCacheBlockGroup(block.Value)
+			if group == "" || group != previousGroup {
+				position++
+			}
+			previousGroup = group
+			if block.IsMessageEnd {
+				previousGroup = ""
+			}
+			var fingerprint [32]byte
+			copy(fingerprint[:], hasher.Sum(nil))
+			candidates = append(candidates, promptCacheBreakpoint{Fingerprint: fingerprint, CumulativeTokens: cumulativeTokens, Position: position})
+		}
 
 		// Determine whether this block acts as a cache breakpoint:
 		//   1) Explicit cache_control on the block itself.
@@ -144,6 +175,7 @@ func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTo
 			Fingerprint:      fingerprint,
 			CumulativeTokens: cumulativeTokens,
 			TTL:              breakpointTTL,
+			Position:         position,
 		})
 	}
 
@@ -165,11 +197,22 @@ func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTo
 			}
 		}
 	}
+	if totalCacheRate {
+		for i := range candidates {
+			if semanticTotal > 0 && totalInputTokens != semanticTotal {
+				candidates[i].CumulativeTokens = minInt(totalInputTokens, int(math.Round(float64(candidates[i].CumulativeTokens)*float64(totalInputTokens)/float64(semanticTotal))))
+			}
+		}
+		candidates = promptCacheLookbackCandidates(candidates, breakpoints)
+	} else {
+		candidates = nil
+	}
 
 	var inputFingerprint [32]byte
 	copy(inputFingerprint[:], hasher.Sum(nil))
 	return &promptCacheProfile{
 		Breakpoints:      breakpoints,
+		LookupCandidates: candidates,
 		TotalInputTokens: totalInputTokens,
 		Model:            req.Model,
 		InputFingerprint: inputFingerprint,
@@ -181,6 +224,14 @@ func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTo
 // cover the effective input, including the current turn. Transport identifiers
 // are excluded, and user messages retain the same shape when moved into history.
 func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInputTokens int) *promptCacheProfile {
+	return t.buildOpenAIProfile(payload, totalInputTokens, false)
+}
+
+func (t *promptCacheTracker) BuildOpenAIProfileWithSettings(payload *KiroPayload, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
+	return t.buildOpenAIProfile(payload, totalInputTokens, settings.Mode == config.PromptCacheModePrefixTotal)
+}
+
+func (t *promptCacheTracker) buildOpenAIProfile(payload *KiroPayload, totalInputTokens int, includeShortProfile bool) *promptCacheProfile {
 	if t == nil || payload == nil || totalInputTokens <= 0 {
 		return nil
 	}
@@ -235,7 +286,7 @@ func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInput
 	}
 	appendStableBlock(openAIUserCacheValue(current), estimateKiroUserInputTokens(&current, false))
 	appendBreakpoint()
-	if cumulativeTokens <= 0 || totalInputTokens < minCacheableTokensForModel(current.ModelID) {
+	if cumulativeTokens <= 0 || (!includeShortProfile && totalInputTokens < minCacheableTokensForModel(current.ModelID)) {
 		return nil
 	}
 	for i := range breakpoints {
@@ -271,6 +322,9 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 }
 
 func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *promptCacheProfile, settings config.PromptCacheSettings) promptCacheUsage {
+	if settings.Mode == config.PromptCacheModePrefixTotal {
+		return t.computeTotalCacheUsage(accountID, profile, settings)
+	}
 	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" || !settings.Enabled {
 		return promptCacheUsage{}
 	}
@@ -385,8 +439,12 @@ func cacheProfileWithInputTokens(profile *promptCacheProfile, inputTokens int) *
 	result := *profile
 	result.TotalInputTokens = inputTokens
 	result.Breakpoints = append([]promptCacheBreakpoint(nil), profile.Breakpoints...)
+	result.LookupCandidates = append([]promptCacheBreakpoint(nil), profile.LookupCandidates...)
 	for i := range result.Breakpoints {
 		result.Breakpoints[i].CumulativeTokens = minInt(inputTokens, int(math.Round(float64(profile.Breakpoints[i].CumulativeTokens)*float64(inputTokens)/float64(profile.TotalInputTokens))))
+	}
+	for i := range result.LookupCandidates {
+		result.LookupCandidates[i].CumulativeTokens = minInt(inputTokens, int(math.Round(float64(profile.LookupCandidates[i].CumulativeTokens)*float64(inputTokens)/float64(profile.TotalInputTokens))))
 	}
 	return &result
 }
@@ -445,6 +503,7 @@ type cacheablePromptBlock struct {
 	Tokens       int
 	TTL          time.Duration
 	IsMessageEnd bool
+	IsMetadata   bool
 }
 
 func flattenClaudeCacheBlocks(req *ClaudeRequest) []cacheablePromptBlock {
@@ -487,8 +546,9 @@ func buildCachePreludeBlock(req *ClaudeRequest) cacheablePromptBlock {
 		"output":      req.OutputConfig,
 	}
 	return cacheablePromptBlock{
-		Value:  prelude,
-		Tokens: 0,
+		Value:      prelude,
+		Tokens:     0,
+		IsMetadata: true,
 	}
 }
 
@@ -833,11 +893,20 @@ func maxInt(a, b int) int {
 
 // Completion scales the dispatch snapshot without querying cache entries again.
 func scalePromptCacheUsage(usage promptCacheUsage, profile *promptCacheProfile, inputTokens int) promptCacheUsage {
+	if usage.totalCacheRate && inputTokens <= 0 && profile != nil {
+		zero := *profile
+		zero.TotalInputTokens = 0
+		return allocateTotalCacheUsage(usage, &zero, 0, 0)
+	}
 	if profile == nil || inputTokens <= 0 || profile.TotalInputTokens <= 0 {
 		return usage
 	}
 	scale := func(v int) int {
 		return int(math.Round(float64(v) * float64(inputTokens) / float64(profile.TotalInputTokens)))
+	}
+	if usage.totalCacheRate {
+		calibrated := cacheProfileWithInputTokens(profile, inputTokens)
+		return allocateTotalCacheUsage(usage, calibrated, minInt(scale(usage.rawCacheable), inputTokens), minInt(scale(usage.rawRead), inputTokens))
 	}
 	if len(profile.Breakpoints) == 0 || scale(profile.Breakpoints[len(profile.Breakpoints)-1].CumulativeTokens) < minCacheableTokensForModel(profile.Model) {
 		return promptCacheUsage{}
