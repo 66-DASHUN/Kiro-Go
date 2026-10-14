@@ -493,8 +493,8 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRequest, thinking bool, estimatedInputTokens int, apiKeyID string) (*claudeWebSearchRound, *config.Account, error) {
 	payload := ClaudeToKiro(req, thinking)
 	h.applyReasoningEffort(payload, req.Model, claudeOutputEffort(req))
-	cacheProfile := h.promptCache.BuildClaudeProfile(cloneClaudeRequestForThinking(req, thinking), estimatedInputTokens)
 	cacheSettings := config.EffectivePromptCacheSettings(apiKeyID)
+	cacheProfile := h.promptCache.BuildClaudeProfileWithSettings(cloneClaudeRequestForThinking(req, thinking), estimatedInputTokens, cacheSettings)
 	excluded := make(map[string]bool)
 	var lastErr error
 	var lastAccount *config.Account

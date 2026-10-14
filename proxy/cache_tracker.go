@@ -26,6 +26,8 @@ const (
 )
 
 type promptCacheUsage struct {
+	prefixReadWrite            bool
+	rawCacheable               int
 	rawRead                    int
 	rawCreation                int
 	rawCreation5m              int
@@ -82,6 +84,14 @@ func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
 }
 
 func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
+	return t.buildClaudeProfile(req, totalInputTokens, false)
+}
+
+func (t *promptCacheTracker) BuildClaudeProfileWithSettings(req *ClaudeRequest, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
+	return t.buildClaudeProfile(req, totalInputTokens, settings.Mode == config.PromptCacheModePrefix)
+}
+
+func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTokens int, strictBreakpoints bool) *promptCacheProfile {
 	if t == nil || req == nil {
 		return nil
 	}
@@ -120,7 +130,7 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 		} else if block.TTL > 0 {
 			breakpointTTL = block.TTL
 			activeTTL = block.TTL
-		} else if block.IsMessageEnd && activeTTL > 0 {
+		} else if !strictBreakpoints && block.IsMessageEnd && activeTTL > 0 {
 			breakpointTTL = activeTTL
 		}
 
@@ -137,25 +147,23 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 		})
 	}
 
+	semanticTotal := estimateClaudeRequestInputTokens(req)
 	if totalInputTokens <= 0 {
-		totalInputTokens = cumulativeTokens
+		totalInputTokens = semanticTotal
 	}
 	// Normalize estimated cumulative tokens into the caller's total-input
 	// token space. Fingerprint metadata must not inflate the caller's count.
 	if len(breakpoints) > 0 {
-		normalizationBase := cumulativeTokens
+		normalizationBase := semanticTotal
 		if normalizationBase > 0 && totalInputTokens != normalizationBase {
 			for i := range breakpoints {
 				n := int(math.Round(float64(breakpoints[i].CumulativeTokens) * float64(totalInputTokens) / float64(normalizationBase)))
 				if i > 0 && n < breakpoints[i-1].CumulativeTokens {
 					n = breakpoints[i-1].CumulativeTokens
 				}
-				breakpoints[i].CumulativeTokens = n
+				breakpoints[i].CumulativeTokens = minInt(n, totalInputTokens)
 			}
 		}
-	}
-	if !hasExplicitBreakpoint && len(breakpoints) > 0 {
-		breakpoints[len(breakpoints)-1].CumulativeTokens = totalInputTokens
 	}
 
 	var inputFingerprint [32]byte
@@ -191,12 +199,16 @@ func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInput
 
 	hasher := sha256.New()
 	cumulativeTokens := 0
-	appendStableBlock := func(value interface{}) {
+	appendStableBlock := func(value interface{}, tokens int) {
 		canonical := canonicalizeCacheValue(value)
 		writeHashChunk(hasher, canonical)
-		cumulativeTokens += estimateApproxTokens(canonical)
+		cumulativeTokens += tokens
 	}
-	appendStableBlock(stable)
+	toolTokens := 0
+	for _, tool := range tools {
+		toolTokens += estimateKiroToolTokens(tool)
+	}
+	appendStableBlock(stable, toolTokens)
 
 	breakpoints := make([]promptCacheBreakpoint, 0, len(payload.ConversationState.History)+2)
 	appendBreakpoint := func() {
@@ -211,17 +223,17 @@ func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInput
 	appendBreakpoint()
 	for _, historyMessage := range payload.ConversationState.History {
 		if historyMessage.UserInputMessage != nil {
-			appendStableBlock(openAIUserCacheValue(*historyMessage.UserInputMessage))
+			appendStableBlock(openAIUserCacheValue(*historyMessage.UserInputMessage), estimateKiroUserInputTokens(historyMessage.UserInputMessage, false))
 			appendBreakpoint()
 		}
 		if historyMessage.AssistantResponseMessage != nil {
 			appendStableBlock(map[string]interface{}{
 				"role": "assistant", "message": historyMessage.AssistantResponseMessage,
-			})
+			}, estimateClaudeOutputTokens(historyMessage.AssistantResponseMessage.Content, "", historyMessage.AssistantResponseMessage.ToolUses))
 			appendBreakpoint()
 		}
 	}
-	appendStableBlock(openAIUserCacheValue(current))
+	appendStableBlock(openAIUserCacheValue(current), estimateKiroUserInputTokens(&current, false))
 	appendBreakpoint()
 	if cumulativeTokens <= 0 || totalInputTokens < minCacheableTokensForModel(current.ModelID) {
 		return nil
@@ -302,6 +314,10 @@ func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *prom
 		break
 	}
 	rawCreation := maxInt(lastTokens-matched, 0)
+	if settings.Mode == config.PromptCacheModePrefix {
+		usage := promptCacheUsage{prefixReadWrite: true, rawCacheable: lastTokens, rawRead: matched, readRatio: variedPrefixReadRatio(settings.Ratio, profile), snapshot: true}
+		return computePrefixReadWriteUsage(usage, profile, lastTokens, matched)
+	}
 	cache5m, cache1h := computePromptCacheTTLBreakdownLimited(profile, matched, rawCreation)
 	creation := int(float64(rawCreation) * createRatio)
 	write5m := int(float64(cache5m) * createRatio)
@@ -315,6 +331,24 @@ func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *prom
 	return promptCacheUsage{CacheCreationInputTokens: creation, CacheReadInputTokens: read, CacheCreation5mInputTokens: write5m, CacheCreation1hInputTokens: write1h, rawRead: matched, rawCreation: rawCreation, rawCreation5m: cache5m, creationRatio: createRatio, readRatio: readRatio, snapshot: true}
 }
 
+// Prefix mode allocates the entire eligible interval to read/write. Only the
+// content beyond the final cache breakpoint remains ordinary input.
+func computePrefixReadWriteUsage(usage promptCacheUsage, profile *promptCacheProfile, eligible, matched int) promptCacheUsage {
+	usage.CacheReadInputTokens = minInt(int(float64(matched)*usage.readRatio), int(.95*float64(eligible)))
+	usage.CacheCreationInputTokens = eligible - usage.CacheReadInputTokens
+	usage.CacheCreation5mInputTokens, usage.CacheCreation1hInputTokens = computePromptCacheTTLBreakdownLimited(profile, usage.CacheReadInputTokens, usage.CacheCreationInputTokens)
+	return usage
+}
+
+func variedPrefixReadRatio(ratio float64, profile *promptCacheProfile) float64 {
+	if ratio <= 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
+		return 0
+	}
+	reference := math.Min(.95, ratio)
+	lower, upper := math.Max(0, reference-promptCacheRatioVariation), math.Min(.95, reference+promptCacheRatioVariation)
+	return lower + (upper-lower)*(promptCacheVariationUnit(profile)+1)/2
+}
+
 // This is a local usage simulation, not native upstream cache telemetry.
 // Use the request input as a deterministic seed, keeping identical inputs
 // stable between cold/warm requests and dispatch/completion. Keep endpoint
@@ -322,6 +356,14 @@ func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *prom
 func variedPromptCacheRatio(ratio float64, profile *promptCacheProfile) float64 {
 	if ratio <= 0 || ratio >= 1 || profile == nil {
 		return ratio
+	}
+	spread := math.Min(promptCacheRatioVariation, math.Min(ratio, 1-ratio))
+	return math.Max(0, math.Min(1, ratio+promptCacheVariationUnit(profile)*spread))
+}
+
+func promptCacheVariationUnit(profile *promptCacheProfile) float64 {
+	if profile == nil {
+		return 0
 	}
 	fingerprint := profile.InputFingerprint
 	if fingerprint == ([32]byte{}) && len(profile.Breakpoints) > 0 {
@@ -332,9 +374,7 @@ func variedPromptCacheRatio(ratio float64, profile *promptCacheProfile) float64 
 	writeHashChunk(hasher, profile.Model)
 	writeHashChunk(hasher, strconv.Itoa(profile.TotalInputTokens))
 	digest := hasher.Sum(nil)
-	unit := float64(binary.BigEndian.Uint16(digest[:2]))/65535*2 - 1
-	spread := math.Min(promptCacheRatioVariation, math.Min(ratio, 1-ratio))
-	return math.Max(0, math.Min(1, ratio+unit*spread))
+	return float64(binary.BigEndian.Uint16(digest[:2]))/65535*2 - 1
 }
 
 // Cache estimates are scaled into native upstream input token space at completion.
@@ -424,7 +464,7 @@ func flattenClaudeCacheBlocks(req *ClaudeRequest) []cacheablePromptBlock {
 		fingerprintValue := stripCachePositionKeys(toolValue)
 		blocks = append(blocks, cacheablePromptBlock{
 			Value:  fingerprintValue,
-			Tokens: estimateApproxTokens(canonicalizeCacheValue(fingerprintValue)),
+			Tokens: estimateClaudeToolTokens(tool),
 			TTL:    normalizePromptCacheTTL(extractPromptCacheTTL(tool)),
 		})
 	}
@@ -448,7 +488,7 @@ func buildCachePreludeBlock(req *ClaudeRequest) cacheablePromptBlock {
 	}
 	return cacheablePromptBlock{
 		Value:  prelude,
-		Tokens: estimateApproxTokens(canonicalizeCacheValue(prelude)),
+		Tokens: 0,
 	}
 }
 
@@ -533,10 +573,9 @@ func appendPromptBlock(blocks *[]cacheablePromptBlock, wrapper map[string]interf
 	}
 
 	fingerprintValue := stripCachePositionKeys(wrapper)
-	canonical := canonicalizeCacheValue(fingerprintValue)
 	*blocks = append(*blocks, cacheablePromptBlock{
 		Value:        fingerprintValue,
-		Tokens:       estimateApproxTokens(canonical),
+		Tokens:       estimateClaudeValueTokens(blockValue),
 		TTL:          ttl,
 		IsMessageEnd: isMessageEnd,
 	})
@@ -804,6 +843,10 @@ func scalePromptCacheUsage(usage promptCacheUsage, profile *promptCacheProfile, 
 		return promptCacheUsage{}
 	}
 	if usage.snapshot {
+		if usage.prefixReadWrite {
+			eligible := minInt(scale(usage.rawCacheable), inputTokens)
+			return computePrefixReadWriteUsage(usage, cacheProfileWithInputTokens(profile, inputTokens), eligible, minInt(scale(usage.rawRead), eligible))
+		}
 		usage.CacheReadInputTokens = minInt(int(float64(scale(usage.rawRead))*usage.readRatio), inputTokens)
 		usage.CacheCreationInputTokens = minInt(int(float64(scale(usage.rawCreation))*usage.creationRatio), inputTokens-usage.CacheReadInputTokens)
 		usage.CacheCreation5mInputTokens = minInt(int(float64(scale(usage.rawCreation5m))*usage.creationRatio), usage.CacheCreationInputTokens)

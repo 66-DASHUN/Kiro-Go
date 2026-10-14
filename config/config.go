@@ -134,6 +134,7 @@ type PromptCacheSettings struct {
 }
 
 const (
+	PromptCacheModePrefix      = "prefix"
 	PromptCacheModeUniform     = "uniform"
 	PromptCacheModeIndependent = "independent"
 	promptCacheModeUniform     = PromptCacheModeUniform
@@ -147,8 +148,8 @@ func ValidatePromptCacheRatio(r float64) error {
 	return nil
 }
 func ValidatePromptCacheSettings(s PromptCacheSettings) error {
-	if s.Mode != promptCacheModeUniform && s.Mode != promptCacheModeIndependent {
-		return fmt.Errorf("prompt cache mode must be %q or %q, got %q", promptCacheModeUniform, promptCacheModeIndependent, s.Mode)
+	if s.Mode != PromptCacheModePrefix && s.Mode != promptCacheModeUniform && s.Mode != promptCacheModeIndependent {
+		return fmt.Errorf("prompt cache mode must be %q, %q or %q, got %q", PromptCacheModePrefix, promptCacheModeUniform, promptCacheModeIndependent, s.Mode)
 	}
 	for n, v := range map[string]float64{"ratio": s.Ratio, "creation ratio": s.CreationRatio, "read ratio": s.ReadRatio} {
 		if err := ValidatePromptCacheRatio(v); err != nil {
@@ -335,10 +336,10 @@ func Load() error {
 			RequireApiKey:                     false,
 			Accounts:                          []Account{},
 			PromptCacheEmulationEnabled:       true,
-			PromptCacheEmulationMode:          promptCacheModeUniform,
-			PromptCacheEmulationRatio:         1,
+			PromptCacheEmulationMode:          PromptCacheModePrefix,
+			PromptCacheEmulationRatio:         .95,
 			PromptCacheCreationEmulationRatio: 1,
-			PromptCacheReadEmulationRatio:     1,
+			PromptCacheReadEmulationRatio:     .95,
 		}
 		if err := saveLocked(); err != nil {
 			return err

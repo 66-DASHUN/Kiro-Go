@@ -12,16 +12,18 @@
 
 - [x] 只读参考样本及现有配置，用户批准 prefix 设计。
 - [x] 检查现有 linked worktree、干净 Git 状态，执行完整基线测试。
-- [ ] 新增 `proxy/cache_prefix_mode_test.go`：冷/热/部分/显式断点/比例 0 与关闭/TTL/原生缩放/三种协议 JSON+SSE；新增 `config/prefix_cache_test.go`：新默认与旧策略保留、每 Key 保存重载。
-- [ ] 执行 `go test ./config ./proxy -run 'TestPrefix' -count=1`，确认因为模式未支持及语义断点计数不一致而失败。
-- [ ] 修改 `config/config.go`、`config/prompt_cache.go`、`config/apikeys.go` 支持 prefix 默认与验证，每 Key 的 Ratio 用作 prefix 读取参考。
-- [ ] 修改 `proxy/cache_tracker.go`，增加 prefix snapshot 字段与派生读写函数，计算 C−R 与 TTL 拆分；旧模式保持原公式。
-- [ ] 修改 `proxy/token_estimator.go`、profile 内容计数，复用语义工具/消息计数器，将指纹 JSON 与 Token 分离。
-- [ ] 执行上述 targeted tests，修正实现直到通过；完整旧模式回归保持。
-- [ ] 修改 `web/index.html`、`web/app.js`、`web/locales/zh.json`、`web/locales/en.json`、README 中英文，更新新模式、禁用字段与摘要。
-- [ ] 在独立本地 Kiro 实例检查后台默认模式、Key 独立比例保存、旧模式可选及新模式重载，测试仅使用合成数据。
-- [ ] 执行 `go test ./... -count=1`、`go vet ./...`、`git diff --check`、Linux CGO=0 构建与新增 tracker 并发 race。
-- [ ] 独立代码审查，处理重要问题，记录最终验证并提交，报告本地完成与线上状态。
+- [x] 新增 `proxy/cache_prefix_mode_test.go`：冷/热/部分/显式断点/比例 0 与关闭/TTL/原生缩放/三种协议 JSON+SSE；新增 `config/prefix_cache_test.go`：新默认与旧策略保留、每 Key 保存重载。
+- [x] 执行 `go test ./config ./proxy -run 'TestPrefix' -count=1`，确认因为模式未支持及语义断点计数不一致而失败。
+- [x] 修改 `config/config.go`、`config/prompt_cache.go`、`config/apikeys.go` 支持 prefix 默认与验证，每 Key 的 Ratio 用作 prefix 读取参考。
+- [x] 修改 `proxy/cache_tracker.go`，增加 prefix snapshot 字段与派生读写函数，计算 C−R 与 TTL 拆分；旧模式保持原公式。
+- [x] 修改 `proxy/token_estimator.go`、profile 内容计数，复用语义工具/消息计数器，将指纹 JSON 与 Token 分离。
+- [x] 执行上述 targeted tests，修正实现直到通过；完整旧模式回归保持。
+- [x] 修改 `web/index.html`、`web/app.js`、`web/locales/zh.json`、`web/locales/en.json`、README 中英文，更新新模式、禁用字段与摘要。
+- [x] 在独立本地 Kiro 实例检查后台默认模式、Key 独立比例保存、旧模式可选及新模式重载，测试仅使用合成数据。
+- [x] 执行 `go test ./... -count=1`、`go vet ./...`、`git diff --check`、Linux CGO=0 构建与新增 tracker 并发 race。
+- [x] 独立代码审查，未发现重要问题，记录最终验证。实现与记录一同提交；线上仍为 626f387，本轮不部署。
+
+验证详情见 `docs/superpowers/reviews/2026-10-14-prefix-read-write-cache-verification.md`。
 
 ## 回归场景
 

@@ -67,12 +67,14 @@ func estimateClaudeRequestInputTokens(req *ClaudeRequest) int {
 	}
 
 	for _, tool := range req.Tools {
-		total += estimateApproxTokens(tool.Name)
-		total += estimateApproxTokens(tool.Description)
-		total += estimateJSONTokens(tool.InputSchema)
+		total += estimateClaudeToolTokens(tool)
 	}
 
 	return total
+}
+
+func estimateClaudeToolTokens(tool ClaudeTool) int {
+	return estimateApproxTokens(tool.Name) + estimateApproxTokens(tool.Description) + estimateJSONTokens(tool.InputSchema)
 }
 
 func estimateClaudeOutputTokens(content, thinkingContent string, toolUses []KiroToolUse) int {
@@ -97,6 +99,12 @@ func estimateClaudeValueTokens(v interface{}) int {
 		total := 0
 		for _, part := range value {
 			total += estimateClaudeValueTokens(part)
+		}
+		return total
+	case []string:
+		total := 0
+		for _, part := range value {
+			total += estimateApproxTokens(part)
 		}
 		return total
 	case map[string]interface{}:
@@ -211,31 +219,37 @@ func estimateKiroPayloadInputTokens(payload *KiroPayload) int {
 		return 0
 	}
 	total := 0
-	addUser := func(msg *KiroUserInputMessage) {
-		if msg == nil {
-			return
-		}
-		total += estimateApproxTokens(msg.Content)
-		if msg.UserInputMessageContext == nil {
-			return
-		}
-		for _, tool := range msg.UserInputMessageContext.Tools {
-			total += estimateApproxTokens(tool.ToolSpecification.Name)
-			total += estimateApproxTokens(tool.ToolSpecification.Description)
-			total += estimateJSONTokens(tool.ToolSpecification.InputSchema.JSON)
-		}
-		for _, result := range msg.UserInputMessageContext.ToolResults {
-			for _, content := range result.Content {
-				total += estimateApproxTokens(content.Text)
-			}
-		}
-	}
 	for _, history := range payload.ConversationState.History {
-		addUser(history.UserInputMessage)
+		total += estimateKiroUserInputTokens(history.UserInputMessage, true)
 		if msg := history.AssistantResponseMessage; msg != nil {
 			total += estimateClaudeOutputTokens(msg.Content, "", msg.ToolUses)
 		}
 	}
-	addUser(&payload.ConversationState.CurrentMessage.UserInputMessage)
+	total += estimateKiroUserInputTokens(&payload.ConversationState.CurrentMessage.UserInputMessage, true)
+	return total
+}
+
+func estimateKiroToolTokens(tool KiroToolWrapper) int {
+	return estimateApproxTokens(tool.ToolSpecification.Name) + estimateApproxTokens(tool.ToolSpecification.Description) + estimateJSONTokens(tool.ToolSpecification.InputSchema.JSON)
+}
+
+func estimateKiroUserInputTokens(msg *KiroUserInputMessage, includeTools bool) int {
+	if msg == nil {
+		return 0
+	}
+	total := estimateApproxTokens(msg.Content)
+	if msg.UserInputMessageContext == nil {
+		return total
+	}
+	if includeTools {
+		for _, tool := range msg.UserInputMessageContext.Tools {
+			total += estimateKiroToolTokens(tool)
+		}
+	}
+	for _, result := range msg.UserInputMessageContext.ToolResults {
+		for _, content := range result.Content {
+			total += estimateApproxTokens(content.Text)
+		}
+	}
 	return total
 }

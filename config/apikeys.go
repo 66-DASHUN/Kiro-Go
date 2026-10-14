@@ -269,8 +269,8 @@ func cloneApiKeyEntry(entry ApiKeyEntry) ApiKeyEntry {
 }
 
 func validateApiKeyPromptCacheOverrides(entry ApiKeyEntry) error {
-	if entry.PromptCacheEmulationMode != nil && *entry.PromptCacheEmulationMode != promptCacheModeUniform && *entry.PromptCacheEmulationMode != promptCacheModeIndependent {
-		return errors.New("prompt cache mode must be uniform or independent")
+	if entry.PromptCacheEmulationMode != nil && *entry.PromptCacheEmulationMode != PromptCacheModePrefix && *entry.PromptCacheEmulationMode != promptCacheModeUniform && *entry.PromptCacheEmulationMode != promptCacheModeIndependent {
+		return errors.New("prompt cache mode must be prefix, uniform or independent")
 	}
 	for name, value := range map[string]*float64{
 		"ratio":          entry.PromptCacheEmulationRatio,

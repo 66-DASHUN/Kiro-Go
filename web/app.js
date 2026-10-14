@@ -23,7 +23,7 @@
   let iamApiKeyId = '';
   let pendingApiKeyId = '';
   let accountModalGeneration = 0;
-  let promptCacheSettings = { enabled: true, mode: 'uniform', ratio: 1, creationRatio: 1, readRatio: 1 };
+  let promptCacheSettings = { enabled: true, mode: 'prefix', ratio: 0.95, creationRatio: 1, readRatio: 0.95 };
   // Microsoft SSO: 'kiro' (portal callback) then 'microsoft' (Entra callback), then maybe a profile pick.
   let ms = { session: '', stage: 'kiro', authorizeUrl: '', selectionId: '', profiles: [], busy: false, generation: 0, apiKeyId: '' };
   let exportSelectedIds = new Set();
@@ -1692,8 +1692,8 @@
     return (clampRatio(value) * 100).toFixed(1).replace(/\.0$/, '');
   }
   function normalizePromptCacheSettings(source) {
-    const mode = source.promptCacheEmulationMode === 'independent' ? 'independent' : 'uniform';
-    const ratio = clampRatio(source.promptCacheEmulationRatio);
+    const mode = ['prefix', 'uniform', 'independent'].includes(source.promptCacheEmulationMode) ? source.promptCacheEmulationMode : 'prefix';
+    const ratio = clampRatio(source.promptCacheEmulationRatio, mode === 'prefix' ? 0.95 : 1);
     return {
       enabled: source.promptCacheEmulationEnabled !== false, mode, ratio,
       creationRatio: clampRatio(source.promptCacheCreationEmulationRatio),
@@ -1707,7 +1707,7 @@
   }
   function rawApiKeyCacheSettings(entry) {
     const inherited = promptCacheSettings;
-    const mode = entry && ['uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
+    const mode = entry && ['prefix', 'uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
     const ratio = clampRatio(entry && entry.promptCacheEmulationRatio, inherited.ratio);
     return {
       enabled: entry && entry.promptCacheEmulationEnabled != null ? entry.promptCacheEmulationEnabled : inherited.enabled,
@@ -1722,12 +1722,17 @@
       settings.creationRatio = settings.ratio;
       settings.readRatio = settings.ratio;
     }
+    if (settings.mode === 'prefix') {
+      settings.creationRatio = 1;
+      settings.readRatio = settings.ratio;
+    }
     return settings;
   }
   function apiKeyCacheSummary(entry) {
     const effective = effectiveApiKeyCacheSettings(entry);
     const scope = t(hasApiKeyCacheOverride(entry) ? 'apiKeys.cacheIndependent' : 'apiKeys.cacheInherited');
-    const policy = !effective.enabled ? t('apiKeys.cacheDisabled') : effective.mode === 'uniform'
+    const policy = !effective.enabled ? t('apiKeys.cacheDisabled') : effective.mode === 'prefix'
+      ? t('apiKeys.cachePrefix', ratioToPercent(effective.ratio)) : effective.mode === 'uniform'
       ? t('apiKeys.cacheUniform', ratioToPercent(effective.ratio))
       : t('apiKeys.cacheIndependentRatios', ratioToPercent(effective.creationRatio), ratioToPercent(effective.readRatio));
     return scope + ' · ' + policy;
@@ -1741,16 +1746,17 @@
     syncCacheForm(prefix, false);
   }
   function syncCacheForm(prefix, inherited) {
-    const uniform = $(prefix + 'Mode').value === 'uniform';
+    const independent = $(prefix + 'Mode').value === 'independent';
     $(prefix + 'Enabled').disabled = inherited;
     $(prefix + 'Mode').disabled = inherited;
-    $(prefix + 'Ratio').disabled = inherited || !uniform;
-    $(prefix + 'CreationRatio').disabled = inherited || uniform;
-    $(prefix + 'ReadRatio').disabled = inherited || uniform;
+    $(prefix + 'Ratio').disabled = inherited || independent;
+    $(prefix + 'CreationRatio').disabled = inherited || !independent;
+    $(prefix + 'ReadRatio').disabled = inherited || !independent;
     refreshCustomSelects($(prefix + 'Mode').parentElement);
   }
   function cacheFormValues(prefix) {
-    const mode = $(prefix + 'Mode').value === 'independent' ? 'independent' : 'uniform';
+    const selected = $(prefix + 'Mode').value;
+    const mode = ['prefix', 'uniform', 'independent'].includes(selected) ? selected : 'prefix';
     const readRatio = field => {
       const raw = $(prefix + field).value.trim();
       const percent = Number(raw);
