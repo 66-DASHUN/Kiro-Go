@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const totalCacheRuleVersion = "prefix-total-v1"
+const totalCacheRuleVersion = "prefix-total-v2"
 const promptCacheDiagnosticCapacity = 200
 const promptCacheDiagnosticRetention = 24 * time.Hour
 
@@ -106,17 +106,21 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 			continue
 		}
 		entry, ok := entries[bp.Fingerprint]
-		if !ok || !entry.ExpiresAt.After(now) {
+		if !ok || !entry.ExpiresAt.After(now) || entry.PrefixTokens <= 0 || entry.CachedTokens <= 0 || entry.CachedTokens > entry.PrefixTokens {
 			continue
 		}
 		usage.rawRead = bp.CumulativeTokens
 		usage.matchedFingerprint = bp.Fingerprint
 		usage.matchedTTL = entry.TTL
+		usage.matchedPrefixTokens = entry.PrefixTokens
+		usage.matchedCachedTokens = entry.CachedTokens
 	}
 	return allocateTotalCacheUsage(usage, profile, usage.rawCacheable, usage.rawRead)
 }
 
-// This scales usage categories, not a physical subset of cached tokens.
+// Preserve the committed share of the matched prefix. Only newly eligible
+// content receives this request's floating reference; native calibration must
+// never multiply the saved share.
 func allocateTotalCacheUsage(usage promptCacheUsage, profile *promptCacheProfile, eligible, matched int) promptCacheUsage {
 	usage.CacheCreationInputTokens = 0
 	usage.CacheReadInputTokens = 0
@@ -140,17 +144,19 @@ func allocateTotalCacheUsage(usage promptCacheUsage, profile *promptCacheProfile
 		usage.limitation = "below_model_minimum"
 		return usage
 	}
-	budget := minInt(eligible, int(math.Floor(float64(profile.TotalInputTokens)*usage.totalRatio)))
-	if budget <= 0 {
+	if usage.totalRatio <= 0 {
 		return usage
 	}
-	usage.CacheReadInputTokens = int(int64(budget) * int64(matched) / int64(eligible))
-	usage.CacheCreationInputTokens = budget - usage.CacheReadInputTokens
+	usage.CacheReadInputTokens = maxInt(0, minInt(usage.matchedCachedTokens, matched))
+	usage.CacheCreationInputTokens = int(math.Floor(float64(eligible-matched) * math.Min(1, usage.totalRatio)))
 	raw5m, raw1h := computePromptCacheTTLBreakdownLimited(profile, matched, eligible-matched)
 	usage.CacheCreation5mInputTokens, usage.CacheCreation1hInputTokens = allocateCacheWriteTTL(usage.CacheCreationInputTokens, raw5m, raw1h)
 	usage.limitation = ""
-	if eligible < int(math.Floor(float64(profile.TotalInputTokens)*usage.totalRatio)) {
+	if eligible < profile.TotalInputTokens {
 		usage.limitation = "breakpoint_coverage"
+	}
+	if matched > 0 && usage.matchedCachedTokens > matched {
+		usage.limitation = "matched_share_clamped"
 	}
 	return usage
 }
@@ -205,7 +211,10 @@ func (t *promptCacheTracker) UpdateWithSettings(accountID string, profile *promp
 		entries = make(map[[32]byte]promptCacheEntry)
 		t.entriesByAccount[accountID] = entries
 	}
-	store := func(fingerprint [32]byte, ttl time.Duration) {
+	store := func(fingerprint [32]byte, ttl time.Duration, prefixTokens, cachedTokens int) {
+		if prefixTokens <= 0 || cachedTokens <= 0 || cachedTokens > prefixTokens {
+			return
+		}
 		ttl = min(normalizePromptCacheTTL(ttl), t.maxSupportedTTL)
 		if ttl <= 0 {
 			return
@@ -223,33 +232,42 @@ func (t *promptCacheTracker) UpdateWithSettings(accountID string, profile *promp
 		if !expires.After(now) {
 			return
 		}
-		entries[fingerprint] = promptCacheEntry{ExpiresAt: expires, TTL: ttl}
+		// Concurrent completions may have committed this prefix since dispatch.
+		// The first live certified share remains the accounting basis.
+		if old.PrefixTokens > 0 && old.CachedTokens > 0 && old.CachedTokens <= old.PrefixTokens {
+			prefixTokens, cachedTokens = old.PrefixTokens, old.CachedTokens
+		}
+		entries[fingerprint] = promptCacheEntry{ExpiresAt: expires, TTL: ttl, PrefixTokens: prefixTokens, CachedTokens: cachedTokens}
 	}
 	for _, bp := range profile.Breakpoints {
-		if usage.CacheCreationInputTokens > 0 && bp.CumulativeTokens > usage.finalMatched && bp.CumulativeTokens >= floor && bp.CumulativeTokens <= profile.TotalInputTokens {
-			store(bp.Fingerprint, bp.TTL)
+		if usage.CacheCreationInputTokens > 0 && bp.CumulativeTokens > usage.finalMatched && bp.CumulativeTokens >= floor && bp.CumulativeTokens <= usage.finalCacheable {
+			newShare := int(int64(usage.CacheCreationInputTokens) * int64(bp.CumulativeTokens-usage.finalMatched) / int64(usage.finalCacheable-usage.finalMatched))
+			if newShare > 0 {
+				store(bp.Fingerprint, bp.TTL, bp.CumulativeTokens, usage.CacheReadInputTokens+newShare)
+			}
 		}
 	}
 	if usage.finalMatched >= floor && usage.matchedTTL > 0 {
-		store(usage.matchedFingerprint, usage.matchedTTL)
+		store(usage.matchedFingerprint, usage.matchedTTL, usage.matchedPrefixTokens, usage.matchedCachedTokens)
 	}
 }
 
 type promptCacheDiagnostic struct {
-	ID         string    `json:"id"`
-	Time       time.Time `json:"time"`
-	Rule       string    `json:"rule"`
-	Total      int       `json:"total"`
-	Cacheable  int       `json:"cacheable"`
-	Matched    int       `json:"matched"`
-	Ratio      float64   `json:"ratio"`
-	Budget     int       `json:"budget"`
-	Read       int       `json:"read"`
-	Write      int       `json:"write"`
-	Ordinary   int       `json:"ordinary"`
-	Write5m    int       `json:"write5m"`
-	Write1h    int       `json:"write1h"`
-	Limitation string    `json:"limitation,omitempty"`
+	ID           string    `json:"id"`
+	Time         time.Time `json:"time"`
+	Rule         string    `json:"rule"`
+	Total        int       `json:"total"`
+	Cacheable    int       `json:"cacheable"`
+	Matched      int       `json:"matched"`
+	MatchedShare int       `json:"matchedShare"`
+	Ratio        float64   `json:"ratio"`
+	Budget       int       `json:"budget"`
+	Read         int       `json:"read"`
+	Write        int       `json:"write"`
+	Ordinary     int       `json:"ordinary"`
+	Write5m      int       `json:"write5m"`
+	Write1h      int       `json:"write1h"`
+	Limitation   string    `json:"limitation,omitempty"`
 }
 
 func (t *promptCacheTracker) recordTotalCacheDiagnostic(profile *promptCacheProfile, usage promptCacheUsage) {
@@ -261,7 +279,7 @@ func (t *promptCacheTracker) recordTotalCacheDiagnostic(profile *promptCacheProf
 	defer t.mu.Unlock()
 	t.pruneDiagnosticsLocked(now)
 	t.diagnosticSeq++
-	t.diagnostics = append(t.diagnostics, promptCacheDiagnostic{ID: fmt.Sprintf("cache-%d", t.diagnosticSeq), Time: now, Rule: totalCacheRuleVersion, Total: profile.TotalInputTokens, Cacheable: usage.finalCacheable, Matched: usage.finalMatched, Ratio: usage.totalRatio, Budget: usage.CacheReadInputTokens + usage.CacheCreationInputTokens, Read: usage.CacheReadInputTokens, Write: usage.CacheCreationInputTokens, Ordinary: billedClaudeInputTokens(profile.TotalInputTokens, usage), Write5m: usage.CacheCreation5mInputTokens, Write1h: usage.CacheCreation1hInputTokens, Limitation: usage.limitation})
+	t.diagnostics = append(t.diagnostics, promptCacheDiagnostic{ID: fmt.Sprintf("cache-%d", t.diagnosticSeq), Time: now, Rule: totalCacheRuleVersion, Total: profile.TotalInputTokens, Cacheable: usage.finalCacheable, Matched: usage.finalMatched, MatchedShare: usage.matchedCachedTokens, Ratio: usage.totalRatio, Budget: usage.CacheReadInputTokens + usage.CacheCreationInputTokens, Read: usage.CacheReadInputTokens, Write: usage.CacheCreationInputTokens, Ordinary: billedClaudeInputTokens(profile.TotalInputTokens, usage), Write5m: usage.CacheCreation5mInputTokens, Write1h: usage.CacheCreation1hInputTokens, Limitation: usage.limitation})
 	if len(t.diagnostics) > promptCacheDiagnosticCapacity {
 		t.diagnostics = append([]promptCacheDiagnostic(nil), t.diagnostics[len(t.diagnostics)-promptCacheDiagnosticCapacity:]...)
 	}

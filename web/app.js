@@ -1789,9 +1789,9 @@
       if (!records.length) { container.textContent = t('settings.cacheDiagnosticsEmpty'); return; }
       const percent = (part, total) => total > 0 ? (part / total * 100).toFixed(2) + '%' : '0%';
       const cell = value => '<td>' + escapeHtml(String(value)) + '</td>';
-      const headers = ['cacheDiagnosticId', 'cacheDiagnosticTime', 'cacheDiagnosticTotal', 'cacheDiagnosticPrefix', 'cacheDiagnosticMatched', 'totalCacheRatio', 'cacheDiagnosticActual', 'cacheDiagnosticRead', 'cacheDiagnosticWrite', 'cacheDiagnosticOrdinary', 'cacheDiagnosticTTL', 'cacheDiagnosticReason'];
+      const headers = ['cacheDiagnosticId', 'cacheDiagnosticTime', 'cacheDiagnosticTotal', 'cacheDiagnosticPrefix', 'cacheDiagnosticMatched', 'cacheDiagnosticMatchedShare', 'cacheDiagnosticNewRatio', 'cacheDiagnosticActual', 'cacheDiagnosticRead', 'cacheDiagnosticWrite', 'cacheDiagnosticOrdinary', 'cacheDiagnosticTTL', 'cacheDiagnosticReason'];
       container.innerHTML = '<table><thead><tr>' + headers.map(key => '<th>' + escapeHtml(t('settings.' + key)) + '</th>').join('') + '</tr></thead><tbody>' + records.map(row => '<tr>' +
-        cell(row.id) + cell(new Date(row.time).toLocaleTimeString()) + cell(row.total) + cell(row.cacheable) + cell(row.matched) +
+        cell(row.id) + cell(new Date(row.time).toLocaleTimeString()) + cell(row.total) + cell(row.cacheable) + cell(row.matched) + cell(row.matchedShare ?? 0) +
         cell(percent(row.ratio, 1)) + cell(percent(row.budget, row.total)) +
         cell(row.read + ' (' + percent(row.read, row.total) + ')') + cell(row.write + ' (' + percent(row.write, row.total) + ')') +
         cell(row.ordinary) + cell(row.write5m + ' / ' + row.write1h) +

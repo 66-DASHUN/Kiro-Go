@@ -31,6 +31,8 @@ type promptCacheUsage struct {
 	startedAt                  time.Time
 	matchedFingerprint         [32]byte
 	matchedTTL                 time.Duration
+	matchedPrefixTokens        int
+	matchedCachedTokens        int
 	finalCacheable             int
 	finalMatched               int
 	limitation                 string
@@ -77,6 +79,9 @@ func minCacheableTokensForModel(model string) int {
 type promptCacheEntry struct {
 	ExpiresAt time.Time
 	TTL       time.Duration
+	// Only total-mode successful writes certify these immutable counts.
+	PrefixTokens int
+	CachedTokens int
 }
 
 type promptCacheTracker struct {

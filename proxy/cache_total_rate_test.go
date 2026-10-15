@@ -142,7 +142,7 @@ func TestTotalCacheConcurrentSnapshotAndNativeMinimum(t *testing.T) {
 func TestTotalCacheNativeCalibrationRechecksMatchedMinimum(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := &promptCacheProfile{Model: "claude-haiku-4.5", TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: 6000, TTL: time.Hour}, {Fingerprint: [32]byte{2}, CumulativeTokens: 10000, TTL: time.Hour}}}
-	tracker.Update("account", &promptCacheProfile{Model: profile.Model, TotalInputTokens: 6000, Breakpoints: profile.Breakpoints[:1]})
+	commitTotalCacheFixture(tracker, &promptCacheProfile{Model: profile.Model, TotalInputTokens: 6000, Breakpoints: profile.Breakpoints[:1]}, totalCachePolicy(.8))
 	snapshot := tracker.ComputeWithSettings("account", profile, totalCachePolicy(.8))
 	if snapshot.CacheReadInputTokens == 0 {
 		t.Fatal("fixture did not match raw prefix")
@@ -211,7 +211,7 @@ func TestTotalCacheFullyMatchedDoesNotCreateOrUpgradeBreakpoints(t *testing.T) {
 	policy := totalCachePolicy(.8)
 	full := promptCacheBreakpoint{Fingerprint: [32]byte{2}, CumulativeTokens: 10000, TTL: 5 * time.Minute}
 	first := &promptCacheProfile{Model: "claude-sonnet-4.5", TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{full}}
-	tracker.Update("account", first)
+	commitTotalCacheFixture(tracker, first, policy)
 	full.TTL = time.Hour
 	next := &promptCacheProfile{Model: first.Model, TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: 6000, TTL: time.Hour}, full}}
 	usage := tracker.ComputeWithSettings("account", next, policy)
@@ -249,12 +249,12 @@ func TestTotalCacheTTLAnchoredToDispatch(t *testing.T) {
 }
 
 func TestTotalCacheExactAllocationAndTTL(t *testing.T) {
-	for _, test := range []struct{ total, eligible, matched, read, write, ordinary int }{
-		{10000, 10000, 0, 0, 8000, 2000}, {10000, 10000, 10000, 8000, 0, 2000},
-		{11000, 11000, 10000, 8000, 800, 2200}, {10000, 2000, 2000, 2000, 0, 8000},
+	for _, test := range []struct{ total, eligible, matched, saved, read, write, ordinary int }{
+		{10000, 10000, 0, 0, 0, 8000, 2000}, {10000, 10000, 10000, 8000, 8000, 0, 2000},
+		{11000, 11000, 10000, 8000, 8000, 800, 2200}, {10000, 2000, 2000, 1600, 1600, 0, 8400},
 	} {
 		profile := &promptCacheProfile{Model: "claude-sonnet-4.5", TotalInputTokens: test.total, Breakpoints: []promptCacheBreakpoint{{CumulativeTokens: test.eligible, TTL: time.Hour}}}
-		usage := allocateTotalCacheUsage(promptCacheUsage{totalCacheRate: true, totalRatio: .8}, profile, test.eligible, test.matched)
+		usage := allocateTotalCacheUsage(promptCacheUsage{totalCacheRate: true, totalRatio: .8, matchedCachedTokens: test.saved}, profile, test.eligible, test.matched)
 		if usage.CacheReadInputTokens != test.read || usage.CacheCreationInputTokens != test.write || billedClaudeInputTokens(test.total, usage) != test.ordinary {
 			t.Fatalf("%+v: %+v", test, usage)
 		}
@@ -280,7 +280,7 @@ func TestTotalCacheLookbackWindowAndNoPhantomStorage(t *testing.T) {
 			first := map[string]interface{}{"type": "text", "text": strings.Repeat("first prefix ", 1000), "cache_control": map[string]interface{}{"type": "ephemeral"}}
 			req := &ClaudeRequest{Model: "claude-sonnet-4.5", Messages: []ClaudeMessage{{Role: "user", Content: []interface{}{first}}}}
 			profile := tracker.BuildClaudeProfileWithSettings(req, estimateClaudeRequestInputTokens(req), policy)
-			tracker.Update("account", profile)
+			commitTotalCacheFixture(tracker, profile, policy)
 			delete(first, "cache_control")
 			content := req.Messages[0].Content.([]interface{})
 			for i := 0; i < appended; i++ {
@@ -309,9 +309,11 @@ func TestTotalCacheParallelToolRunsAndMatchedRenewal(t *testing.T) {
 	initial := map[string]interface{}{"type": "text", "text": strings.Repeat("initial prefix ", 1000), "cache_control": map[string]interface{}{"type": "ephemeral", "ttl": "1h"}}
 	req := &ClaudeRequest{Model: "claude-sonnet-4.5", Messages: []ClaudeMessage{{Role: "user", Content: []interface{}{initial}}}}
 	first := tracker.BuildClaudeProfileWithSettings(req, estimateClaudeRequestInputTokens(req), policy)
-	tracker.Update("account", first)
+	commitTotalCacheFixture(tracker, first, policy)
 	fingerprint := first.Breakpoints[0].Fingerprint
-	tracker.entriesByAccount["account"][fingerprint] = promptCacheEntry{ExpiresAt: time.Now().Add(time.Minute), TTL: time.Hour}
+	entry := tracker.entriesByAccount["account"][fingerprint]
+	entry.ExpiresAt = time.Now().Add(time.Minute)
+	tracker.entriesByAccount["account"][fingerprint] = entry
 	before := tracker.entriesByAccount["account"][fingerprint]
 	delete(initial, "cache_control")
 	uses, results := []interface{}{}, []interface{}{}
@@ -339,8 +341,9 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%v", path, stream), func(t *testing.T) {
+				nativeInput := 10000
 				h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
-					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": 10000, "outputTokens": 137}))
+					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": nativeInput, "outputTokens": 137}))
 				})
 				enabled, mode, ratio := true, "prefix_total", .8
 				key, err := config.AddApiKey(config.ApiKeyEntry{ID: "total-mode", Key: "sk-total-mode-fixture", Enabled: true, PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode, PromptCacheEmulationRatio: &ratio})
@@ -355,14 +358,24 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 				} else {
 					request["messages"] = messages
 				}
-				body, _ := json.Marshal(request)
-				for round := 0; round < 3; round++ {
+				previousCache := float64(0)
+				for round := 0; round < 5; round++ {
 					if round == 2 {
+						nativeInput = 11000
+						messages = append(messages, map[string]interface{}{"role": "assistant", "content": "ok"}, map[string]interface{}{"role": "user", "content": strings.Repeat("appended input ", 100)})
+						if path == "/v1/responses" {
+							request["input"] = messages
+						} else {
+							request["messages"] = messages
+						}
+					}
+					if round == 4 {
 						ratio = 0
 						if err := config.UpdateApiKey(key.ID, config.ApiKeyEntry{Enabled: true, PromptCacheEmulationRatio: &ratio}); err != nil {
 							t.Fatal(err)
 						}
 					}
+					body, _ := json.Marshal(request)
 					r := withApiKeyContext(httptest.NewRequest("POST", path, strings.NewReader(string(body))), &key)
 					rec := httptest.NewRecorder()
 					switch path {
@@ -394,9 +407,10 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 						}
 						total, output = usage[input].(float64), usage[out].(float64)
 					}
-					if total != 10000 || output != 137 || (round < 2 && (read+write < 7500 || read+write > 8500)) || (round == 0 && read != 0) || (round == 1 && write != 0) || (round == 2 && read+write != 0) {
+					if total != float64(nativeInput) || output != 137 || read+write > total || (round == 0 && (read != 0 || write < 7500 || write > 8500)) || (round > 0 && round < 4 && read != previousCache) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
 						t.Fatalf("round %d: %v", round, usage)
 					}
+					previousCache = read + write
 					t.Logf("round %d total=%.0f read=%.0f write=%.0f output=%.0f", round, total, read, write, output)
 				}
 			})
@@ -408,6 +422,12 @@ func totalCachePolicy(ratio float64) config.PromptCacheSettings {
 	return config.PromptCacheSettings{Enabled: true, Mode: "prefix_total", Ratio: ratio}
 }
 
+func commitTotalCacheFixture(tracker *promptCacheTracker, profile *promptCacheProfile, policy config.PromptCacheSettings) promptCacheUsage {
+	usage := tracker.ComputeWithSettings("account", profile, policy)
+	tracker.UpdateWithSettings("account", profile, policy, usage)
+	return usage
+}
+
 func TestTotalCacheBudgetColdWarmPartialAndScaling(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := &promptCacheProfile{Model: "claude-sonnet-4.5", TotalInputTokens: 10000, InputFingerprint: [32]byte{31}, Breakpoints: []promptCacheBreakpoint{
@@ -416,26 +436,28 @@ func TestTotalCacheBudgetColdWarmPartialAndScaling(t *testing.T) {
 	}}
 	policy := totalCachePolicy(.8)
 	p := variedPrefixReadRatio(.8, profile)
-	budget := minInt(8000, int(math.Floor(10000*p)))
+	budget := int(math.Floor(8000 * p))
 	cold := tracker.ComputeWithSettings("account", profile, policy)
 	if cold.CacheReadInputTokens != 0 || cold.CacheCreationInputTokens != budget {
 		t.Fatalf("cold total cache budget: %+v, want %d", cold, budget)
 	}
-	tracker.Update("account", &promptCacheProfile{Model: profile.Model, TotalInputTokens: 5000, Breakpoints: profile.Breakpoints[:1]})
+	first := &promptCacheProfile{Model: profile.Model, TotalInputTokens: 5000, Breakpoints: profile.Breakpoints[:1]}
+	firstUsage := commitTotalCacheFixture(tracker, first, policy)
 	partial := tracker.ComputeWithSettings("account", profile, policy)
-	wantRead := budget * 5000 / 8000
-	if partial.CacheReadInputTokens != wantRead || partial.CacheCreationInputTokens != budget-wantRead || partial.CacheCreation5mInputTokens != 0 || partial.CacheCreation1hInputTokens != budget-wantRead {
+	wantRead := firstUsage.CacheCreationInputTokens
+	wantWrite := int(math.Floor(3000 * p))
+	if partial.CacheReadInputTokens != wantRead || partial.CacheCreationInputTokens != wantWrite || partial.CacheCreation5mInputTokens != 0 || partial.CacheCreation1hInputTokens != wantWrite {
 		t.Fatalf("partial must only write new interval: %+v", partial)
 	}
-	tracker.Update("account", profile)
+	tracker.UpdateWithSettings("account", profile, policy, partial)
 	warm := tracker.ComputeWithSettings("account", profile, policy)
-	if warm.CacheReadInputTokens != budget || warm.CacheCreationInputTokens != 0 || billedClaudeInputTokens(10000, warm) != 10000-budget {
+	if warm.CacheReadInputTokens != wantRead+wantWrite || warm.CacheCreationInputTokens != 0 || billedClaudeInputTokens(10000, warm) != 10000-wantRead-wantWrite {
 		t.Fatalf("repeated content must not write: %+v", warm)
 	}
 	for _, snapshot := range []promptCacheUsage{cold, partial, warm} {
 		usage := scalePromptCacheUsage(snapshot, profile, 20000)
-		wantBudget := minInt(16000, int(math.Floor(20000*p)))
-		if usage.CacheReadInputTokens+usage.CacheCreationInputTokens != wantBudget || usage.CacheCreation5mInputTokens+usage.CacheCreation1hInputTokens != usage.CacheCreationInputTokens {
+		wantNewWrite := int(math.Floor(float64(16000-2*snapshot.rawRead) * p))
+		if usage.CacheReadInputTokens != snapshot.matchedCachedTokens || usage.CacheCreationInputTokens != wantNewWrite || usage.CacheCreation5mInputTokens+usage.CacheCreation1hInputTokens != usage.CacheCreationInputTokens {
 			t.Fatalf("native scaling: %+v", usage)
 		}
 		if again := scalePromptCacheUsage(snapshot, profile, 20000); again != usage {
@@ -468,7 +490,7 @@ func TestTotalCacheMovingBreakpointFindsOldPrefix(t *testing.T) {
 	}
 	req := &ClaudeRequest{Model: "claude-sonnet-4.5", System: []interface{}{block(strings.Repeat("stable system ", 1000), false)}, Messages: []ClaudeMessage{{Role: "user", Content: []interface{}{block(strings.Repeat("stable user ", 1000), true)}}}}
 	first := tracker.BuildClaudeProfileWithSettings(req, estimateClaudeRequestInputTokens(req), policy)
-	tracker.Update("account", first)
+	commitTotalCacheFixture(tracker, first, policy)
 	req.Messages[0].Content.([]interface{})[0].(map[string]interface{})["cache_control"] = nil
 	req.Messages = append(req.Messages, ClaudeMessage{Role: "assistant", Content: "ok"}, ClaudeMessage{Role: "user", Content: []interface{}{block(strings.Repeat("new tail ", 400), true)}})
 	next := tracker.BuildClaudeProfileWithSettings(req, estimateClaudeRequestInputTokens(req), policy)
