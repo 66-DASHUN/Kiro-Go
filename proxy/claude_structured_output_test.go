@@ -62,6 +62,23 @@ func TestStructuredOutputFailureAccountsOnceAndDoesNotCommitCache(t *testing.T) 
 
 const structuredFixture = `"output_config":{"effort":"max","format":{"type":"json_schema","schema":{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"],"additionalProperties":false}}}`
 
+func TestClaudeStructuredOutputLegacyOutputFormatAlias(t *testing.T) {
+	req := &ClaudeRequest{}
+	body := []byte(`{"model":"claude-sonnet-4.5","max_tokens":128,"output_format":{"type":"json_schema","schema":{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"]}},"messages":[{"role":"user","content":"answer"}]}`)
+	if err := json.Unmarshal(body, req); err != nil {
+		t.Fatal(err)
+	}
+	if msg := prepareClaudeStructuredOutput(req); msg != "" {
+		t.Fatalf("legacy output_format rejected: %s", msg)
+	}
+	if req.OutputConfig == nil || req.OutputConfig.Format == nil {
+		t.Fatal("legacy output_format was not normalized")
+	}
+	if req.structuredOutput == nil || req.structuredOutput.schema == nil {
+		t.Fatal("legacy output_format did not compile schema")
+	}
+}
+
 func TestClaudeStructuredOutputJSONAndSSE(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		for _, search := range []bool{false, true} {

@@ -30,10 +30,24 @@ func (noExternalSchemaLoader) Load(string) (any, error) {
 }
 
 func prepareClaudeStructuredOutput(req *ClaudeRequest) string {
-	if req.OutputConfig == nil || req.OutputConfig.Format == nil {
+	if req == nil {
 		return ""
 	}
-	format := req.OutputConfig.Format
+	var format *ClaudeOutputFormat
+	if req.OutputConfig != nil {
+		format = req.OutputConfig.Format
+	}
+	if format == nil {
+		format = req.OutputFormat
+		if format != nil {
+			// Normalize the legacy field so effort forwarding, cache identity and
+			// all response paths observe the same structured-output request.
+			req.OutputConfig = &ClaudeOutputConfig{Format: format}
+		}
+	}
+	if format == nil {
+		return ""
+	}
 	if format.Type != "json_schema" {
 		return "output_config.format.type must be json_schema"
 	}

@@ -85,17 +85,20 @@ func MapModel(model string) string {
 }
 
 type ClaudeRequest struct {
-	Model            string                `json:"model"`
-	Messages         []ClaudeMessage       `json:"messages"`
-	MaxTokens        int                   `json:"max_tokens"`
-	Temperature      float64               `json:"temperature,omitempty"`
-	TopP             float64               `json:"top_p,omitempty"`
-	Stream           bool                  `json:"stream,omitempty"`
-	System           interface{}           `json:"system,omitempty"`
-	Thinking         *ClaudeThinkingConfig `json:"thinking,omitempty"`
-	OutputConfig     *ClaudeOutputConfig   `json:"output_config,omitempty"`
-	Tools            []ClaudeTool          `json:"tools,omitempty"`
-	ToolChoice       interface{}           `json:"tool_choice,omitempty"`
+	Model        string                `json:"model"`
+	Messages     []ClaudeMessage       `json:"messages"`
+	MaxTokens    int                   `json:"max_tokens"`
+	Temperature  float64               `json:"temperature,omitempty"`
+	TopP         float64               `json:"top_p,omitempty"`
+	Stream       bool                  `json:"stream,omitempty"`
+	System       interface{}           `json:"system,omitempty"`
+	Thinking     *ClaudeThinkingConfig `json:"thinking,omitempty"`
+	OutputConfig *ClaudeOutputConfig   `json:"output_config,omitempty"`
+	// OutputFormat is the pre-output_config spelling used by older Claude clients.
+	// It is normalized before translation so all protocol paths behave identically.
+	OutputFormat     *ClaudeOutputFormat `json:"output_format,omitempty"`
+	Tools            []ClaudeTool        `json:"tools,omitempty"`
+	ToolChoice       interface{}         `json:"tool_choice,omitempty"`
 	structuredOutput *claudeStructuredOutput
 }
 
