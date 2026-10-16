@@ -6,31 +6,12 @@ import (
 	"kiro-proxy/config"
 	"math"
 	"net/http"
-	"strings"
 	"time"
 )
 
 const totalCacheRuleVersion = "prefix-total-v2"
 const promptCacheDiagnosticCapacity = 200
 const promptCacheDiagnosticRetention = 24 * time.Hour
-
-// Unknown models are deliberately ineligible for the new statistical mode.
-func totalCacheMinTokens(model string) int {
-	model = strings.ToLower(strings.TrimSpace(model))
-	model = strings.TrimPrefix(model, "anthropic.")
-	model = strings.ReplaceAll(model, ".", "-")
-	for name, floor := range map[string]int{
-		"claude-sonnet-4-5": 1024,
-		"claude-haiku-4-5":  4096,
-		"claude-opus-4-5":   4096,
-		"claude-opus-4-6":   4096,
-	} {
-		if model == name || strings.HasPrefix(model, name+"-") {
-			return floor
-		}
-	}
-	return math.MaxInt
-}
 
 func promptCacheBlockGroup(value interface{}) string {
 	wrapper, ok := value.(map[string]interface{})

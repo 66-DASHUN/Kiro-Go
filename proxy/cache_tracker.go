@@ -108,7 +108,13 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 }
 
 func (t *promptCacheTracker) BuildClaudeProfileWithSettings(req *ClaudeRequest, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
-	return t.buildClaudeProfile(req, totalInputTokens, settings.Mode == config.PromptCacheModePrefix || settings.Mode == config.PromptCacheModePrefixTotal, settings.Mode == config.PromptCacheModePrefixTotal)
+	totalMode := settings.Mode == config.PromptCacheModePrefixTotal
+	if totalMode && req != nil {
+		cacheReq := *req
+		cacheReq.Model = totalCacheModelIdentity(req.Model)
+		req = &cacheReq
+	}
+	return t.buildClaudeProfile(req, totalInputTokens, settings.Mode == config.PromptCacheModePrefix || totalMode, totalMode)
 }
 
 func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTokens int, strictBreakpoints, totalCacheRate bool) *promptCacheProfile {
@@ -242,12 +248,16 @@ func (t *promptCacheTracker) buildOpenAIProfile(payload *KiroPayload, totalInput
 	}
 
 	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	model := current.ModelID
+	if includeShortProfile {
+		model = totalCacheModelIdentity(model)
+	}
 	var tools []KiroToolWrapper
 	if current.UserInputMessageContext != nil {
 		tools = current.UserInputMessageContext.Tools
 	}
 	stable := map[string]interface{}{
-		"model":            current.ModelID,
+		"model":            model,
 		"inference_config": payload.InferenceConfig,
 		"model_context":    payload.AdditionalModelRequestFields,
 		"tools":            tools,
@@ -303,7 +313,7 @@ func (t *promptCacheTracker) buildOpenAIProfile(payload *KiroPayload, totalInput
 	return &promptCacheProfile{
 		Breakpoints:      breakpoints,
 		TotalInputTokens: totalInputTokens,
-		Model:            current.ModelID,
+		Model:            model,
 		InputFingerprint: inputFingerprint,
 	}
 }

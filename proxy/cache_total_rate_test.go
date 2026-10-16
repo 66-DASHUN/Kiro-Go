@@ -338,82 +338,90 @@ func TestTotalCacheParallelToolRunsAndMatchedRenewal(t *testing.T) {
 }
 
 func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
-	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
-		for _, stream := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/stream=%v", path, stream), func(t *testing.T) {
-				nativeInput := 10000
-				h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
-					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": nativeInput, "outputTokens": 137}))
-				})
-				enabled, mode, ratio := true, "prefix_total", .8
-				key, err := config.AddApiKey(config.ApiKeyEntry{ID: "total-mode", Key: "sk-total-mode-fixture", Enabled: true, PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode, PromptCacheEmulationRatio: &ratio})
-				if err != nil {
-					t.Fatal(err)
-				}
-				h.pool.Reload()
-				request := map[string]interface{}{"model": "claude-sonnet-4.5", "stream": stream, "max_tokens": 256}
-				messages := []map[string]interface{}{{"role": "user", "content": strings.Repeat("stable total input ", 1000)}}
-				if path == "/v1/responses" {
-					request["input"], request["store"] = messages, false
-				} else {
-					request["messages"] = messages
-				}
-				previousCache := float64(0)
-				for round := 0; round < 5; round++ {
-					if round == 2 {
-						nativeInput = 11000
-						messages = append(messages, map[string]interface{}{"role": "assistant", "content": "ok"}, map[string]interface{}{"role": "user", "content": strings.Repeat("appended input ", 100)})
-						if path == "/v1/responses" {
-							request["input"] = messages
-						} else {
-							request["messages"] = messages
-						}
+	for _, model := range []string{"claude-sonnet-4.5", "claude-sonnet-4.6", "claude-opus-5.5", "claude-haiku-4.5"} {
+		for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
+			for _, stream := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/stream=%v", model, path, stream), func(t *testing.T) {
+					nativeInput := 10000
+					h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+						writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": nativeInput, "outputTokens": 137}))
+					})
+					if err := config.UpdateModelMappings([]config.ModelMappingRule{{Key: "client-model", Value: model}}); err != nil {
+						t.Fatal(err)
 					}
-					if round == 4 {
-						ratio = 0
-						if err := config.UpdateApiKey(key.ID, config.ApiKeyEntry{Enabled: true, PromptCacheEmulationRatio: &ratio}); err != nil {
-							t.Fatal(err)
-						}
+					enabled, mode, ratio := true, "prefix_total", .8
+					key, err := config.AddApiKey(config.ApiKeyEntry{ID: "total-mode", Key: "sk-total-mode-fixture", Enabled: true, PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode, PromptCacheEmulationRatio: &ratio})
+					if err != nil {
+						t.Fatal(err)
 					}
-					body, _ := json.Marshal(request)
-					r := withApiKeyContext(httptest.NewRequest("POST", path, strings.NewReader(string(body))), &key)
-					rec := httptest.NewRecorder()
-					switch path {
-					case "/v1/messages":
-						h.handleClaudeMessages(rec, r)
-					case "/v1/chat/completions":
-						h.handleOpenAIChat(rec, r)
-					default:
-						h.handleOpenAIResponses(rec, r)
-					}
-					if rec.Code != 200 {
-						t.Fatalf("request: %s", rec.Body.String())
-					}
-					usage := runtimeProtocolUsage(t, rec, stream)
-					var read, write, total, output float64
-					if path == "/v1/messages" {
-						read, _ = usage["cache_read_input_tokens"].(float64)
-						write, _ = usage["cache_creation_input_tokens"].(float64)
-						total = usage["input_tokens"].(float64) + read + write
-						output = usage["output_tokens"].(float64)
+					h.pool.Reload()
+					request := map[string]interface{}{"model": "client-model", "stream": stream, "max_tokens": 256}
+					messages := []map[string]interface{}{{"role": "user", "content": strings.Repeat("stable total input ", 1000)}}
+					if path == "/v1/responses" {
+						request["input"], request["store"] = messages, false
 					} else {
-						field, input, out := "prompt_tokens_details", "prompt_tokens", "completion_tokens"
-						if path == "/v1/responses" {
-							field, input, out = "input_tokens_details", "input_tokens", "output_tokens"
-						}
-						if details, ok := usage[field].(map[string]interface{}); ok {
-							read, _ = details["cached_tokens"].(float64)
-							write, _ = details["cache_write_tokens"].(float64)
-						}
-						total, output = usage[input].(float64), usage[out].(float64)
+						request["messages"] = messages
 					}
-					if total != float64(nativeInput) || output != 137 || read+write > total || (round == 0 && (read != 0 || write < 7500 || write > 8500)) || (round > 0 && round < 4 && read != previousCache) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
-						t.Fatalf("round %d: %v", round, usage)
+					previousCache := float64(0)
+					for round := 0; round < 5; round++ {
+						if round == 1 {
+							request["model"] = strings.ReplaceAll(model, ".", "-")
+						}
+						if round == 2 {
+							nativeInput = 11000
+							messages = append(messages, map[string]interface{}{"role": "assistant", "content": "ok"}, map[string]interface{}{"role": "user", "content": strings.Repeat("appended input ", 100)})
+							if path == "/v1/responses" {
+								request["input"] = messages
+							} else {
+								request["messages"] = messages
+							}
+						}
+						if round == 4 {
+							ratio = 0
+							if err := config.UpdateApiKey(key.ID, config.ApiKeyEntry{Enabled: true, PromptCacheEmulationRatio: &ratio}); err != nil {
+								t.Fatal(err)
+							}
+						}
+						body, _ := json.Marshal(request)
+						r := withApiKeyContext(httptest.NewRequest("POST", path, strings.NewReader(string(body))), &key)
+						rec := httptest.NewRecorder()
+						switch path {
+						case "/v1/messages":
+							h.handleClaudeMessages(rec, r)
+						case "/v1/chat/completions":
+							h.handleOpenAIChat(rec, r)
+						default:
+							h.handleOpenAIResponses(rec, r)
+						}
+						if rec.Code != 200 {
+							t.Fatalf("request: %s", rec.Body.String())
+						}
+						usage := runtimeProtocolUsage(t, rec, stream)
+						var read, write, total, output float64
+						if path == "/v1/messages" {
+							read, _ = usage["cache_read_input_tokens"].(float64)
+							write, _ = usage["cache_creation_input_tokens"].(float64)
+							total = usage["input_tokens"].(float64) + read + write
+							output = usage["output_tokens"].(float64)
+						} else {
+							field, input, out := "prompt_tokens_details", "prompt_tokens", "completion_tokens"
+							if path == "/v1/responses" {
+								field, input, out = "input_tokens_details", "input_tokens", "output_tokens"
+							}
+							if details, ok := usage[field].(map[string]interface{}); ok {
+								read, _ = details["cached_tokens"].(float64)
+								write, _ = details["cache_write_tokens"].(float64)
+							}
+							total, output = usage[input].(float64), usage[out].(float64)
+						}
+						if total != float64(nativeInput) || output != 137 || read+write > total || (round == 0 && (read != 0 || write < 7500 || write > 8500)) || (round > 0 && round < 4 && read != previousCache) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
+							t.Fatalf("round %d: %v", round, usage)
+						}
+						previousCache = read + write
+						t.Logf("round %d total=%.0f read=%.0f write=%.0f output=%.0f", round, total, read, write, output)
 					}
-					previousCache = read + write
-					t.Logf("round %d total=%.0f read=%.0f write=%.0f output=%.0f", round, total, read, write, output)
-				}
-			})
+				})
+			}
 		}
 	}
 }
