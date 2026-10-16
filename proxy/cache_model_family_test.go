@@ -11,13 +11,13 @@ import (
 
 func TestTotalCacheFamilyLifecycle(t *testing.T) {
 	models := map[string]int{
-		"claude-sonnet-4": 1024, "claude-sonnet-4.5": 1024,
-		"claude-sonnet-4.6": 1024, "claude-sonnet-5": 1024, "claude-sonnet-5.5": 1024,
-		"claude-opus-4.5": 4096, "claude-opus-4.6": 4096, "claude-opus-4.7": 4096,
-		"claude-opus-4.8": 4096, "claude-opus-5": 4096, "claude-opus-5.5": 4096,
-		"claude-haiku-4.5": 4096, "claude-sonnet-6.1": 1024, "claude-haiku-6.2": 4096,
-		"claude-opus-6.3": 4096, "claude-opus-5.5-20261001": 4096,
-		"claude-sonnet-4.6-latest-thinking": 1024,
+		"claude-sonnet-4": 1, "claude-sonnet-4.5": 1,
+		"claude-sonnet-4.6": 1, "claude-sonnet-5": 1, "claude-sonnet-5.5": 1,
+		"claude-opus-4.5": 1, "claude-opus-4.6": 1, "claude-opus-4.7": 1,
+		"claude-opus-4.8": 1, "claude-opus-5": 1, "claude-opus-5.5": 1,
+		"claude-haiku-4.5": 1, "claude-sonnet-6.1": 1, "claude-haiku-6.2": 1,
+		"claude-opus-6.3": 1, "claude-opus-5.5-20261001": 1,
+		"claude-sonnet-4.6-latest-thinking": 1,
 	}
 	for model, floor := range models {
 		for _, alias := range []string{model, strings.ReplaceAll(model, ".", "-"), " ANTHROPIC." + strings.ToUpper(model) + " "} {
@@ -26,12 +26,12 @@ func TestTotalCacheFamilyLifecycle(t *testing.T) {
 				policy := totalCachePolicy(.9)
 				profile := &promptCacheProfile{Model: alias, TotalInputTokens: floor - 1, InputFingerprint: [32]byte{33}, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: floor - 1, TTL: 5 * time.Minute}}}
 				short := tracker.ComputeWithSettings("account", profile, policy)
-				if short.CacheReadInputTokens+short.CacheCreationInputTokens != 0 || short.limitation != "below_model_minimum" {
-					t.Fatalf("short prefix should fail only the simulation minimum: %+v", short)
+				if short.CacheReadInputTokens+short.CacheCreationInputTokens != 0 || short.limitation != "empty_cache_prefix" {
+					t.Fatalf("empty prefix should not generate cache: %+v", short)
 				}
 				tracker.UpdateWithSettings("account", profile, policy, short)
 				if len(tracker.entriesByAccount["account"]) != 0 {
-					t.Fatal("short input created hidden cache")
+					t.Fatal("empty input created hidden cache")
 				}
 				profile.TotalInputTokens, profile.Breakpoints[0].CumulativeTokens = floor, floor
 				cold := tracker.ComputeWithSettings("account", profile, policy)
@@ -46,7 +46,7 @@ func TestTotalCacheFamilyLifecycle(t *testing.T) {
 				profile.TotalInputTokens += 1000
 				profile.Breakpoints = append(profile.Breakpoints, promptCacheBreakpoint{Fingerprint: [32]byte{2}, CumulativeTokens: profile.TotalInputTokens, TTL: time.Hour})
 				appended := tracker.ComputeWithSettings("account", profile, policy)
-				wantWrite := int(math.Floor(1000 * variedPrefixReadRatio(.9, profile)))
+				wantWrite := int(math.Round(1000 * variedPrefixReadRatio(.9, profile)))
 				if appended.CacheReadInputTokens != cold.CacheCreationInputTokens || appended.CacheCreationInputTokens != wantWrite || appended.CacheCreation1hInputTokens != wantWrite || appended.CacheCreation5mInputTokens != 0 {
 					t.Fatalf("append should only write its new interval: %+v", appended)
 				}

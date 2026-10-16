@@ -9,6 +9,7 @@ const (
 	effortMedium  = "medium"
 	effortHigh    = "high"
 	effortXHigh   = "xhigh"
+	effortMax     = "max"
 )
 
 var effortOrder = map[string]int{
@@ -16,6 +17,7 @@ var effortOrder = map[string]int{
 	effortMedium: 2,
 	effortHigh:   3,
 	effortXHigh:  4,
+	effortMax:    5,
 }
 
 func normalizeReasoningEffort(raw string) string {
@@ -30,8 +32,10 @@ func normalizeReasoningEffort(raw string) string {
 		return effortMedium
 	case "high":
 		return effortHigh
-	case "xhigh", "extra_high", "extra-high", "max", "maximum":
+	case "xhigh", "extra_high", "extra-high":
 		return effortXHigh
+	case "max", "maximum":
+		return effortMax
 	default:
 		return effortUnset
 	}
@@ -54,9 +58,15 @@ func (h *Handler) applyReasoningEffort(payload *KiroPayload, model, rawEffort st
 		return
 	}
 	if native, ok := resolveModelEffort(effort, h.effortLevelsForModel(model)); ok {
-		payload.AdditionalModelRequestFields = map[string]interface{}{
-			"output_config": map[string]interface{}{"effort": native},
+		if payload.AdditionalModelRequestFields == nil {
+			payload.AdditionalModelRequestFields = map[string]interface{}{}
 		}
+		output, _ := payload.AdditionalModelRequestFields["output_config"].(map[string]interface{})
+		if output == nil {
+			output = map[string]interface{}{}
+		}
+		output["effort"] = native
+		payload.AdditionalModelRequestFields["output_config"] = output
 	}
 }
 
@@ -119,6 +129,22 @@ func resolveModelEffort(rawEffort string, supportedLevels []string) (string, boo
 		return "", false
 	}
 	target := effortOrder[effort]
+	// Older schemas spell their top tier "max" without an "xhigh" tier.
+	// Preserve that alias only when xhigh itself is unavailable.
+	if effort == effortXHigh {
+		hasXHigh, hasMax := false, ""
+		for _, level := range supportedLevels {
+			if normalizeReasoningEffort(level) == effortXHigh {
+				hasXHigh = true
+			}
+			if normalizeReasoningEffort(level) == effortMax {
+				hasMax = level
+			}
+		}
+		if !hasXHigh && hasMax != "" {
+			return hasMax, true
+		}
+	}
 	best := ""
 	bestRank := -1
 	for _, level := range supportedLevels {

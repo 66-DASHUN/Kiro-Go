@@ -36,14 +36,15 @@ const (
 )
 
 type claudeWebSearchRound struct {
-	cacheUsage   promptCacheUsage
-	text         string
-	thinking     string
-	toolUses     []KiroToolUse
-	inputTokens  int
-	outputTokens int
-	credits      float64
-	stopReason   string
+	cacheUsage     promptCacheUsage
+	text           string
+	thinking       string
+	thinkingBlocks []ClaudeContentBlock
+	toolUses       []KiroToolUse
+	inputTokens    int
+	outputTokens   int
+	credits        float64
+	stopReason     string
 }
 
 type webSearchOutcome struct {
@@ -109,7 +110,7 @@ func claudeWebSearchModeFor(req *ClaudeRequest) (claudeWebSearchMode, string) {
 		return claudeWebSearchNone, ""
 	}
 	//! Only Claude Code's search sub-request skips the model; a chat that merely allows search still gets an answer.
-	if len(req.Tools) == 1 {
+	if len(req.Tools) == 1 && req.structuredOutput == nil {
 		if query := claudeCodeSearchQuery(req.Messages); query != "" {
 			return claudeWebSearchDirect, query
 		}
@@ -393,7 +394,7 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 	//! Every search round spends budget, so at most maxUses+2 upstream calls run before the final answer.
 	for roundIdx := 0; ; roundIdx++ {
 		if roundIdx > 0 {
-			estimatedInputTokens = estimateClaudeRequestInputTokens(cloneClaudeRequestForThinking(&working, thinking))
+			estimatedInputTokens = estimateClaudeRequestInputTokens(cloneClaudeRequestForThinking(&working, h.claudeNeedsThinkingPrompt(&working, thinking)))
 		}
 
 		round, account, err := h.callClaudeRoundWithFailover(ctx, &working, thinking, estimatedInputTokens, apiKeyReservation.apiKeyID())
@@ -444,16 +445,35 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		//! Final round: searches next to client tools still run, but only the client sees their results.
 		content := append([]map[string]interface{}(nil), presented...)
 		finalText := round.text
-		if thinking && round.thinking != "" {
+		if err := req.structuredOutput.validate(finalText, len(clientUses), mapClaudeStopReason(round.stopReason, len(clientUses))); err != nil {
+			h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
+			recordFinalRequestForApiKey(r.Context(), apiKeyReservation, lastAccount, req.Model, inputTokens, outputTokens, credits, false, 502, err.Error())
+			h.sendClaudeError(w, 502, "api_error", err.Error())
+			return
+		}
+		if thinking && (round.thinking != "" || len(round.thinkingBlocks) > 0) {
 			switch {
 			case thinkingOpts.OmitDisplay:
-				content = append(content, map[string]interface{}{"type": "thinking", "thinking": ""})
+				if len(round.thinkingBlocks) > 0 {
+					for _, block := range round.thinkingBlocks {
+						block.Thinking = ""
+						content = append(content, claudeThinkingBlockMap(block))
+					}
+				} else {
+					content = append(content, map[string]interface{}{"type": "thinking", "thinking": ""})
+				}
 			case thinkingOpts.Format == "think":
 				finalText = "<think>" + round.thinking + "</think>" + finalText
 			case thinkingOpts.Format == "reasoning_content":
 				finalText = round.thinking + finalText
 			default:
-				content = append(content, map[string]interface{}{"type": "thinking", "thinking": round.thinking})
+				if len(round.thinkingBlocks) > 0 {
+					for _, block := range round.thinkingBlocks {
+						content = append(content, claudeThinkingBlockMap(block))
+					}
+				} else {
+					content = append(content, map[string]interface{}{"type": "thinking", "thinking": round.thinking})
+				}
 			}
 		}
 		if strings.TrimSpace(finalText) != "" {
@@ -491,10 +511,10 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 }
 
 func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRequest, thinking bool, estimatedInputTokens int, apiKeyID string) (*claudeWebSearchRound, *config.Account, error) {
-	payload := ClaudeToKiro(req, thinking)
-	h.applyReasoningEffort(payload, req.Model, claudeOutputEffort(req))
+	payload := ClaudeToKiro(req, h.claudeNeedsThinkingPrompt(req, thinking))
+	h.applyClaudeInferenceOptions(payload, req, thinking)
 	cacheSettings := config.EffectivePromptCacheSettings(apiKeyID)
-	cacheProfile := h.promptCache.BuildClaudeProfileWithSettings(cloneClaudeRequestForThinking(req, thinking), estimatedInputTokens, cacheSettings)
+	cacheProfile := h.promptCache.BuildClaudeProfileWithSettings(cloneClaudeRequestForThinking(req, h.claudeNeedsThinkingPrompt(req, thinking)), estimatedInputTokens, cacheSettings)
 	excluded := make(map[string]bool)
 	var lastErr error
 	var lastAccount *config.Account
@@ -547,14 +567,17 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 		return nil, err
 	}
 	var text, reasoning string
+	var nativeThinking claudeThinkingCollector
 	var toolUses []KiroToolUse
 	var inputTokens, outputTokens int
 	var credits float64
 	var stopReason string
 	callback := &KiroStreamCallback{
+		OnThinkingSignature: nativeThinking.signature,
 		OnText: func(t string, isThinking bool) {
 			if isThinking {
 				reasoning += t
+				nativeThinking.text(t)
 			} else {
 				text += t
 			}
@@ -576,13 +599,14 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 	}
 	inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimateClaudeOutputTokens(text, reasoning, toolUses))
 	return &claudeWebSearchRound{
-		text:         text,
-		thinking:     reasoning,
-		toolUses:     toolUses,
-		inputTokens:  inputTokens,
-		outputTokens: outputTokens,
-		credits:      credits,
-		stopReason:   stopReason,
+		text:           text,
+		thinking:       reasoning,
+		thinkingBlocks: nativeThinking.responseBlocks(false),
+		toolUses:       toolUses,
+		inputTokens:    inputTokens,
+		outputTokens:   outputTokens,
+		credits:        credits,
+		stopReason:     stopReason,
 	}, nil
 }
 
@@ -702,6 +726,9 @@ func (h *Handler) sendWebSearchContentBlock(w http.ResponseWriter, flusher http.
 		text, _ := block["thinking"].(string)
 		for _, chunk := range chunkByRunes(text, webSearchTextChunkRunes) {
 			deltas = append(deltas, map[string]interface{}{"type": "thinking_delta", "thinking": chunk})
+		}
+		if signature, _ := block["signature"].(string); signature != "" {
+			deltas = append(deltas, map[string]interface{}{"type": "signature_delta", "signature": signature})
 		}
 	case "text":
 		start = map[string]interface{}{"type": "text", "text": ""}

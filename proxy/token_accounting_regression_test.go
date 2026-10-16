@@ -210,6 +210,7 @@ func TestLocalUsageProtocolsIgnoreContextOccupancy(t *testing.T) {
 				})
 				content := "Reply with hello."
 				wantInput := estimateApproxTokens(content)
+				priorWrite := 0
 				for i, answer := range answers {
 					rec := localUsageRequest(t, h, path, stream, content)
 					usage := runtimeProtocolUsage(t, rec, stream)
@@ -217,9 +218,10 @@ func TestLocalUsageProtocolsIgnoreContextOccupancy(t *testing.T) {
 					if input != wantInput || output != estimateApproxTokens(answer) {
 						t.Fatalf("response %d: input=%d output=%d, want input=%d output=%d; context must not become input", i, input, output, wantInput, estimateApproxTokens(answer))
 					}
-					if read != 0 || write != 0 {
-						t.Fatalf("short visible input must bypass cache: %+v", usage)
+					if (i == 0 && (read != 0 || write <= 0 || write > input)) || (i == 1 && (read != priorWrite || write != 0)) {
+						t.Fatalf("short input must write cold and read the committed share warm: %+v", usage)
 					}
+					priorWrite = write
 				}
 			})
 		}

@@ -544,6 +544,11 @@ func flattenClaudeCacheBlocks(req *ClaudeRequest) []cacheablePromptBlock {
 	}
 
 	appendSystemCacheBlocks(&blocks, req.System)
+	if req.structuredOutput != nil {
+		appendSystemCacheBlocks(&blocks, []interface{}{map[string]interface{}{
+			"type": "text", "text": req.structuredOutput.instruction,
+		}})
+	}
 
 	for messageIndex, msg := range req.Messages {
 		appendMessageCacheBlocks(&blocks, messageIndex, msg)

@@ -196,7 +196,8 @@ func TestReviewNativeSearchCountsAllRoundInputs(t *testing.T) {
 	stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
 	msg := decodeClaudeMessage(t, postClaudeMessages(t, h, `{"model":"claude-sonnet-4.5","max_tokens":64,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"look up go"}]}`))
 	usage := msg["usage"].(map[string]interface{})
-	if usage["input_tokens"] != float64(200) {
-		t.Fatalf("two 100-token model calls report input_tokens=%v; calls=%d", usage["input_tokens"], calls.Load())
+	input, _, _, _ := localUsageTotals("/v1/messages", usage)
+	if input != 200 || calls.Load() != 2 {
+		t.Fatalf("two 100-token model calls must conserve full input: input=%d usage=%v; calls=%d", input, usage, calls.Load())
 	}
 }

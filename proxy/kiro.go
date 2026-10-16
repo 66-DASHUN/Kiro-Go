@@ -151,6 +151,7 @@ func InitKiroHttpClient(proxyURL string) {
 }
 
 type KiroPayload struct {
+	structuredOutput  *claudeStructuredOutput
 	HostedSearchTools map[string]bool `json:"-"`
 	ConversationState struct {
 		AgentContinuationId string `json:"agentContinuationId,omitempty"`
@@ -236,13 +237,14 @@ type InferenceConfig struct {
 }
 
 type KiroStreamCallback struct {
-	OnText         func(text string, isThinking bool)
-	OnToolUse      func(toolUse KiroToolUse)
-	OnComplete     func(inputTokens, outputTokens int)
-	OnError        func(err error)
-	OnCredits      func(credits float64)
-	OnContextUsage func(percentage float64)
-	OnStopReason   func(reason string)
+	OnThinkingSignature func(signature string)
+	OnText              func(text string, isThinking bool)
+	OnToolUse           func(toolUse KiroToolUse)
+	OnComplete          func(inputTokens, outputTokens int)
+	OnError             func(err error)
+	OnCredits           func(credits float64)
+	OnContextUsage      func(percentage float64)
+	OnStopReason        func(reason string)
 }
 
 func setPayloadProfileArnForAccount(payload *KiroPayload, account *config.Account) {
@@ -634,6 +636,13 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 				if callback.OnText != nil {
 					emitted = true
 					callback.OnText(text, true)
+				}
+			}
+			if signature, ok := event["signature"].(string); ok && signature != "" {
+				turn.sawReasoning = true
+				if callback.OnThinkingSignature != nil {
+					emitted = true
+					callback.OnThinkingSignature(signature)
 				}
 			}
 		case "toolUseEvent":

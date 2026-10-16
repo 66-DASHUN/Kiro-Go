@@ -15,16 +15,13 @@ func totalCacheModelIdentity(model string) string {
 	return strings.ReplaceAll(model, ".", "-")
 }
 
-// These are local simulation defaults, not measured upstream cache limits.
-// Recognized Claude families inherit a default across numeric versions; an
-// unknown family or malformed name must not silently fabricate cache usage.
+// All recognized Claude families use the same local simulation rule: any
+// nonempty prefix is eligible. These are not measured upstream cache limits.
+// Unknown families and malformed names still fail closed.
 func totalCacheMinTokens(model string) int {
 	match := totalCacheClaudeModelPattern.FindStringSubmatch(totalCacheModelIdentity(model))
 	if match == nil {
 		return math.MaxInt
 	}
-	if match[1] == "sonnet" {
-		return defaultMinCacheableTokens
-	}
-	return opusMinCacheableTokens
+	return 1
 }

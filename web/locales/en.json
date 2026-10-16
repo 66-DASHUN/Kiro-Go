@@ -684,6 +684,7 @@
   "settings.cacheReason.breakpoint_coverage": "Breakpoint coverage",
   "settings.cacheReason.matched_share_clamped": "Saved share clamped to calibrated match",
   "settings.cacheReason.below_model_minimum": "Below simulation minimum",
+  "settings.cacheReason.empty_cache_prefix": "Empty cacheable prefix",
   "settings.cacheReason.unsupported_model": "Unrecognized cache simulation model family",
   "settings.cacheReason.zero_rate": "Zero rate",
   "settings.cacheReason.disabled": "Disabled",

@@ -61,6 +61,9 @@ func estimateClaudeRequestInputTokens(req *ClaudeRequest) int {
 	}
 
 	total := estimateClaudeValueTokens(req.System)
+	if req.structuredOutput != nil {
+		total += estimateApproxTokens(req.structuredOutput.instruction)
+	}
 
 	for _, msg := range req.Messages {
 		total += estimateClaudeValueTokens(msg.Content)

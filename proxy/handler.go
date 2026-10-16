@@ -828,11 +828,15 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
 	}
+	if msg := prepareClaudeStructuredOutput(&req); msg != "" {
+		h.sendClaudeError(w, 400, "invalid_request_error", msg)
+		return
+	}
 
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
-	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
+	effectiveReq := cloneClaudeRequestForThinking(&req, h.claudeNeedsThinkingPrompt(&req, thinking))
 
 	estimatedTokens := estimateClaudeRequestInputTokens(effectiveReq)
 	if estimatedTokens < 1 {
@@ -875,12 +879,25 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
 	}
+	if msg := prepareClaudeStructuredOutput(&req); msg != "" {
+		recordFinalRequestWithAPIKey(r.Context(), apiKeyID, apiKeyValue, nil, req.Model, 0, 0, 0, false, http.StatusBadRequest, msg)
+		h.sendClaudeError(w, 400, "invalid_request_error", msg)
+		return
+	}
+	if msg := validateStructuredStreamingWriter(&req, w); msg != "" {
+		recordFinalRequestWithAPIKey(r.Context(), apiKeyID, apiKeyValue, nil, req.Model, 0, 0, 0, false, http.StatusInternalServerError, msg)
+		h.sendClaudeError(w, 500, "api_error", msg)
+		return
+	}
 
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
-	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
+	effectiveReq := cloneClaudeRequestForThinking(&req, h.claudeNeedsThinkingPrompt(&req, thinking))
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
+	if req.structuredOutput != nil {
+		thinkingResponseOpts.Format = "thinking"
+	}
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
 	cacheProfile := h.promptCache.BuildClaudeProfileWithSettings(effectiveReq, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyID))
 	apiKeyReservation, err := reserveApiKeyUsage(apiKeyID, apiKeyValue, tokenBudget(estimatedInputTokens))
@@ -899,10 +916,11 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	kiroPayload := ClaudeToKiro(&req, thinking)
-	h.applyReasoningEffort(kiroPayload, req.Model, claudeOutputEffort(&req))
+	kiroPayload := ClaudeToKiro(&req, h.claudeNeedsThinkingPrompt(&req, thinking))
+	h.applyClaudeInferenceOptions(kiroPayload, &req, thinking)
+	kiroPayload.structuredOutput = req.structuredOutput
 
-	if req.Stream {
+	if req.Stream && req.structuredOutput == nil {
 		h.handleClaudeStream(w, r, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyReservation)
 	} else {
 		h.handleClaudeNonStream(w, r, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyReservation)
@@ -1235,6 +1253,18 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 			}
 
 			callback := &KiroStreamCallback{
+				OnThinkingSignature: func(signature string) {
+					if !thinking || thinkingFormat != "thinking" || !allowReasoningSource(&thinkingSource) {
+						return
+					}
+					startContentBlock("thinking")
+					h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+						"type": "content_block_delta", "index": activeBlockIndex,
+						"delta": map[string]string{"type": "signature_delta", "signature": signature},
+					})
+					closeActiveBlock()
+					eventThinkingOpen, thinkingStarted = false, false
+				},
 				OnText: func(text string, isThinking bool) {
 					if text == "" {
 						return
@@ -1363,7 +1393,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 			h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 				"type": "message_delta",
 				"delta": map[string]interface{}{
-					"stop_reason": stopReason,
+					"stop_reason":   stopReason,
+					"stop_sequence": nil,
 				},
 				"usage": buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, cacheProfile != nil),
 			})
@@ -1479,15 +1510,18 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 
 			var content string
 			var thinkingContent string
+			var nativeThinking claudeThinkingCollector
 			var toolUses []KiroToolUse
 			var inputTokens, outputTokens int
 			var credits float64
 			var upstreamStopReason string
 
 			callback := &KiroStreamCallback{
+				OnThinkingSignature: nativeThinking.signature,
 				OnText: func(text string, isThinking bool) {
 					if isThinking {
 						thinkingContent += text
+						nativeThinking.text(text)
 					} else {
 						content += text
 					}
@@ -1542,6 +1576,17 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
 			cacheProfile = cacheProfileWithInputTokens(cacheProfile, inputTokens)
 
+			if err := payload.structuredOutput.validate(finalContent, len(toolUses), mapClaudeStopReason(upstreamStopReason, len(toolUses))); err != nil {
+				// Upstream work really consumed credits; account for it once, but
+				// report the failed response and do not retry or certify cache.
+				h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
+				h.pool.RecordSuccess(account.ID)
+				h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+				recordFinalRequestForApiKey(r.Context(), apiKeyReservation, account, model, inputTokens, outputTokens, credits, false, 502, err.Error())
+				h.sendClaudeError(w, 502, "api_error", err.Error())
+				return
+			}
+
 			h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 			getObserveStore().RecordSuccess(account.ID, model, inputTokens, outputTokens, credits)
 			recordFinalRequestForApiKey(r.Context(), apiKeyReservation, account, model, inputTokens, outputTokens, credits, true, 200, "")
@@ -1571,6 +1616,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			}
 
 			resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
+			if thinking && thinkingFormat == "thinking" {
+				resp.Content = replaceClaudeThinkingBlocks(resp.Content, nativeThinking.responseBlocks(thinkingOpts.OmitDisplay))
+			}
 			resp.StopReason = mapClaudeStopReason(upstreamStopReason, len(toolUses))
 			resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
 			resp.Usage.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
@@ -1581,8 +1629,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 					Ephemeral1hInputTokens: cacheUsage.CacheCreation1hInputTokens,
 				}
 			}
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			json.NewEncoder(w).Encode(resp)
+			h.writeClaudeBufferedResponse(w, resp, payload.structuredOutput != nil && payload.structuredOutput.stream)
 			return
 		}
 		excluded[account.ID] = true

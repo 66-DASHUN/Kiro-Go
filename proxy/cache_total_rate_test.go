@@ -96,7 +96,7 @@ func TestTotalCacheDiagnosticsAuthBoundsAndPrivacy(t *testing.T) {
 	}
 }
 
-func TestTotalCacheConcurrentSnapshotAndNativeMinimum(t *testing.T) {
+func TestTotalCacheConcurrentSnapshotAndNativeShortInput(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := &promptCacheProfile{Model: "claude-haiku-4.5", TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{3}, CumulativeTokens: 10000, TTL: time.Hour}}}
 	policy := totalCachePolicy(.95)
@@ -117,11 +117,11 @@ func TestTotalCacheConcurrentSnapshotAndNativeMinimum(t *testing.T) {
 		}()
 	}
 	workers.Wait()
-	if short := scalePromptCacheUsage(cold, profile, 4095); short.CacheReadInputTokens+short.CacheCreationInputTokens != 0 {
-		t.Fatalf("native minimum ignored: %+v", short)
+	if short := scalePromptCacheUsage(cold, profile, 1); short.CacheCreationInputTokens != 1 || short.CacheReadInputTokens != 0 {
+		t.Fatalf("native short input excluded: %+v", short)
 	}
 	if equal := scalePromptCacheUsage(cold, profile, 4096); equal.CacheCreationInputTokens == 0 {
-		t.Fatal("valid raw prefix suppressed because scaled budget < minimum")
+		t.Fatal("native input unexpectedly excluded")
 	}
 	warm := tracker.ComputeWithSettings("account", profile, policy)
 	before := tracker.entriesByAccount["account"][[32]byte{3}]
@@ -139,7 +139,7 @@ func TestTotalCacheConcurrentSnapshotAndNativeMinimum(t *testing.T) {
 	}
 }
 
-func TestTotalCacheNativeCalibrationRechecksMatchedMinimum(t *testing.T) {
+func TestTotalCacheNativeCalibrationClampsMatchedShare(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := &promptCacheProfile{Model: "claude-haiku-4.5", TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: 6000, TTL: time.Hour}, {Fingerprint: [32]byte{2}, CumulativeTokens: 10000, TTL: time.Hour}}}
 	commitTotalCacheFixture(tracker, &promptCacheProfile{Model: profile.Model, TotalInputTokens: 6000, Breakpoints: profile.Breakpoints[:1]}, totalCachePolicy(.8))
@@ -148,32 +148,38 @@ func TestTotalCacheNativeCalibrationRechecksMatchedMinimum(t *testing.T) {
 		t.Fatal("fixture did not match raw prefix")
 	}
 	usage := scalePromptCacheUsage(snapshot, profile, 6000)
-	if usage.CacheReadInputTokens != 0 {
-		t.Fatalf("calibrated matched prefix is 3600 below Haiku floor: %+v", usage)
+	if usage.CacheReadInputTokens != 3600 || usage.CacheCreationInputTokens <= 0 {
+		t.Fatalf("native count must clamp the saved read and write only new content: %+v", usage)
 	}
 	before := tracker.entriesByAccount["account"][[32]byte{1}]
 	tracker.UpdateWithSettings("account", cacheProfileWithInputTokens(profile, 6000), totalCachePolicy(.8), usage)
-	if tracker.entriesByAccount["account"][[32]byte{1}] != before {
-		t.Fatal("below-minimum native match renewed the old entry")
+	after := tracker.entriesByAccount["account"][[32]byte{1}]
+	if after.PrefixTokens != before.PrefixTokens || after.CachedTokens != before.CachedTokens || after.ExpiresAt.Before(before.ExpiresAt) {
+		t.Fatal("native short match changed the committed accounting basis")
 	}
 	if zero := scalePromptCacheUsage(snapshot, profile, 0); zero.CacheReadInputTokens+zero.CacheCreationInputTokens != 0 {
 		t.Fatalf("zero native input retained positive cache: %+v", zero)
 	}
 }
 
-func TestTotalCacheBelowMinimumExplainedInDiagnostic(t *testing.T) {
+func TestTotalCacheShortInputExplainedInDiagnostic(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	payload := estimatedOpenAIPayload("short content")
 	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-haiku-4.5"
-	snapshot := beginOpenAICacheUsage(tracker, "account", payload, 3000, totalCachePolicy(.8))
-	if got := finishOpenAICacheUsage(tracker, "account", snapshot, 3000); got != nil {
-		t.Fatalf("short input cached: %+v", got)
+	snapshot := beginOpenAICacheUsage(tracker, "account", payload, 3, totalCachePolicy(.8))
+	got := finishOpenAICacheUsage(tracker, "account", snapshot, 3)
+	if got == nil || got.CacheWriteTokens <= 0 || got.CachedTokens != 0 {
+		t.Fatalf("short native input did not write: %+v", got)
 	}
-	if len(tracker.diagnostics) != 1 || tracker.diagnostics[0].Limitation != "below_model_minimum" || tracker.diagnostics[0].Ordinary != 3000 {
-		t.Fatalf("missing native short-input explanation: %+v", tracker.diagnostics)
+	if len(tracker.diagnostics) != 1 {
+		t.Fatalf("missing short input diagnostic: %+v", tracker.diagnostics)
 	}
-	if len(tracker.entriesByAccount["account"]) != 0 {
-		t.Fatal("short input stored cache")
+	d := tracker.diagnostics[0]
+	if d.Rule != "prefix-total-v3" || d.Limitation != "" || d.Ordinary+d.Read+d.Write != 3 || d.Write != got.CacheWriteTokens {
+		t.Fatalf("incorrect short input diagnostic: %+v", d)
+	}
+	if len(tracker.entriesByAccount["account"]) == 0 {
+		t.Fatal("successful short input did not store cache")
 	}
 }
 
@@ -199,10 +205,9 @@ func TestTotalCacheNativeUpwardCalibrationRetainsPotentialMatch(t *testing.T) {
 	if second.usage.matchedTTL == 0 {
 		t.Fatal("potential-match TTL was erased before calibration")
 	}
-	for _, entry := range tracker.entriesByAccount["account"] {
-		if !entry.ExpiresAt.After(time.Now().Add(4 * time.Minute)) {
-			t.Fatal("upward native match was not renewed")
-		}
+	entry := tracker.entriesByAccount["account"][second.usage.matchedFingerprint]
+	if !entry.ExpiresAt.After(time.Now().Add(4 * time.Minute)) {
+		t.Fatal("upward native match was not renewed")
 	}
 }
 
@@ -444,7 +449,7 @@ func TestTotalCacheBudgetColdWarmPartialAndScaling(t *testing.T) {
 	}}
 	policy := totalCachePolicy(.8)
 	p := variedPrefixReadRatio(.8, profile)
-	budget := int(math.Floor(8000 * p))
+	budget := int(math.Round(8000 * p))
 	cold := tracker.ComputeWithSettings("account", profile, policy)
 	if cold.CacheReadInputTokens != 0 || cold.CacheCreationInputTokens != budget {
 		t.Fatalf("cold total cache budget: %+v, want %d", cold, budget)
@@ -453,7 +458,7 @@ func TestTotalCacheBudgetColdWarmPartialAndScaling(t *testing.T) {
 	firstUsage := commitTotalCacheFixture(tracker, first, policy)
 	partial := tracker.ComputeWithSettings("account", profile, policy)
 	wantRead := firstUsage.CacheCreationInputTokens
-	wantWrite := int(math.Floor(3000 * p))
+	wantWrite := int(math.Round(3000 * p))
 	if partial.CacheReadInputTokens != wantRead || partial.CacheCreationInputTokens != wantWrite || partial.CacheCreation5mInputTokens != 0 || partial.CacheCreation1hInputTokens != wantWrite {
 		t.Fatalf("partial must only write new interval: %+v", partial)
 	}
@@ -464,7 +469,7 @@ func TestTotalCacheBudgetColdWarmPartialAndScaling(t *testing.T) {
 	}
 	for _, snapshot := range []promptCacheUsage{cold, partial, warm} {
 		usage := scalePromptCacheUsage(snapshot, profile, 20000)
-		wantNewWrite := int(math.Floor(float64(16000-2*snapshot.rawRead) * p))
+		wantNewWrite := int(math.Round(float64(16000-2*snapshot.rawRead) * p))
 		if usage.CacheReadInputTokens != snapshot.matchedCachedTokens || usage.CacheCreationInputTokens != wantNewWrite || usage.CacheCreation5mInputTokens+usage.CacheCreation1hInputTokens != usage.CacheCreationInputTokens {
 			t.Fatalf("native scaling: %+v", usage)
 		}
@@ -508,11 +513,11 @@ func TestTotalCacheMovingBreakpointFindsOldPrefix(t *testing.T) {
 	}
 }
 
-func TestTotalCacheModelThresholds(t *testing.T) {
+func TestTotalCacheUniformNonemptyThreshold(t *testing.T) {
 	for _, test := range []struct {
 		model string
 		floor int
-	}{{"claude-sonnet-4.5", 1024}, {"claude-haiku-4-5-20251001-thinking", 4096}, {"claude-opus-4.6", 4096}} {
+	}{{"claude-sonnet-4.5", 1}, {"claude-haiku-4-5-20251001-thinking", 1}, {"claude-opus-4.6", 1}} {
 		for _, n := range []int{test.floor - 1, test.floor} {
 			profile := &promptCacheProfile{Model: test.model, TotalInputTokens: n, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: n, TTL: time.Hour}}}
 			got := newPromptCacheTracker(time.Hour).ComputeWithSettings("account", profile, totalCachePolicy(.8))

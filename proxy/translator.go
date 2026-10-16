@@ -85,17 +85,18 @@ func MapModel(model string) string {
 }
 
 type ClaudeRequest struct {
-	Model        string                `json:"model"`
-	Messages     []ClaudeMessage       `json:"messages"`
-	MaxTokens    int                   `json:"max_tokens"`
-	Temperature  float64               `json:"temperature,omitempty"`
-	TopP         float64               `json:"top_p,omitempty"`
-	Stream       bool                  `json:"stream,omitempty"`
-	System       interface{}           `json:"system,omitempty"`
-	Thinking     *ClaudeThinkingConfig `json:"thinking,omitempty"`
-	OutputConfig *ClaudeOutputConfig   `json:"output_config,omitempty"`
-	Tools        []ClaudeTool          `json:"tools,omitempty"`
-	ToolChoice   interface{}           `json:"tool_choice,omitempty"`
+	Model            string                `json:"model"`
+	Messages         []ClaudeMessage       `json:"messages"`
+	MaxTokens        int                   `json:"max_tokens"`
+	Temperature      float64               `json:"temperature,omitempty"`
+	TopP             float64               `json:"top_p,omitempty"`
+	Stream           bool                  `json:"stream,omitempty"`
+	System           interface{}           `json:"system,omitempty"`
+	Thinking         *ClaudeThinkingConfig `json:"thinking,omitempty"`
+	OutputConfig     *ClaudeOutputConfig   `json:"output_config,omitempty"`
+	Tools            []ClaudeTool          `json:"tools,omitempty"`
+	ToolChoice       interface{}           `json:"tool_choice,omitempty"`
+	structuredOutput *claudeStructuredOutput
 }
 
 type ClaudeThinkingConfig struct {
@@ -105,10 +106,11 @@ type ClaudeThinkingConfig struct {
 }
 
 type ClaudeOutputConfig struct {
-	Effort string `json:"effort,omitempty"`
+	Effort string              `json:"effort,omitempty"`
+	Format *ClaudeOutputFormat `json:"format,omitempty"`
 }
 
-//! Effort is independent of thinking: it is forwarded as-is and never toggles thinking mode.
+// ! Effort is independent of thinking: it is forwarded as-is and never toggles thinking mode.
 func claudeOutputEffort(req *ClaudeRequest) string {
 	if req == nil || req.OutputConfig == nil {
 		return ""
@@ -132,6 +134,17 @@ type ClaudeContentBlock struct {
 	ToolUseID string       `json:"tool_use_id,omitempty"`
 	Content   interface{}  `json:"content,omitempty"`
 	Source    *ImageSource `json:"source,omitempty"`
+}
+
+func (block ClaudeContentBlock) MarshalJSON() ([]byte, error) {
+	type wireBlock ClaudeContentBlock
+	if block.Type == "thinking" {
+		return json.Marshal(struct {
+			wireBlock
+			Thinking string `json:"thinking"`
+		}{wireBlock(block), block.Thinking})
+	}
+	return json.Marshal(wireBlock(block))
 }
 
 type ImageSource struct {
@@ -181,6 +194,10 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	origin := "AI_EDITOR"
 
 	systemPrompt := buildClaudeSystemPrompt(req.System, thinking)
+	if req.structuredOutput != nil {
+		// Generated protocol constraints must survive user prompt filters.
+		systemPrompt = joinHistoryText(systemPrompt, req.structuredOutput.instruction)
+	}
 
 	history := make([]KiroHistoryMessage, 0)
 	var currentContent string
@@ -790,9 +807,9 @@ func ensureObjectSchema(schema interface{}) interface{} {
 	return cleaned
 }
 
-//! flattenTopLevelComposition lifts oneOf/anyOf/allOf branch properties to the root
-//! and drops the composition keyword. Nested composition (inside properties) is left
-//! untouched since Anthropic only forbids it at the top level.
+// ! flattenTopLevelComposition lifts oneOf/anyOf/allOf branch properties to the root
+// ! and drops the composition keyword. Nested composition (inside properties) is left
+// ! untouched since Anthropic only forbids it at the top level.
 func flattenTopLevelComposition(m map[string]interface{}) {
 	flattened := false
 	for _, keyword := range []string{"oneOf", "anyOf", "allOf"} {
@@ -1598,8 +1615,8 @@ func dropLeadingAssistant(tail []KiroHistoryMessage) []KiroHistoryMessage {
 	return tail
 }
 
-//! maxPayloadBytes bounds conversation text. Inline image/document bytes are left
-//! out: counting a large image against it replaced the user's own text with ".".
+// ! maxPayloadBytes bounds conversation text. Inline image/document bytes are left
+// ! out: counting a large image against it replaced the user's own text with ".".
 func payloadByteSize(payload *KiroPayload) int {
 	raw, err := json.Marshal(payload)
 	if err != nil {

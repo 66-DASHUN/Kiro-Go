@@ -22,7 +22,7 @@ func TestStablePrefixAppendRetainsCommittedShare(t *testing.T) {
 			next := stablePrefixFixture(11000, seed, old, promptCacheBreakpoint{Fingerprint: [32]byte{seed}, CumulativeTokens: 11000, TTL: 5 * time.Minute})
 			policy := totalCachePolicy(reference)
 			got := tracker.ComputeWithSettings("account", next, policy)
-			wantWrite := int(math.Floor(1000 * variedPrefixReadRatio(reference, next)))
+			wantWrite := int(math.Round(1000 * variedPrefixReadRatio(reference, next)))
 			if got.CacheReadInputTokens != cold.CacheCreationInputTokens {
 				t.Fatalf("reference %.2f seed %d changed old cached share: read=%d previously written=%d", reference, seed, got.CacheReadInputTokens, cold.CacheCreationInputTokens)
 			}
@@ -72,7 +72,7 @@ func TestStablePrefixNativeCorrectionKeepsSavedShare(t *testing.T) {
 	if final.CacheReadInputTokens != cold.CacheCreationInputTokens {
 		t.Fatalf("native correction rescaled committed read: %+v, want %d", final, cold.CacheCreationInputTokens)
 	}
-	if final.CacheCreationInputTokens != int(math.Floor(1000*snapshot.totalRatio)) {
+	if final.CacheCreationInputTokens != int(math.Round(1000*snapshot.totalRatio)) {
 		t.Fatalf("native correction did not isolate new interval: %+v", final)
 	}
 }

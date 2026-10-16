@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const totalCacheRuleVersion = "prefix-total-v2"
+const totalCacheRuleVersion = "prefix-total-v3"
 const promptCacheDiagnosticCapacity = 200
 const promptCacheDiagnosticRetention = 24 * time.Hour
 
@@ -65,7 +65,7 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 		return usage
 	}
 	if usage.rawCacheable < floor {
-		usage.limitation = "below_model_minimum"
+		usage.limitation = "empty_cache_prefix"
 	}
 	if t == nil || accountID == "" {
 		usage.limitation = "no_account"
@@ -81,8 +81,7 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 		candidates = profile.Breakpoints
 	}
 	for _, bp := range candidates {
-		// Preserve potential matches even when the dispatch estimate is below
-		// the minimum; the final native count may make this prefix eligible.
+		// Preserve dispatch matches for final native token calibration.
 		if bp.CumulativeTokens <= 0 || bp.CumulativeTokens > usage.rawCacheable || bp.CumulativeTokens <= usage.rawRead {
 			continue
 		}
@@ -112,8 +111,7 @@ func allocateTotalCacheUsage(usage promptCacheUsage, profile *promptCacheProfile
 	}
 	eligible = maxInt(0, minInt(eligible, profile.TotalInputTokens))
 	matched = maxInt(0, minInt(matched, eligible))
-	// A native count adjustment can make the old matched prefix ineligible
-	// even while the final write breakpoint still meets the model minimum.
+	// A native count adjustment may round a matched prefix down to zero.
 	if matched < totalCacheMinTokens(profile.Model) {
 		matched = 0
 	}
@@ -122,14 +120,16 @@ func allocateTotalCacheUsage(usage promptCacheUsage, profile *promptCacheProfile
 		return usage
 	}
 	if eligible < totalCacheMinTokens(profile.Model) {
-		usage.limitation = "below_model_minimum"
+		usage.limitation = "empty_cache_prefix"
 		return usage
 	}
 	if usage.totalRatio <= 0 {
 		return usage
 	}
 	usage.CacheReadInputTokens = maxInt(0, minInt(usage.matchedCachedTokens, matched))
-	usage.CacheCreationInputTokens = int(math.Floor(float64(eligible-matched) * math.Min(1, usage.totalRatio)))
+	// Token counters are integers. Nearest-integer allocation keeps the error
+	// within half a token without silently excluding one-token intervals.
+	usage.CacheCreationInputTokens = int(math.Round(float64(eligible-matched) * math.Min(1, usage.totalRatio)))
 	raw5m, raw1h := computePromptCacheTTLBreakdownLimited(profile, matched, eligible-matched)
 	usage.CacheCreation5mInputTokens, usage.CacheCreation1hInputTokens = allocateCacheWriteTTL(usage.CacheCreationInputTokens, raw5m, raw1h)
 	usage.limitation = ""
