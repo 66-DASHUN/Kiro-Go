@@ -151,6 +151,7 @@ func InitKiroHttpClient(proxyURL string) {
 }
 
 type KiroPayload struct {
+	outputBudget      *outputBudget
 	structuredOutput  *claudeStructuredOutput
 	HostedSearchTools map[string]bool `json:"-"`
 	ConversationState struct {
@@ -237,6 +238,8 @@ type InferenceConfig struct {
 }
 
 type KiroStreamCallback struct {
+	outputStopped       func() bool
+	flushOutput         func()
 	OnThinkingSignature func(signature string)
 	OnText              func(text string, isThinking bool)
 	OnToolUse           func(toolUse KiroToolUse)
@@ -342,6 +345,14 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 		logger.Debugf("[KiroAPI] Request payload: %s", string(payloadJSON))
 	}
 
+	budget := payload.outputBudget
+	if budget == nil {
+		budget, _ = ctx.Value(outputBudgetContextKey{}).(*outputBudget)
+	}
+	if budget == nil && payload.InferenceConfig != nil {
+		budget = newOutputBudget(payload.InferenceConfig.MaxTokens)
+	}
+	callback = wrapOutputBudget(callback, budget)
 	if callback != nil && callback.OnToolUse != nil && len(payload.ToolNameMap) > 0 {
 		originalOnToolUse := callback.OnToolUse
 		nameMap := payload.ToolNameMap
@@ -456,7 +467,7 @@ endpointLoop:
 				continue endpointLoop
 			}
 
-			emitted, err := parseEventStreamTracked(resp.Body, callback)
+			emitted, err := parseEventStreamTrackedContext(ctx, resp.Body, callback)
 			resp.Body.Close()
 			if err == nil {
 				return nil
@@ -532,7 +543,14 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 }
 
 func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emitted bool, err error) {
+	return parseEventStreamTrackedContext(context.Background(), body, callback)
+}
+
+func parseEventStreamTrackedContext(ctx context.Context, body io.Reader, callback *KiroStreamCallback) (emitted bool, err error) {
 	//! emitted reports whether an output callback ran; a failure before that is safe to retry.
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if callback == nil {
 		callback = &KiroStreamCallback{}
 	}
@@ -561,9 +579,44 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 		}
 	}
 	callback = &tracked
+	locallyStopped := func() bool { return callback.outputStopped != nil && callback.outputStopped() }
+	// A short suffix can be held for stable BPE counting. If the upstream
+	// fails after that suffix already filled the client's budget, finish the
+	// intentional local stop instead of treating the later failure as an
+	// account fault. A real client cancellation still wins.
+	defer func() {
+		if err == nil || isContextCanceledError(err) || callback.flushOutput == nil {
+			return
+		}
+		callback.flushOutput()
+		if !locallyStopped() {
+			return
+		}
+		if callback.OnStopReason != nil {
+			callback.OnStopReason("max_tokens")
+		}
+		if callback.OnCredits != nil && totalCredits > 0 {
+			callback.OnCredits(totalCredits)
+		}
+		if callback.OnContextUsage != nil {
+			for _, percentage := range contextUsagePercentages {
+				callback.OnContextUsage(percentage)
+			}
+		}
+		if callback.OnComplete != nil {
+			callback.OnComplete(inputTokens, outputTokens)
+		}
+		err = nil
+	}()
 
 	//! Read directly from the stream so SSE chunks are not delayed by buffering.
 	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return emitted, ctxErr
+		}
+		if locallyStopped() {
+			break
+		}
 		prelude := make([]byte, 12)
 		_, readErr := io.ReadFull(body, prelude)
 		if readErr == io.EOF {
@@ -662,14 +715,23 @@ func parseEventStreamTracked(body io.Reader, callback *KiroStreamCallback) (emit
 	}
 
 	//! Tools that never received a stop frame are flushed in arrival order.
-	if err := pending.flushAll(callback); err != nil {
-		return emitted, err
+	if !locallyStopped() {
+		if err := pending.flushAll(callback); err != nil {
+			return emitted, err
+		}
+	}
+	if callback.flushOutput != nil {
+		callback.flushOutput()
 	}
 	inlineThinking.Flush(markAnswer, markInlineThinking)
 	logger.Debugf("[KiroAPI] Stream end: content=%t reasoning=%t inlineThinking=%t tools=%d stopReason=%q trailer=%t",
 		turn.sawContent, turn.sawReasoning, turn.sawInlineThinking, turn.toolCount, turn.stopReason, turn.sawTrailer)
-	if err := classifyStreamIntegrity(turn, config.GetLenientStreamIntegrity()); err != nil {
-		return emitted, err
+	if locallyStopped() {
+		turn.stopReason = "max_tokens"
+	} else {
+		if err := classifyStreamIntegrity(turn, config.GetLenientStreamIntegrity()); err != nil {
+			return emitted, err
+		}
 	}
 	if callback.OnStopReason != nil {
 		callback.OnStopReason(turn.stopReason)

@@ -175,8 +175,8 @@ type ClaudeResponse struct {
 }
 
 type ClaudeCacheCreationUsage struct {
-	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
 }
 
 type ClaudeUsage struct {
@@ -185,6 +185,24 @@ type ClaudeUsage struct {
 	CacheCreationInputTokens int                       `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int                       `json:"cache_read_input_tokens,omitempty"`
 	CacheCreation            *ClaudeCacheCreationUsage `json:"cache_creation,omitempty"`
+}
+
+// Buffered JSON and SSE share exactly the same cache fields, including zeros.
+// A nil CacheCreation with no cache usage means simulation is disabled.
+func (usage ClaudeUsage) MarshalJSON() ([]byte, error) {
+	cache := promptCacheUsage{
+		CacheCreationInputTokens: usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     usage.CacheReadInputTokens,
+	}
+	if usage.CacheCreation != nil {
+		cache.CacheCreation5mInputTokens = usage.CacheCreation.Ephemeral5mInputTokens
+		cache.CacheCreation1hInputTokens = usage.CacheCreation.Ephemeral1hInputTokens
+	}
+	includeCache := usage.CacheCreation != nil || usage.CacheCreationInputTokens != 0 || usage.CacheReadInputTokens != 0
+	// ClaudeUsage already stores ordinary (uncached) input, whereas the common
+	// map builder accepts total input and performs that subtraction itself.
+	total := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+	return json.Marshal(buildClaudeUsageMap(total, usage.OutputTokens, cache, includeCache))
 }
 
 const maxToolDescLen = 10237

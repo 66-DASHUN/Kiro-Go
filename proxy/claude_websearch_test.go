@@ -321,7 +321,7 @@ func TestClaudeDirectWebSearchSkipsModel(t *testing.T) {
 	})
 	stub := stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
 
-	msg := decodeClaudeMessage(t, postClaudeMessages(t, h, `{"model":"claude-sonnet-4.5","max_tokens":64,
+	msg := decodeClaudeMessage(t, postClaudeMessages(t, h, `{"model":"claude-sonnet-4.5","max_tokens":1024,
 		"tools":[{"type":"web_search_20250305","name":"web_search"}],
 		"messages":[{"role":"user","content":"Perform a web search for the query: go release"}]}`))
 

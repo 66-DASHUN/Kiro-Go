@@ -203,7 +203,7 @@ func TestStopReasonMapping(t *testing.T) {
 		{"model_context_window_exceeded", 0, "model_context_window_exceeded", "length", "incomplete", "max_output_tokens"},
 		{"content_filtered", 0, "refusal", "content_filter", "incomplete", "content_filter"},
 		{"tool_use", 2, "tool_use", "tool_calls", "completed", ""},
-		{"max_tokens", 1, "tool_use", "tool_calls", "incomplete", "max_output_tokens"},
+		{"max_tokens", 1, "max_tokens", "length", "incomplete", "max_output_tokens"},
 	}
 	for _, tc := range cases {
 		if got := mapClaudeStopReason(tc.reason, tc.toolCount); got != tc.claude {

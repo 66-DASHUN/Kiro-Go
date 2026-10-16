@@ -345,7 +345,7 @@ func (h *Handler) runWebSearches(ctx context.Context, model string, toolUses []K
 	return outcomes
 }
 
-func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Request, model, query string, estimatedInputTokens int, apiKeyReservation *apiKeyUsageReservation, stream bool) {
+func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Request, model, query string, estimatedInputTokens int, apiKeyReservation *apiKeyUsageReservation, stream bool, maxTokens int) {
 	defer apiKeyReservation.release()
 
 	results, account, err := h.searchWebWithFailover(r.Context(), model, query)
@@ -366,19 +366,55 @@ func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Req
 	content := []map[string]interface{}{{"type": "text", "text": fmt.Sprintf("I'll search for %q.", query)}}
 	content = append(content, webSearchPresentationBlocks(webSearchOutcome{query: query, results: results})...)
 	content = append(content, map[string]interface{}{"type": "text", "text": generateWebSearchSummary(query, results)})
+	budget := newOutputBudget(maxTokens)
+	if budget != nil {
+		limited := make([]map[string]interface{}, 0, len(content))
+		admittedTools := make(map[string]bool)
+		for _, block := range content {
+			switch block["type"] {
+			case "text":
+				text, _ := block["text"].(string)
+				if text = budget.text(text, false); text != "" {
+					limited = append(limited, map[string]interface{}{"type": "text", "text": text})
+				}
+			case "server_tool_use":
+				input, _ := block["input"].(map[string]interface{})
+				if budget.tool(KiroToolUse{Name: scalarString(block["name"]), Input: input}) {
+					admittedTools[scalarString(block["id"])] = true
+					limited = append(limited, block)
+				}
+			case "web_search_tool_result":
+				if admittedTools[scalarString(block["tool_use_id"])] {
+					limited = append(limited, block)
+				}
+			}
+		}
+		content = limited
+	}
 
 	inputTokens := estimatedInputTokens
 	outputTokens := estimateWebSearchContentTokens(content)
+	stopReason := "end_turn"
+	if budget != nil {
+		outputTokens = budget.used
+		if budget.stopped {
+			stopReason = "max_tokens"
+		}
+	}
 	h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, 0)
 	getObserveStore().RecordSuccess(account.ID, model, inputTokens, outputTokens, 0)
 	recordFinalRequestForApiKey(r.Context(), apiKeyReservation, account, model, inputTokens, outputTokens, 0, true, 200, "")
 
-	h.writeClaudeWebSearchResponse(w, stream, model, content, "end_turn", inputTokens, outputTokens, 1, promptCacheUsage{})
+	h.writeClaudeWebSearchResponse(w, stream, model, content, stopReason, inputTokens, outputTokens, 1, promptCacheUsage{}, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()).Enabled)
 }
 
 func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request, req *ClaudeRequest, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, apiKeyReservation *apiKeyUsageReservation) {
 	defer apiKeyReservation.release()
 	ctx := r.Context()
+	budget := newOutputBudget(req.MaxTokens)
+	if budget != nil {
+		ctx = context.WithValue(ctx, outputBudgetContextKey{}, budget)
+	}
 
 	working := *req
 	working.Messages = append([]ClaudeMessage(nil), req.Messages...)
@@ -427,7 +463,7 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		h.pool.UpdateStats(account.ID, round.inputTokens+round.outputTokens, round.credits)
 
 		searchUses, clientUses := splitWebSearchToolUses(round.toolUses)
-		if len(searchUses) > 0 && len(clientUses) == 0 && roundIdx <= maxUses {
+		if len(searchUses) > 0 && len(clientUses) == 0 && roundIdx <= maxUses && (budget == nil || !budget.stopped) {
 			outcomes := h.runWebSearches(ctx, req.Model, searchUses, &searches, maxUses)
 			if ctx.Err() != nil {
 				recordClientDisconnect(r.Context(), apiKeyReservation, lastAccount, req.Model)
@@ -481,6 +517,9 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		}
 		for _, tu := range round.toolUses {
 			if tu.Name == webSearchToolName {
+				if budget != nil && budget.stopped {
+					continue
+				}
 				outcomes := h.runWebSearches(ctx, req.Model, []KiroToolUse{tu}, &searches, maxUses)
 				content = append(content, webSearchPresentationBlocks(outcomes[0])...)
 				continue
@@ -505,7 +544,7 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 		recordFinalRequestForApiKey(r.Context(), apiKeyReservation, lastAccount, req.Model, inputTokens, outputTokens, credits, true, 200, "")
 
-		h.writeClaudeWebSearchResponse(w, req.Stream, req.Model, content, stopReason, inputTokens, outputTokens, searches, cacheUsage)
+		h.writeClaudeWebSearchResponse(w, req.Stream, req.Model, content, stopReason, inputTokens, outputTokens, searches, cacheUsage, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()).Enabled)
 		return
 	}
 }
@@ -529,6 +568,11 @@ func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRe
 		for accountAttempt := 0; accountAttempt < retryPlan.maxPerAccount && totalAttempts < retryPlan.maxPerRequest; accountAttempt++ {
 			totalAttempts++
 			cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, cacheSettings)
+			budget, _ := ctx.Value(outputBudgetContextKey{}).(*outputBudget)
+			var before outputBudget
+			if budget != nil {
+				before = *budget
+			}
 			round, err := h.callClaudeRound(ctx, account, payload, req.Model, thinking, estimatedInputTokens)
 			if err == nil {
 				round.cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, round.inputTokens)
@@ -537,6 +581,11 @@ func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRe
 				}
 				h.rememberAccount(payload, account)
 				return round, account, nil
+			}
+			// This path buffers a complete round. Failed attempts are discarded,
+			// so their unreturned output must not consume the shared client cap.
+			if budget != nil {
+				*budget = before
 			}
 			lastErr = err
 			lastAccount = account
@@ -660,13 +709,13 @@ func estimateWebSearchContentTokens(content []map[string]interface{}) int {
 	return total
 }
 
-func webSearchUsage(inputTokens, outputTokens, searches int, cacheUsage promptCacheUsage) map[string]interface{} {
-	usage := buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, true)
+func webSearchUsage(inputTokens, outputTokens, searches int, cacheUsage promptCacheUsage, includeCache bool) map[string]interface{} {
+	usage := buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, includeCache)
 	usage["server_tool_use"] = map[string]interface{}{"web_search_requests": searches}
 	return usage
 }
 
-func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream bool, model string, content []map[string]interface{}, stopReason string, inputTokens, outputTokens, searches int, cacheUsage promptCacheUsage) {
+func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream bool, model string, content []map[string]interface{}, stopReason string, inputTokens, outputTokens, searches int, cacheUsage promptCacheUsage, includeCache bool) {
 	msgID := "msg_" + uuid.New().String()
 	if !stream {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -678,7 +727,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 			"content":       content,
 			"stop_reason":   stopReason,
 			"stop_sequence": nil,
-			"usage":         webSearchUsage(inputTokens, outputTokens, searches, cacheUsage),
+			"usage":         webSearchUsage(inputTokens, outputTokens, searches, cacheUsage, includeCache),
 		})
 		return
 	}
@@ -702,7 +751,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 			"content":       []interface{}{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage":         webSearchUsage(inputTokens, 0, 0, cacheUsage),
+			"usage":         webSearchUsage(inputTokens, 0, 0, cacheUsage, includeCache),
 		},
 	})
 	for index, block := range content {
@@ -711,7 +760,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
-		"usage": webSearchUsage(inputTokens, outputTokens, searches, cacheUsage),
+		"usage": webSearchUsage(inputTokens, outputTokens, searches, cacheUsage, includeCache),
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 }

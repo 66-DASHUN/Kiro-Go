@@ -82,6 +82,9 @@ func normalizeStopReason(reason string) string {
 }
 
 func mapClaudeStopReason(reason string, toolCount int) string {
+	if normalizeStopReason(reason) == "max_tokens" {
+		return "max_tokens"
+	}
 	if toolCount > 0 {
 		return "tool_use"
 	}
@@ -102,6 +105,9 @@ func mapClaudeStopReason(reason string, toolCount int) string {
 }
 
 func mapOpenAIFinishReason(reason string, toolCount int) string {
+	if normalizeStopReason(reason) == "max_tokens" {
+		return "length"
+	}
 	if toolCount > 0 {
 		return "tool_calls"
 	}

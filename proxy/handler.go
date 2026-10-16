@@ -820,6 +820,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ClaudeRequest
+	body = inlineRemoteImages(r.Context(), body)
 	if err := json.Unmarshal(body, &req); err != nil {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
@@ -909,7 +910,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	switch mode, query := claudeWebSearchModeFor(&req); mode {
 	case claudeWebSearchDirect:
-		h.handleClaudeDirectWebSearch(w, r, req.Model, query, estimatedInputTokens, apiKeyReservation, req.Stream)
+		h.handleClaudeDirectWebSearch(w, r, req.Model, query, estimatedInputTokens, apiKeyReservation, req.Stream, req.MaxTokens)
 		return
 	case claudeWebSearchLoop:
 		h.runClaudeWebSearchLoop(w, r, &req, thinking, thinkingResponseOpts, estimatedInputTokens, apiKeyReservation)
@@ -965,7 +966,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				"model":         model,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
-				"usage":         buildClaudeUsageMap(startInputTokens, 0, messageStartUsage, cacheProfile != nil),
+				"usage":         buildClaudeUsageMap(startInputTokens, 0, messageStartUsage, cacheSettings.Enabled),
 			},
 		})
 		messageStarted = true
@@ -1396,7 +1397,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 					"stop_reason":   stopReason,
 					"stop_sequence": nil,
 				},
-				"usage": buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, cacheProfile != nil),
+				"usage": buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, cacheSettings.Enabled),
 			})
 
 			h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
@@ -1623,7 +1624,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
 			resp.Usage.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
 			resp.Usage.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
-			if cacheProfile != nil {
+			if cacheSettings.Enabled {
 				resp.Usage.CacheCreation = &ClaudeCacheCreationUsage{
 					Ephemeral5mInputTokens: cacheUsage.CacheCreation5mInputTokens,
 					Ephemeral1hInputTokens: cacheUsage.CacheCreation1hInputTokens,

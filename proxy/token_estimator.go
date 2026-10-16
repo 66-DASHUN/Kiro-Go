@@ -111,6 +111,9 @@ func estimateClaudeValueTokens(v interface{}) int {
 		}
 		return total
 	case map[string]interface{}:
+		if tokens, ok := estimateAttachmentTokens(value); ok {
+			return tokens
+		}
 		typeName, _ := value["type"].(string)
 		switch typeName {
 		case "text":
@@ -203,6 +206,25 @@ func estimateOpenAIContentTokens(content interface{}) int {
 	case string:
 		return estimateApproxTokens(value)
 	default:
+		if blocks, ok := value.([]interface{}); ok {
+			total := 0
+			text := ""
+			for _, block := range blocks {
+				if object, ok := block.(map[string]interface{}); ok {
+					if tokens, recognized := estimateAttachmentTokens(object); recognized {
+						total += tokens
+						continue
+					}
+				}
+				text += extractOpenAIMessageText(block)
+			}
+			return total + estimateApproxTokens(text)
+		}
+		if block, ok := value.(map[string]interface{}); ok {
+			if tokens, recognized := estimateAttachmentTokens(block); recognized {
+				return tokens
+			}
+		}
 		text := extractOpenAIMessageText(value)
 		if text != "" {
 			return estimateApproxTokens(text)
@@ -241,6 +263,12 @@ func estimateKiroUserInputTokens(msg *KiroUserInputMessage, includeTools bool) i
 		return 0
 	}
 	total := estimateApproxTokens(msg.Content)
+	for i := range msg.Images {
+		total += estimateImageInputTokens(&msg.Images[i])
+	}
+	for i := range msg.Documents {
+		total += estimateDocumentInputTokens(&msg.Documents[i])
+	}
 	if msg.UserInputMessageContext == nil {
 		return total
 	}

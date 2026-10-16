@@ -358,7 +358,11 @@ func callKiroWithHostedSearch(ctx context.Context, account *config.Account, payl
 		return nil, CallKiroAPIContext(ctx, account, payload, callback)
 	}
 	const maxRounds = 5
-	next := payload
+	working := *payload
+	if working.outputBudget == nil && working.InferenceConfig != nil {
+		working.outputBudget = newOutputBudget(working.InferenceConfig.MaxTokens)
+	}
+	next := &working
 	totalIn, totalOut := 0, 0
 	totalCredits := 0.0
 	var totalCache *OpenAITokenDetails
@@ -431,7 +435,7 @@ func callKiroWithHostedSearch(ctx context.Context, account *config.Account, payl
 				clientTools = append(clientTools, tu)
 			}
 		}
-		if len(searches) == 0 {
+		if len(searches) == 0 || (next.outputBudget != nil && next.outputBudget.stopped) {
 			commitCache()
 			for _, tu := range clientTools {
 				if callback.OnToolUse != nil {
@@ -468,6 +472,12 @@ func callKiroWithHostedSearch(ctx context.Context, account *config.Account, payl
 			// Client tools must return before another upstream turn can complete them.
 			// Include completed hosted results in text and expose only client-owned calls.
 			continuation := buildToolResultsContinuation(results)
+			if next.outputBudget != nil {
+				continuation = next.outputBudget.text(continuation, false)
+				if next.outputBudget.stopped {
+					stop = "max_tokens"
+				}
+			}
 			if callback.OnText != nil {
 				callback.OnText(continuation, false)
 			}
