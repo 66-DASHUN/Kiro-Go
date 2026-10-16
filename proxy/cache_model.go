@@ -6,21 +6,26 @@ import (
 	"strings"
 )
 
-var totalCacheClaudeModelPattern = regexp.MustCompile(`^claude-(sonnet|opus|haiku)-[0-9]+(?:-[0-9]+)*(?:-latest)?(?:-thinking)?$`)
+var claudeCacheAliasPattern = regexp.MustCompile(`^claude-(sonnet|opus|haiku)-[0-9]+(?:-[0-9]+)*(?:-latest)?(?:-thinking)?$`)
 
 // Cache identity normalization never changes the model sent to the upstream.
 // Keep version, date and thinking suffixes so distinct models remain isolated.
 func totalCacheModelIdentity(model string) string {
-	model = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(model)), "anthropic.")
-	return strings.ReplaceAll(model, ".", "-")
+	model = strings.ToLower(strings.TrimSpace(model))
+	claudeAlias := strings.ReplaceAll(strings.TrimPrefix(model, "anthropic."), ".", "-")
+	if claudeCacheAliasPattern.MatchString(claudeAlias) {
+		return claudeAlias
+	}
+	// Other providers may use dots, hyphens or namespaces for distinct models.
+	// Only configured routing aliases may merge those identifiers.
+	return model
 }
 
-// All recognized Claude families use the same local simulation rule: any
-// nonempty prefix is eligible. These are not measured upstream cache limits.
-// Unknown families and malformed names still fail closed.
+// Local simulation has no model-family whitelist. Availability is enforced by
+// account routing and the upstream; only successful generations commit cache.
+// This minimum is not a claim about the provider's real prompt cache.
 func totalCacheMinTokens(model string) int {
-	match := totalCacheClaudeModelPattern.FindStringSubmatch(totalCacheModelIdentity(model))
-	if match == nil {
+	if strings.TrimSpace(model) == "" {
 		return math.MaxInt
 	}
 	return 1

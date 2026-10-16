@@ -12,18 +12,18 @@
 
 ### Task 1: 先复现新家族及身份问题
 
-- [ ] 修改 `proxy/cache_model_family_test.go`：旧“拒绝所有未知名称”仅保留空标识拒绝，未知但成功生成的名称纳入新测试。
-- [ ] 新建 `proxy/cache_generic_models_test.go`：真实 profile 构建覆盖 `gpt-5.6-sol`、`qwen3-coder-next`、`deepseek-3.2`、`minimax-m2.5`、`glm-5`、`kimi-k3`、`future/new-family.v1`。短输入首次创建、重复读取、追加后旧份额不变；非 Claude 点横杠不能共享。
-- [ ] 新增三协议 JSON/SSE 端到端成功和失败测试；显式别名映射到未来模型，验证上游收到实际模型，Key 0% 覆盖全局，未知模型上游失败时没有条目。
-- [ ] 运行 `go test ./proxy -run 'TestGenericCache' -count=1`，确认因 `unsupported_model` 和标点指纹冲突失败，保存红灯日志。
+- [x] 修改 `proxy/cache_model_family_test.go`：旧“拒绝所有未知名称”仅保留空标识拒绝，未知但成功生成的名称纳入新测试。
+- [x] 新建 `proxy/cache_generic_models_test.go`：真实 profile 构建覆盖 `gpt-5.6-sol`、`qwen3-coder-next`、`deepseek-3.2`、`minimax-m2.5`、`glm-5`、`kimi-k3`、`future/new-family.v1`。短输入首次创建、重复读取、追加后旧份额不变；非 Claude 点横杠不能共享。
+- [x] 新增三协议 JSON/SSE 端到端成功和失败测试；显式别名映射到未来模型，验证上游收到实际模型，Key 0% 覆盖全局，未知模型上游失败时没有条目。
+- [x] 运行 `go test ./proxy -run 'TestGenericCache' -count=1`，确认因 `unsupported_model` 和标点指纹冲突失败，保存红灯日志。
 
 ### Task 2: 最小通用化及诊断
 
-- [ ] `proxy/cache_model.go` 的 `totalCacheMinTokens` 改为 `if strings.TrimSpace(model)=="" { return math.MaxInt }; return 1`。家族正则仅用于 Claude 的已知别名归一，不再控制资格；非 Claude 直接返回小写/trim 后原标识。
-- [ ] `proxy/cache_total_rate.go` 升级规则 `prefix-total-v4`，空标识用 `empty_model`，更新阻断分支；不改份额、TTL、成功提交路径。
-- [ ] 更新 `proxy/cache_total_rate_test.go` 中版本和空标识断言；`web/locales/{zh,en}.json` 添加空标识原因并解释通用模拟。
-- [ ] 如三协议测试发现缓存身份与实际 payload 不一致，只修复该身份来源，不改配置映射优先级。
-- [ ] 运行定向测试及 `go test ./... -json`、`go vet ./...`、`go build ./...`、`git diff --check` 和 locale JSON 解析。
+- [x] `proxy/cache_model.go` 的 `totalCacheMinTokens` 改为 `if strings.TrimSpace(model)=="" { return math.MaxInt }; return 1`。家族正则仅用于 Claude 的已知别名归一，不再控制资格；非 Claude 直接返回小写/trim 后原标识。
+- [x] `proxy/cache_total_rate.go` 升级规则 `prefix-total-v4`，空标识用 `empty_model`，更新阻断分支；不改份额、TTL、成功提交路径。
+- [x] 更新 `proxy/cache_total_rate_test.go` 中版本和空标识断言；`web/locales/{zh,en}.json` 添加空标识原因并解释通用模拟。
+- [x] 如三协议测试发现缓存身份与实际 payload 不一致，只修复该身份来源，不改配置映射优先级。
+- [x] 运行定向测试及 `go test ./... -json`、`go vet ./...`、`go build ./...`、`git diff --check` 和 locale JSON 解析。
 
 ### Task 3: 审查、验证与部署
 

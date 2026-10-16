@@ -175,7 +175,7 @@ func TestTotalCacheShortInputExplainedInDiagnostic(t *testing.T) {
 		t.Fatalf("missing short input diagnostic: %+v", tracker.diagnostics)
 	}
 	d := tracker.diagnostics[0]
-	if d.Rule != "prefix-total-v3" || d.Limitation != "" || d.Ordinary+d.Read+d.Write != 3 || d.Write != got.CacheWriteTokens {
+	if d.Rule != "prefix-total-v4" || d.Limitation != "" || d.Ordinary+d.Read+d.Write != 3 || d.Write != got.CacheWriteTokens {
 		t.Fatalf("incorrect short input diagnostic: %+v", d)
 	}
 	if len(tracker.entriesByAccount["account"]) == 0 {
@@ -526,8 +526,8 @@ func TestTotalCacheUniformNonemptyThreshold(t *testing.T) {
 			}
 		}
 	}
-	profile := &promptCacheProfile{Model: "unknown-model", TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour}}}
+	profile := &promptCacheProfile{Model: "", TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour}}}
 	if got := newPromptCacheTracker(time.Hour).ComputeWithSettings("account", profile, totalCachePolicy(.8)); got.CacheCreationInputTokens != 0 {
-		t.Fatalf("unknown model fabricated cache: %+v", got)
+		t.Fatalf("empty model fabricated cache: %+v", got)
 	}
 }

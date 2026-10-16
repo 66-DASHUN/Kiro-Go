@@ -58,15 +58,15 @@ func TestTotalCacheFamilyLifecycle(t *testing.T) {
 	}
 }
 
-func TestTotalCacheFamilyRejectsUnknownNames(t *testing.T) {
-	for _, model := range []string{"unknown-model", "gpt-5.5", "claude-fable-5", "claude-opus", "claude-opus-no-version", "claude-sonnet-4x", "prefix-claude-opus-5.5", "claude-opus-5.5-evil", "claude-haiku--5"} {
+func TestTotalCacheRejectsEmptyModel(t *testing.T) {
+	for _, model := range []string{"", " ", "\t\n"} {
 		t.Run(model, func(t *testing.T) {
 			tracker := newPromptCacheTracker(time.Hour)
 			profile := &promptCacheProfile{Model: model, TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour}}}
 			got := tracker.ComputeWithSettings("account", profile, totalCachePolicy(.9))
 			tracker.UpdateWithSettings("account", profile, totalCachePolicy(.9), got)
-			if got.CacheReadInputTokens+got.CacheCreationInputTokens != 0 || got.limitation != "unsupported_model" || len(tracker.entriesByAccount["account"]) != 0 {
-				t.Fatalf("unrecognized name must not invent cache: %+v", got)
+			if got.CacheReadInputTokens+got.CacheCreationInputTokens != 0 || got.limitation != "empty_model" || len(tracker.entriesByAccount["account"]) != 0 {
+				t.Fatalf("empty model must not invent cache: %+v", got)
 			}
 		})
 	}

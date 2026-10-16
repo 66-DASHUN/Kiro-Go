@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const totalCacheRuleVersion = "prefix-total-v3"
+const totalCacheRuleVersion = "prefix-total-v4"
 const promptCacheDiagnosticCapacity = 200
 const promptCacheDiagnosticRetention = 24 * time.Hour
 
@@ -61,7 +61,7 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 	}
 	floor := totalCacheMinTokens(profile.Model)
 	if floor == math.MaxInt {
-		usage.limitation = "unsupported_model"
+		usage.limitation = "empty_model"
 		return usage
 	}
 	if usage.rawCacheable < floor {
@@ -116,7 +116,7 @@ func allocateTotalCacheUsage(usage promptCacheUsage, profile *promptCacheProfile
 		matched = 0
 	}
 	usage.finalCacheable, usage.finalMatched = eligible, matched
-	if usage.limitation == "disabled" || usage.limitation == "zero_rate" || usage.limitation == "unsupported_model" || usage.limitation == "no_account" || usage.limitation == "no_cache_breakpoint" {
+	if usage.limitation == "disabled" || usage.limitation == "zero_rate" || usage.limitation == "empty_model" || usage.limitation == "no_account" || usage.limitation == "no_cache_breakpoint" {
 		return usage
 	}
 	if eligible < totalCacheMinTokens(profile.Model) {
