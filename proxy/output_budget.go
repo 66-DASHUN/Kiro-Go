@@ -216,5 +216,15 @@ func wrapOutputBudget(callback *KiroStreamCallback, budget *outputBudget) *KiroS
 	}
 	wrapped.outputStopped = func() bool { return budget.stopped }
 	wrapped.flushOutput = func() { splitter.Flush(answer, inline); flush() }
+	originalDiagnostic := callback.onStreamDiagnostic
+	wrapped.onStreamDiagnostic = func(diagnostic streamDiagnostic) {
+		diagnostic.OutputBudgetLimit = budget.limit
+		diagnostic.OutputBudgetUsed = budget.used
+		diagnostic.OutputBudgetStopped = budget.stopped
+		diagnostic.OutputBudgetTruncated = budget.truncated
+		if originalDiagnostic != nil {
+			originalDiagnostic(diagnostic)
+		}
+	}
 	return &wrapped
 }

@@ -240,6 +240,7 @@ type InferenceConfig struct {
 type KiroStreamCallback struct {
 	outputStopped       func() bool
 	flushOutput         func()
+	onStreamDiagnostic  func(streamDiagnostic)
 	OnThinkingSignature func(signature string)
 	OnText              func(text string, isThinking bool)
 	OnToolUse           func(toolUse KiroToolUse)
@@ -603,6 +604,9 @@ func parseEventStreamTrackedContext(ctx context.Context, body io.Reader, callbac
 				callback.OnContextUsage(percentage)
 			}
 		}
+		if callback.onStreamDiagnostic != nil {
+			callback.onStreamDiagnostic(streamDiagnostic{ObservedKiroStopReason: turn.stopReason})
+		}
 		if callback.OnComplete != nil {
 			callback.OnComplete(inputTokens, outputTokens)
 		}
@@ -726,6 +730,7 @@ func parseEventStreamTrackedContext(ctx context.Context, body io.Reader, callbac
 	inlineThinking.Flush(markAnswer, markInlineThinking)
 	logger.Debugf("[KiroAPI] Stream end: content=%t reasoning=%t inlineThinking=%t tools=%d stopReason=%q trailer=%t",
 		turn.sawContent, turn.sawReasoning, turn.sawInlineThinking, turn.toolCount, turn.stopReason, turn.sawTrailer)
+	observedStopReason := turn.stopReason
 	if locallyStopped() {
 		turn.stopReason = "max_tokens"
 	} else {
@@ -743,6 +748,9 @@ func parseEventStreamTrackedContext(ctx context.Context, body io.Reader, callbac
 		for _, percentage := range contextUsagePercentages {
 			callback.OnContextUsage(percentage)
 		}
+	}
+	if callback.onStreamDiagnostic != nil {
+		callback.onStreamDiagnostic(streamDiagnostic{ObservedKiroStopReason: observedStopReason})
 	}
 	if callback.OnComplete != nil {
 		callback.OnComplete(inputTokens, outputTokens)

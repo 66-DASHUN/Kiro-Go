@@ -36,15 +36,18 @@ const (
 )
 
 type claudeWebSearchRound struct {
-	cacheUsage     promptCacheUsage
-	text           string
-	thinking       string
-	thinkingBlocks []ClaudeContentBlock
-	toolUses       []KiroToolUse
-	inputTokens    int
-	outputTokens   int
-	credits        float64
-	stopReason     string
+	cacheUsage         promptCacheUsage
+	text               string
+	thinking           string
+	thinkingBlocks     []ClaudeContentBlock
+	toolUses           []KiroToolUse
+	inputTokens        int
+	outputTokens       int
+	nativeInputTokens  int
+	nativeOutputTokens int
+	credits            float64
+	stopReason         string
+	streamDiag         streamDiagnostic
 }
 
 type webSearchOutcome struct {
@@ -401,6 +404,24 @@ func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Req
 			stopReason = "max_tokens"
 		}
 	}
+	updateRequestUsageDiagnostic(r.Context(), func(diagnostic *usageDiagnostic) {
+		diagnostic.CacheUsageSource = "not_applicable"
+		diagnostic.NativeInputTokens = 0
+		diagnostic.NativeOutputTokens = 0
+		diagnostic.ReportedInputTokens = inputTokens
+		diagnostic.ReportedOutputTokens = outputTokens
+		diagnostic.InputTokenSource = "local_estimate"
+		diagnostic.OutputTokenSource = "local_estimate"
+		diagnostic.EstimatedReturnedOutputTokens = outputTokens
+		diagnostic.ReturnedOutputBytes = claudeBlocksByteLength(content)
+		diagnostic.ResponseStopReason = stopReason
+		if budget != nil {
+			diagnostic.LocalOutputBudgetLimit = budget.limit
+			diagnostic.LocalOutputBudgetUsed = budget.used
+			diagnostic.LocalOutputBudgetStopped = budget.stopped
+			diagnostic.LocalOutputBudgetTruncated = budget.truncated
+		}
+	})
 	h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, 0)
 	getObserveStore().RecordSuccess(account.ID, model, inputTokens, outputTokens, 0)
 	recordFinalRequestForApiKey(r.Context(), apiKeyReservation, account, model, inputTokens, outputTokens, 0, true, 200, "")
@@ -544,6 +565,21 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		}
 
 		stopReason := mapClaudeStopReason(round.stopReason, len(clientUses))
+		updateRequestUsageDiagnostic(r.Context(), func(diagnostic *usageDiagnostic) {
+			diagnostic.ReportedInputTokens = inputTokens
+			diagnostic.ReportedOutputTokens = outputTokens
+			diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
+			diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
+			diagnostic.EstimatedReturnedOutputTokens = estimateWebSearchContentTokens(content)
+			diagnostic.ReturnedOutputBytes = claudeBlocksByteLength(content)
+			diagnostic.ResponseStopReason = stopReason
+			if budget != nil {
+				diagnostic.LocalOutputBudgetLimit = budget.limit
+				diagnostic.LocalOutputBudgetUsed = budget.used
+				diagnostic.LocalOutputBudgetStopped = budget.stopped
+				diagnostic.LocalOutputBudgetTruncated = budget.truncated
+			}
+		})
 		h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 		recordFinalRequestForApiKey(r.Context(), apiKeyReservation, lastAccount, req.Model, inputTokens, outputTokens, credits, true, 200, "")
 
@@ -624,6 +660,7 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 	var inputTokens, outputTokens int
 	var credits float64
 	var stopReason string
+	var streamDiag streamDiagnostic
 	callback := &KiroStreamCallback{
 		OnThinkingSignature: nativeThinking.signature,
 		OnText: func(t string, isThinking bool) {
@@ -638,6 +675,9 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 		OnComplete:   func(inTok, outTok int) { inputTokens, outputTokens = inTok, outTok },
 		OnCredits:    func(c float64) { credits = c },
 		OnStopReason: func(reason string) { stopReason = reason },
+		onStreamDiagnostic: func(diagnostic streamDiagnostic) {
+			streamDiag = diagnostic
+		},
 	}
 	if err := CallKiroAPIContext(ctx, account, payload, callback); err != nil {
 		return nil, err
@@ -649,16 +689,37 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 	if !thinking {
 		reasoning = ""
 	}
+	nativeInputTokens, nativeOutputTokens := inputTokens, outputTokens
 	inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimateClaudeOutputTokens(text, reasoning, toolUses))
+	updateRequestUsageDiagnostic(ctx, func(diagnostic *usageDiagnostic) {
+		diagnostic.TranslatedInputEstimate += estimateKiroPayloadInputTokens(payload)
+		diagnostic.KiroRounds++
+		diagnostic.NativeInputTokens += nativeInputTokens
+		diagnostic.NativeOutputTokens += nativeOutputTokens
+		diagnostic.InputTokenSource = usageTokenSource(diagnostic.NativeInputTokens)
+		diagnostic.OutputTokenSource = usageTokenSource(diagnostic.NativeOutputTokens)
+		diagnostic.ForwardedMaxOutputTokens = 0
+		if payload.InferenceConfig != nil {
+			diagnostic.ForwardedMaxOutputTokens = payload.InferenceConfig.MaxTokens
+		}
+		diagnostic.ObservedKiroStopReason = streamDiag.ObservedKiroStopReason
+		diagnostic.LocalOutputBudgetLimit = streamDiag.OutputBudgetLimit
+		diagnostic.LocalOutputBudgetUsed = streamDiag.OutputBudgetUsed
+		diagnostic.LocalOutputBudgetStopped = streamDiag.OutputBudgetStopped
+		diagnostic.LocalOutputBudgetTruncated = streamDiag.OutputBudgetTruncated
+	})
 	return &claudeWebSearchRound{
-		text:           text,
-		thinking:       reasoning,
-		thinkingBlocks: nativeThinking.responseBlocks(false),
-		toolUses:       toolUses,
-		inputTokens:    inputTokens,
-		outputTokens:   outputTokens,
-		credits:        credits,
-		stopReason:     stopReason,
+		text:               text,
+		thinking:           reasoning,
+		thinkingBlocks:     nativeThinking.responseBlocks(false),
+		toolUses:           toolUses,
+		inputTokens:        inputTokens,
+		outputTokens:       outputTokens,
+		nativeInputTokens:  nativeInputTokens,
+		nativeOutputTokens: nativeOutputTokens,
+		credits:            credits,
+		stopReason:         stopReason,
+		streamDiag:         streamDiag,
 	}, nil
 }
 

@@ -16,9 +16,10 @@ const (
 )
 
 type requestTrace struct {
-	startedAt time.Time
-	endpoint  string
-	requestID string
+	startedAt       time.Time
+	endpoint        string
+	requestID       string
+	usageDiagnostic *usageDiagnostic
 }
 
 type requestTraceKey struct{}
