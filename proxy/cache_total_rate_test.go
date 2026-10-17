@@ -96,6 +96,27 @@ func TestTotalCacheDiagnosticsAuthBoundsAndPrivacy(t *testing.T) {
 	}
 }
 
+func TestTotalCacheDiagnosticsExposeMatchLifecycle(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	policy := totalCachePolicy(.8)
+	profile := &promptCacheProfile{
+		Model:            "claude-sonnet-4.5",
+		TotalInputTokens: 10000,
+		Breakpoints:      []promptCacheBreakpoint{{Fingerprint: [32]byte{9}, CumulativeTokens: 10000, TTL: time.Hour}},
+	}
+	first := tracker.ComputeWithSettings("account", profile, policy)
+	tracker.UpdateWithSettings("account", profile, policy, first)
+	second := tracker.ComputeWithSettings("account", profile, policy)
+	tracker.UpdateWithSettings("account", profile, policy, second)
+	if len(tracker.diagnostics) != 2 {
+		t.Fatalf("diagnostics = %d, want 2", len(tracker.diagnostics))
+	}
+	latest := tracker.diagnostics[1]
+	if latest.Matched != 10000 || latest.MatchedShare != first.CacheCreationInputTokens || latest.MatchedTTLSeconds != 3600 || latest.MatchedPrefixTokens != 10000 {
+		t.Fatalf("match lifecycle not recorded: %+v", latest)
+	}
+}
+
 func TestTotalCacheConcurrentSnapshotAndNativeShortInput(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := &promptCacheProfile{Model: "claude-haiku-4.5", TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{3}, CumulativeTokens: 10000, TTL: time.Hour}}}

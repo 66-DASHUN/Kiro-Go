@@ -234,21 +234,23 @@ func (t *promptCacheTracker) UpdateWithSettings(accountID string, profile *promp
 }
 
 type promptCacheDiagnostic struct {
-	ID           string    `json:"id"`
-	Time         time.Time `json:"time"`
-	Rule         string    `json:"rule"`
-	Total        int       `json:"total"`
-	Cacheable    int       `json:"cacheable"`
-	Matched      int       `json:"matched"`
-	MatchedShare int       `json:"matchedShare"`
-	Ratio        float64   `json:"ratio"`
-	Budget       int       `json:"budget"`
-	Read         int       `json:"read"`
-	Write        int       `json:"write"`
-	Ordinary     int       `json:"ordinary"`
-	Write5m      int       `json:"write5m"`
-	Write1h      int       `json:"write1h"`
-	Limitation   string    `json:"limitation,omitempty"`
+	ID                  string    `json:"id"`
+	Time                time.Time `json:"time"`
+	Rule                string    `json:"rule"`
+	Total               int       `json:"total"`
+	Cacheable           int       `json:"cacheable"`
+	Matched             int       `json:"matched"`
+	MatchedShare        int       `json:"matchedShare"`
+	MatchedTTLSeconds   int       `json:"matchedTtlSeconds,omitempty"`
+	MatchedPrefixTokens int       `json:"matchedPrefixTokens,omitempty"`
+	Ratio               float64   `json:"ratio"`
+	Budget              int       `json:"budget"`
+	Read                int       `json:"read"`
+	Write               int       `json:"write"`
+	Ordinary            int       `json:"ordinary"`
+	Write5m             int       `json:"write5m"`
+	Write1h             int       `json:"write1h"`
+	Limitation          string    `json:"limitation,omitempty"`
 }
 
 func (t *promptCacheTracker) recordTotalCacheDiagnostic(profile *promptCacheProfile, usage promptCacheUsage) {
@@ -260,7 +262,7 @@ func (t *promptCacheTracker) recordTotalCacheDiagnostic(profile *promptCacheProf
 	defer t.mu.Unlock()
 	t.pruneDiagnosticsLocked(now)
 	t.diagnosticSeq++
-	t.diagnostics = append(t.diagnostics, promptCacheDiagnostic{ID: fmt.Sprintf("cache-%d", t.diagnosticSeq), Time: now, Rule: totalCacheRuleVersion, Total: profile.TotalInputTokens, Cacheable: usage.finalCacheable, Matched: usage.finalMatched, MatchedShare: usage.matchedCachedTokens, Ratio: usage.totalRatio, Budget: usage.CacheReadInputTokens + usage.CacheCreationInputTokens, Read: usage.CacheReadInputTokens, Write: usage.CacheCreationInputTokens, Ordinary: billedClaudeInputTokens(profile.TotalInputTokens, usage), Write5m: usage.CacheCreation5mInputTokens, Write1h: usage.CacheCreation1hInputTokens, Limitation: usage.limitation})
+	t.diagnostics = append(t.diagnostics, promptCacheDiagnostic{ID: fmt.Sprintf("cache-%d", t.diagnosticSeq), Time: now, Rule: totalCacheRuleVersion, Total: profile.TotalInputTokens, Cacheable: usage.finalCacheable, Matched: usage.finalMatched, MatchedShare: usage.matchedCachedTokens, MatchedTTLSeconds: int(usage.matchedTTL / time.Second), MatchedPrefixTokens: usage.matchedPrefixTokens, Ratio: usage.totalRatio, Budget: usage.CacheReadInputTokens + usage.CacheCreationInputTokens, Read: usage.CacheReadInputTokens, Write: usage.CacheCreationInputTokens, Ordinary: billedClaudeInputTokens(profile.TotalInputTokens, usage), Write5m: usage.CacheCreation5mInputTokens, Write1h: usage.CacheCreation1hInputTokens, Limitation: usage.limitation})
 	if len(t.diagnostics) > promptCacheDiagnosticCapacity {
 		t.diagnostics = append([]promptCacheDiagnostic(nil), t.diagnostics[len(t.diagnostics)-promptCacheDiagnosticCapacity:]...)
 	}

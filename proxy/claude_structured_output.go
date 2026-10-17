@@ -87,6 +87,7 @@ func (format *claudeStructuredOutput) validate(text string, toolCount int, stopR
 	if format == nil || toolCount > 0 || stopReason == "max_tokens" || stopReason == "refusal" {
 		return nil
 	}
+	text = normalizeClaudeStructuredJSONText(text)
 	doc, err := jsonschema.UnmarshalJSON(strings.NewReader(text))
 	if err == nil {
 		err = format.schema.Validate(doc)
@@ -95,6 +96,29 @@ func (format *claudeStructuredOutput) validate(text string, toolCount int, stopR
 		return errors.New("upstream response did not conform to output_config.format.schema")
 	}
 	return nil
+}
+
+// Upstream models occasionally wrap an otherwise valid structured answer in a
+// JSON Markdown fence. Anthropic structured output returns the JSON value
+// itself, so remove only a complete json fence and leave all other text alone.
+func normalizeClaudeStructuredJSONText(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "```") || !strings.HasSuffix(trimmed, "```") {
+		return text
+	}
+	lineEnd := strings.IndexByte(trimmed, '\n')
+	if lineEnd < 0 {
+		return text
+	}
+	language := strings.TrimSpace(trimmed[3:lineEnd])
+	if language != "" && !strings.EqualFold(language, "json") {
+		return text
+	}
+	inner := strings.TrimSpace(trimmed[lineEnd+1 : len(trimmed)-3])
+	if inner == "" {
+		return text
+	}
+	return inner
 }
 
 func (h *Handler) writeClaudeBufferedResponse(w http.ResponseWriter, response *ClaudeResponse, stream bool) {

@@ -141,6 +141,46 @@ func TestClaudeStructuredOutputJSONAndSSE(t *testing.T) {
 	}
 }
 
+func TestClaudeStructuredOutputNormalizesJSONCodeFence(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+				writeKiroTextResponse(t, w, "```json\n{\"answer\":42}\n```")
+			})
+			body := fmt.Sprintf(`{"model":"claude-sonnet-4.5","max_tokens":128,"stream":%v,%s,"messages":[{"role":"user","content":"answer"}]}`, stream, structuredFixture)
+			r := postClaudeMessages(t, h, body)
+			if r.Code != http.StatusOK {
+				t.Fatalf("code-fenced JSON rejected: %d %s", r.Code, r.Body.String())
+			}
+			if stream {
+				var text string
+				for _, event := range parseResponsesSSE(t, r.Body.String()) {
+					if event.Name != "content_block_delta" {
+						continue
+					}
+					delta := event.Data["delta"].(map[string]interface{})
+					if delta["type"] == "text_delta" {
+						text += delta["text"].(string)
+					}
+				}
+				if text != `{"answer":42}` {
+					t.Fatalf("stream response retained code fence: %q", text)
+				}
+				return
+			}
+			var response struct {
+				Content []ClaudeContentBlock `json:"content"`
+			}
+			if err := json.Unmarshal(r.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if len(response.Content) != 1 || response.Content[0].Text != `{"answer":42}` {
+				t.Fatalf("buffered response retained code fence: %+v", response.Content)
+			}
+		})
+	}
+}
+
 func TestClaudeStructuredOutputRejectsInvalidResponsesWithoutRetry(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		for _, answer := range []string{`not json`, `{"answer":"42"}`, `{"answer":42,"extra":true}`, `{}`, `{"answer":42} {}`} {

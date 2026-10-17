@@ -95,6 +95,9 @@ func TestServeHTTPTracesEarlyFailures(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s: status = %d body=%s", tc.path, rec.Code, rec.Body.String())
 		}
+		if requestID := rec.Header().Get("x-request-id"); requestID == "" || rec.Header().Get("request-id") != requestID {
+			t.Fatalf("%s: missing stable request id headers: x-request-id=%q request-id=%q", tc.path, rec.Header().Get("x-request-id"), rec.Header().Get("request-id"))
+		}
 		got := s.RecentRequests(1)
 		if len(got) != 1 {
 			t.Fatalf("%s: expected one recorded request, got %d", tc.path, len(got))

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -16,13 +18,21 @@ const (
 type requestTrace struct {
 	startedAt time.Time
 	endpoint  string
+	requestID string
 }
 
 type requestTraceKey struct{}
 
 func withRequestTrace(r *http.Request, endpoint string) *http.Request {
 	//! The clock starts before auth, so the logged duration is what the client waited.
-	trace := &requestTrace{startedAt: time.Now(), endpoint: endpoint}
+	requestID := strings.TrimSpace(r.Header.Get("x-request-id"))
+	if requestID == "" {
+		requestID = strings.TrimSpace(r.Header.Get("request-id"))
+	}
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
+	trace := &requestTrace{startedAt: time.Now(), endpoint: endpoint, requestID: requestID}
 	return r.WithContext(context.WithValue(r.Context(), requestTraceKey{}, trace))
 }
 

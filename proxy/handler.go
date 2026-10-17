@@ -322,7 +322,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch")
-		w.Header().Set("Access-Control-Expose-Headers", "x-request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens")
+		w.Header().Set("Access-Control-Expose-Headers", "x-request-id, request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens")
 	}
 
 	if r.Method == "OPTIONS" {
@@ -332,6 +332,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if endpoint := requestEndpointForPath(path); endpoint != "" {
 		r = withRequestTrace(r, endpoint)
+		if trace := requestTraceFromContext(r.Context()); trace != nil && trace.requestID != "" {
+			w.Header().Set("x-request-id", trace.requestID)
+			w.Header().Set("request-id", trace.requestID)
+		}
 	}
 
 	controller := http.NewResponseController(w)
@@ -1564,6 +1568,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 
 			thinkingFormat := thinkingOpts.Format
 			finalContent, extractedReasoning := extractThinkingFromContent(content)
+			if payload.structuredOutput != nil {
+				finalContent = normalizeClaudeStructuredJSONText(finalContent)
+			}
 			rawThinkingContent := thinkingContent
 			if thinking && rawThinkingContent == "" && extractedReasoning != "" {
 				rawThinkingContent = extractedReasoning

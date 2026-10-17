@@ -481,6 +481,9 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		//! Final round: searches next to client tools still run, but only the client sees their results.
 		content := append([]map[string]interface{}(nil), presented...)
 		finalText := round.text
+		if req.structuredOutput != nil {
+			finalText = normalizeClaudeStructuredJSONText(finalText)
+		}
 		if err := req.structuredOutput.validate(finalText, len(clientUses), mapClaudeStopReason(round.stopReason, len(clientUses))); err != nil {
 			h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 			recordFinalRequestForApiKey(r.Context(), apiKeyReservation, lastAccount, req.Model, inputTokens, outputTokens, credits, false, 502, err.Error())
