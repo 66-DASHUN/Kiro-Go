@@ -193,6 +193,7 @@ func TestPrefixProtocolsJSONAndSSE(t *testing.T) {
 				} else {
 					request["messages"] = messages
 				}
+				semanticInput := estimateApproxTokens(strings.Repeat("stable input content ", 1000))
 				body, _ := json.Marshal(request)
 				for round := 0; round < 2; round++ {
 					r := withApiKeyContext(httptest.NewRequest("POST", path, strings.NewReader(string(body))), &key)
@@ -225,7 +226,11 @@ func TestPrefixProtocolsJSONAndSSE(t *testing.T) {
 						write, _ = details["cache_write_tokens"].(float64)
 						total, output = usage[input].(float64), usage[out].(float64)
 					}
-					if total != 10000 || output != 137 || read+write != 10000 || (round == 0 && read != 0) || (round == 1 && (read < 9000 || read > 9500 || write <= 0)) {
+					expectedTotal := 10000.0
+					if path == "/v1/messages" {
+						expectedTotal = float64(semanticInput)
+					}
+					if total != expectedTotal || output != 137 || read+write != expectedTotal || (round == 0 && read != 0) || (round == 1 && (read < expectedTotal*.9 || read > expectedTotal*.95 || write <= 0)) {
 						t.Fatalf("round %d: inconsistent usage %v", round, usage)
 					}
 				}

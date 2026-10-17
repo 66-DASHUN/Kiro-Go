@@ -299,15 +299,36 @@ func runtimeProtocolUsage(t *testing.T, rec *httptest.ResponseRecorder, stream b
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
+		obj = make(map[string]interface{})
 		if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &obj) != nil {
 			continue
 		}
 		if usage, ok := obj["usage"].(map[string]interface{}); ok {
-			result = usage
+			if result == nil {
+				result = make(map[string]interface{})
+			}
+			for key, value := range usage {
+				result[key] = value
+			}
 		}
 		if nested, ok := obj["response"].(map[string]interface{}); ok {
 			if usage, ok := nested["usage"].(map[string]interface{}); ok {
-				result = usage
+				if result == nil {
+					result = make(map[string]interface{})
+				}
+				for key, value := range usage {
+					result[key] = value
+				}
+			}
+		}
+		if nested, ok := obj["message"].(map[string]interface{}); ok {
+			if usage, ok := nested["usage"].(map[string]interface{}); ok {
+				if result == nil {
+					result = make(map[string]interface{})
+				}
+				for key, value := range usage {
+					result[key] = value
+				}
 			}
 		}
 	}
@@ -315,6 +336,30 @@ func runtimeProtocolUsage(t *testing.T, rec *httptest.ResponseRecorder, stream b
 		t.Fatal("final usage missing")
 	}
 	return result
+}
+
+func TestClaudeUsageDoesNotExposeKiroContextAsPublicInput(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+				writeFrames(w,
+					awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}),
+					awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"inputTokens": 12000, "outputTokens": 1, "stopReason": "end_turn"}),
+				)
+			})
+			if err := config.UpdatePromptCacheSettings(false, config.PromptCacheModeUniform, 0, 0, 0); err != nil {
+				t.Fatal(err)
+			}
+			body := map[string]interface{}{
+				"model": "claude-sonnet-4.5", "stream": stream, "max_tokens": 32,
+				"messages": []map[string]interface{}{{"role": "user", "content": "hello"}},
+			}
+			usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, "/v1/messages", body, nil), stream)
+			if got := int(usage["input_tokens"].(float64)); got != estimateApproxTokens("hello") {
+				t.Fatalf("public input=%d, want semantic input=%d; usage=%v", got, estimateApproxTokens("hello"), usage)
+			}
+		})
+	}
 }
 
 func TestRuntimeEveryProtocolPreservesNativeCountersAndEffectiveCachePolicy(t *testing.T) {
@@ -338,12 +383,13 @@ func TestRuntimeEveryProtocolPreservesNativeCountersAndEffectiveCachePolicy(t *t
 						}
 						usage := runtimeProtocolUsage(t, rec, stream)
 						if path == "/v1/messages" {
+							expectedInput := float64(estimateApproxTokens(strings.Repeat("stable prefix ", 1500)))
 							creation, _ := usage["cache_creation_input_tokens"].(float64)
 							cached, _ := usage["cache_read_input_tokens"].(float64)
-							if usage["input_tokens"].(float64)+creation+cached != 10000 || usage["output_tokens"] != float64(10) {
+							if usage["input_tokens"].(float64)+creation+cached != expectedInput || usage["output_tokens"] != float64(10) {
 								t.Fatalf("native counters changed: %v", usage)
 							}
-							if !enabled && (creation != 0 || cached != 0) || enabled && (i == 0 && (creation < 2000 || creation > 3000 || cached != 0) || i == 1 && (cached < 4500 || cached > 5500 || creation != 0)) {
+							if !enabled && (creation != 0 || cached != 0) || enabled && (i == 0 && (creation < expectedInput*.2 || creation > expectedInput*.3 || cached != 0) || i == 1 && (cached < expectedInput*.45 || cached > expectedInput*.55 || creation != 0)) {
 								t.Fatalf("policy iteration %d usage=%v", i, usage)
 							}
 						} else {
@@ -579,7 +625,11 @@ func TestRuntimeConcurrentColdRequestsKeepDispatchCacheMiss(t *testing.T) {
 					creation, _ = details["cache_write_tokens"].(float64)
 					cached, _ = details["cached_tokens"].(float64)
 				}
-				if creation < 2000 || creation > 3000 || cached != float64(0) {
+				expectedInput := float64(10000)
+				if path == "/v1/messages" {
+					expectedInput = float64(estimateApproxTokens(strings.Repeat("stable prefix ", 1500)))
+				}
+				if creation < expectedInput*.2 || creation > expectedInput*.3 || cached != float64(0) {
 					t.Fatalf("request %d changed dispatch miss after concurrent completion: %v", i, usage)
 				}
 			}
@@ -597,6 +647,12 @@ func TestRuntimeNativeWebSearchLoopUsesEffectiveCachePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.pool.Reload()
+	semanticReq := &ClaudeRequest{
+		Model:    "claude-sonnet-4.5",
+		Messages: []ClaudeMessage{{Role: "user", Content: strings.Repeat("stable prompt ", 1500)}},
+		Tools:    []ClaudeTool{{Type: "web_search_20250305", Name: "web_search"}},
+	}
+	expectedInput := estimateClaudeRequestInputTokens(semanticReq)
 	for i := 0; i < 2; i++ {
 		body, _ := json.Marshal(map[string]interface{}{"model": "claude-sonnet-4.5", "max_tokens": 64, "messages": []map[string]string{{"role": "user", "content": strings.Repeat("stable prompt ", 1500)}}, "tools": []map[string]string{{"name": "web_search", "type": "web_search_20250305"}}})
 		rec := httptest.NewRecorder()
@@ -608,7 +664,7 @@ func TestRuntimeNativeWebSearchLoopUsesEffectiveCachePolicy(t *testing.T) {
 		usage := runtimeProtocolUsage(t, rec, false)
 		creation, _ := usage["cache_creation_input_tokens"].(float64)
 		cached, _ := usage["cache_read_input_tokens"].(float64)
-		if (i == 0 && (creation < 2000 || creation > 3000 || cached != 0)) || (i == 1 && (cached < 4500 || cached > 5500 || creation != 0)) || usage["input_tokens"].(float64)+creation+cached != 10000 {
+		if (i == 0 && (creation < float64(expectedInput)*.2 || creation > float64(expectedInput)*.3 || cached != 0)) || (i == 1 && (cached < float64(expectedInput)*.45 || cached > float64(expectedInput)*.55 || creation != 0)) || usage["input_tokens"].(float64)+creation+cached != float64(expectedInput) {
 			t.Fatalf("round %d usage=%v", i, usage)
 		}
 	}

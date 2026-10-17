@@ -26,6 +26,10 @@ func TestTotalCacheShortProtocolAccounting(t *testing.T) {
 					} else {
 						body["messages"] = []map[string]interface{}{{"role": "user", "content": "Reply with seven."}}
 					}
+					expectedInput := 12
+					if path == "/v1/messages" {
+						expectedInput = estimateApproxTokens("Reply with seven.")
+					}
 					coldWrite := 0
 					for round := 0; round < 3; round++ {
 						if round == 2 {
@@ -35,7 +39,7 @@ func TestTotalCacheShortProtocolAccounting(t *testing.T) {
 						}
 						usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, path, body, nil), stream)
 						input, output, read, write := localUsageTotals(path, usage)
-						if input != 12 || output != 1 || read+write > input || (round == 0 && (read != 0 || write < 10 || write > 12)) || (round == 1 && (read != coldWrite || write != 0)) || (round == 2 && read+write != 0) {
+						if input != expectedInput || output != 1 || read+write > input || (round == 0 && (read != 0 || write < 1 || write > expectedInput)) || (round == 1 && (read != coldWrite || write != 0)) || (round == 2 && read+write != 0) {
 							t.Fatalf("round %d: input/output/cache not conserved: %v", round, usage)
 						}
 						if round == 0 {

@@ -481,7 +481,11 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		cacheUsage.CacheCreation1hInputTokens += round.cacheUsage.CacheCreation1hInputTokens
 		getObserveStore().RecordSuccess(account.ID, req.Model, round.inputTokens, round.outputTokens, round.credits)
 		h.pool.RecordSuccess(account.ID)
-		h.pool.UpdateStats(account.ID, round.inputTokens+round.outputTokens, round.credits)
+		roundInputForStats := round.nativeInputTokens
+		if roundInputForStats <= 0 {
+			roundInputForStats = round.inputTokens
+		}
+		h.pool.UpdateStats(account.ID, roundInputForStats+round.outputTokens, round.credits)
 
 		searchUses, clientUses := splitWebSearchToolUses(round.toolUses)
 		if len(searchUses) > 0 && len(clientUses) == 0 && roundIdx <= maxUses && (budget == nil || !budget.stopped) {
@@ -690,7 +694,8 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 		reasoning = ""
 	}
 	nativeInputTokens, nativeOutputTokens := inputTokens, outputTokens
-	inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimateClaudeOutputTokens(text, reasoning, toolUses))
+	providerInputTokens, providerOutputTokens := finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimateClaudeOutputTokens(text, reasoning, toolUses))
+	inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
 	updateRequestUsageDiagnostic(ctx, func(diagnostic *usageDiagnostic) {
 		diagnostic.TranslatedInputEstimate += estimateKiroPayloadInputTokens(payload)
 		diagnostic.KiroRounds++
@@ -815,7 +820,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 			"content":       []interface{}{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage":         webSearchUsage(inputTokens, 0, 0, cacheUsage, includeCache),
+			"usage":         webSearchUsage(inputTokens, 0, searches, cacheUsage, includeCache),
 		},
 	})
 	for index, block := range content {
@@ -824,7 +829,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
-		"usage": webSearchUsage(inputTokens, outputTokens, searches, cacheUsage, includeCache),
+		"usage": buildClaudeMessageDeltaUsage(outputTokens),
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 }

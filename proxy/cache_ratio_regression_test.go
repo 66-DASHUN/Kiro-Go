@@ -159,10 +159,10 @@ func TestPromptCacheStreamStartUsesOneInputTokenBasis(t *testing.T) {
 		total := start["input_tokens"].(float64) + start["cache_creation_input_tokens"].(float64) + start["cache_read_input_tokens"].(float64)
 		startCache := start["cache_creation_input_tokens"].(float64) + start["cache_read_input_tokens"].(float64)
 		endCache := end["cache_creation_input_tokens"].(float64) + end["cache_read_input_tokens"].(float64)
-		if math.Abs(startCache/total-endCache/10000) > 2/total+2.0/10000 {
+		if math.Abs(startCache/total-endCache/total) > 2/total {
 			t.Fatalf("stream start and completion mix token bases: start=%v final=%v", start, end)
 		}
-		if end["input_tokens"].(float64)+endCache != 10000 || end["output_tokens"] != float64(137) {
+		if end["input_tokens"].(float64)+endCache != total || end["output_tokens"] != float64(137) {
 			t.Fatalf("native totals changed: %v", end)
 		}
 	}

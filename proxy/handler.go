@@ -123,9 +123,6 @@ func validateClaudeThinkingConfig(thinking *ClaudeThinkingConfig, maxTokens int)
 		if thinking.BudgetTokens <= 0 {
 			return "thinking.budget_tokens is required when thinking.type is enabled"
 		}
-		if thinking.BudgetTokens < 1024 {
-			return "thinking.budget_tokens must be at least 1024"
-		}
 		if maxTokens > 0 && thinking.BudgetTokens >= maxTokens {
 			return "thinking.budget_tokens must be less than max_tokens"
 		}
@@ -1414,7 +1411,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 			}
 			nativeInputTokens, nativeOutputTokens := inputTokens, outputTokens
 			estimatedOutputTokens := estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			providerInputTokens, providerOutputTokens := finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
 			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
 			cacheProfile = cacheProfileWithInputTokens(cacheProfile, inputTokens)
 			stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
@@ -1442,7 +1440,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 			recordFinalRequestForApiKey(r.Context(), apiKeyReservation, account, model, inputTokens, outputTokens, credits, true, 200, "")
 			h.pool.RecordSuccess(account.ID)
 			h.rememberAccount(payload, account)
-			h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+			h.pool.UpdateStats(account.ID, providerInputTokens+outputTokens, credits)
 			if cacheSettings.Enabled {
 				h.promptCache.UpdateWithSettings(account.ID, cacheProfile, cacheSettings, cacheUsage)
 			}
@@ -1454,7 +1452,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 					"stop_reason":   stopReason,
 					"stop_sequence": nil,
 				},
-				"usage": buildClaudeUsageMap(inputTokens, outputTokens, cacheUsage, cacheSettings.Enabled),
+				"usage": buildClaudeMessageDeltaUsage(outputTokens),
 			})
 
 			h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
@@ -1499,6 +1497,17 @@ func finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estima
 		outputTokens = estimatedOutputTokens
 	}
 	return inputTokens, outputTokens
+}
+
+// Claude's public usage describes the request received by this API. Kiro's
+// native input count also includes translated transport context, so it is
+// retained for diagnostics/account statistics but never exposed as Claude
+// input or used as the simulated cache allocation basis.
+func publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens int) (int, int) {
+	if estimatedInputTokens <= 0 {
+		estimatedInputTokens = providerInputTokens
+	}
+	return estimatedInputTokens, providerOutputTokens
 }
 
 func accountIdentity(account *config.Account) (string, string) {
@@ -1644,7 +1653,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 
 			nativeInputTokens, nativeOutputTokens := inputTokens, outputTokens
 			estimatedOutputTokens := estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			providerInputTokens, providerOutputTokens := finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
 			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
 			cacheProfile = cacheProfileWithInputTokens(cacheProfile, inputTokens)
 			stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
@@ -1672,7 +1682,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 				// report the failed response and do not retry or certify cache.
 				h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 				h.pool.RecordSuccess(account.ID)
-				h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+				h.pool.UpdateStats(account.ID, providerInputTokens+outputTokens, credits)
 				recordFinalRequestForApiKey(r.Context(), apiKeyReservation, account, model, inputTokens, outputTokens, credits, false, 502, err.Error())
 				h.sendClaudeError(w, 502, "api_error", err.Error())
 				return
@@ -1683,7 +1693,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			recordFinalRequestForApiKey(r.Context(), apiKeyReservation, account, model, inputTokens, outputTokens, credits, true, 200, "")
 			h.pool.RecordSuccess(account.ID)
 			h.rememberAccount(payload, account)
-			h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+			h.pool.UpdateStats(account.ID, providerInputTokens+outputTokens, credits)
 			if cacheSettings.Enabled {
 				h.promptCache.UpdateWithSettings(account.ID, cacheProfile, cacheSettings, cacheUsage)
 			}

@@ -103,6 +103,30 @@ func TestClaudeDoesNotInventThinkingSignature(t *testing.T) {
 	}
 }
 
+func TestClaudeStreamMessageDeltaUsageIsOutputOnly(t *testing.T) {
+	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeKiroTextResponse(t, w, "ok")
+	})
+	r := postClaudeMessages(t, h, `{"model":"claude-sonnet-4.5","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	if r.Code != http.StatusOK {
+		t.Fatalf("request failed: %d %s", r.Code, r.Body.String())
+	}
+	for _, frame := range parseResponsesSSE(t, r.Body.String()) {
+		if frame.Name != "message_delta" {
+			continue
+		}
+		usage, ok := frame.Data["usage"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("message_delta usage missing: %#v", frame.Data)
+		}
+		if len(usage) != 1 || usage["output_tokens"] == nil {
+			t.Fatalf("message_delta must contain only output_tokens: %#v", usage)
+		}
+		return
+	}
+	t.Fatalf("message_delta event missing: %s", r.Body.String())
+}
+
 func TestClaudeKeepsSeparatelySignedThinkingBlocks(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {

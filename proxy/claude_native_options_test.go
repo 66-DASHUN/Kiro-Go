@@ -55,6 +55,20 @@ func TestClaudeNativeThinkingOptionsReachWire(t *testing.T) {
 	}
 }
 
+func TestClaudeLowEnabledBudgetUsesPromptFallback(t *testing.T) {
+	m := nativeOptionsModel()
+	props := m.AdditionalModelRequestFieldsSchema["properties"].(map[string]interface{})
+	props["thinking"] = map[string]interface{}{"properties": map[string]interface{}{
+		"type":          map[string]interface{}{"enum": []interface{}{"adaptive", "enabled", "disabled"}},
+		"budget_tokens": map[string]interface{}{"type": "integer", "minimum": float64(1024)},
+	}}
+	h := &Handler{cachedModels: []ModelInfo{m}}
+	req := &ClaudeRequest{Model: "claude-opus-5-5", Thinking: &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 99}}
+	if got := h.nativeClaudeThinking(req, true); got != nil {
+		t.Fatalf("small native thinking budget must use prompt fallback, got %#v", got)
+	}
+}
+
 func TestClaudeNativeOptionsSearchRoundAndLegacyFallback(t *testing.T) {
 	for _, native := range []bool{false, true} {
 		t.Run(fmt.Sprint(native), func(t *testing.T) {

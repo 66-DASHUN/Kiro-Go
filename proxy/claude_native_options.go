@@ -53,7 +53,13 @@ func (h *Handler) nativeClaudeThinking(req *ClaudeRequest, thinking bool) map[st
 			result["display"] = display
 		}
 		budgetSchema, ok := nestedSchemaMap(schema, "properties", "budget_tokens")
-		if kind == "enabled" && ok && schemaAcceptsTokenBudget(budgetSchema, req.Thinking.BudgetTokens) {
+		if kind == "enabled" && ok {
+			if !schemaAcceptsTokenBudget(budgetSchema, req.Thinking.BudgetTokens) {
+				// Kiro's native thinking schema rejects small budgets. Returning nil
+				// selects the existing prompt-based compatibility path instead of
+				// sending a request that the upstream will reject with HTTP 400.
+				return nil
+			}
 			result["budget_tokens"] = req.Thinking.BudgetTokens
 		}
 	}

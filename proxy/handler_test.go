@@ -895,10 +895,10 @@ func TestValidateClaudeThinkingConfig(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name:        "enabled requires at least 1024 budget tokens",
+			name:        "enabled accepts small budget for prompt fallback",
 			thinking:    &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 512},
 			maxTokens:   4096,
-			expectError: true,
+			expectError: false,
 		},
 		{
 			name:        "enabled rejects max tokens zero",
@@ -936,6 +936,12 @@ func TestValidateClaudeThinkingConfig(t *testing.T) {
 				t.Fatalf("expected thinking config to be valid, got %q", errMsg)
 			}
 		})
+	}
+}
+
+func TestClaudeAcceptsLowThinkingBudgetWithPromptFallback(t *testing.T) {
+	if got := validateClaudeThinkingConfig(&ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 99}, 100); got != "" {
+		t.Fatalf("low thinking budget must be accepted for compatibility fallback: %q", got)
 	}
 }
 

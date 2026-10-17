@@ -201,6 +201,7 @@ func TestCacheOptimizationProtocolMultiTurnReferenceRatios(t *testing.T) {
 					request["messages"] = messages
 				}
 				body, _ := json.Marshal(request)
+				semanticInput := estimateApproxTokens(strings.Repeat("stable initial input ", 1000)) + estimateApproxTokens(strings.Repeat("previous answer ", 200)) + estimateApproxTokens(strings.Repeat("current input ", 600))
 				for i := 0; i < 2; i++ {
 					r := withApiKeyContext(httptest.NewRequest("POST", path, strings.NewReader(string(body))), &key)
 					rec := httptest.NewRecorder()
@@ -237,7 +238,11 @@ func TestCacheOptimizationProtocolMultiTurnReferenceRatios(t *testing.T) {
 						creation, _ = details["cache_write_tokens"].(float64)
 						total, output = usage[input].(float64), usage[out].(float64)
 					}
-					if total != 10000 || output != 137 || read+creation < 7500 || read+creation > 8500 || (i == 0 && read != 0) || (i == 1 && creation != 0) {
+					expectedTotal := 10000
+					if path == "/v1/messages" {
+						expectedTotal = semanticInput
+					}
+					if total != float64(expectedTotal) || output != 137 || read+creation < float64(expectedTotal)*.75 || read+creation > float64(expectedTotal)*.85 || (i == 0 && read != 0) || (i == 1 && creation != 0) {
 						t.Fatalf("request %d has inconsistent native totals or reference ratio: %v", i, usage)
 					}
 					t.Logf("request %d: total=%.0f output=%.0f creation=%.0f read=%.0f", i, total, output, creation, read)

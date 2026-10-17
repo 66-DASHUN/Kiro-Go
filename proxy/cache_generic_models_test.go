@@ -158,7 +158,11 @@ func TestGenericCacheEveryProtocolUsesEffectiveModelAndKeyPolicy(t *testing.T) {
 						}
 						usage = runtimeProtocolUsage(t, localUsageJSONRequest(t, h, path, body, nil), stream)
 						input, output, read, write := localUsageTotals(path, usage)
-						if input != 12 || output != 1 || read+write > input || (round == 0 && (write <= 0 || read != 0)) || (round == 1 && (read != coldWrite || write != 0)) {
+						expectedInput := 12
+						if path == "/v1/messages" {
+							expectedInput = estimateApproxTokens("Reply with seven.")
+						}
+						if input != expectedInput || output != 1 || read+write > input || (round == 0 && (write <= 0 || read != 0)) || (round == 1 && (read != coldWrite || write != 0)) {
 							t.Fatalf("round %d: %v", round, usage)
 						}
 						if round == 0 {

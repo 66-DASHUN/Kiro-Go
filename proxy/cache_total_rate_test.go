@@ -388,6 +388,7 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 					} else {
 						request["messages"] = messages
 					}
+					semanticInput := estimateApproxTokens(strings.Repeat("stable total input ", 1000))
 					previousCache := float64(0)
 					for round := 0; round < 5; round++ {
 						if round == 1 {
@@ -396,6 +397,7 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 						if round == 2 {
 							nativeInput = 11000
 							messages = append(messages, map[string]interface{}{"role": "assistant", "content": "ok"}, map[string]interface{}{"role": "user", "content": strings.Repeat("appended input ", 100)})
+							semanticInput += estimateApproxTokens("ok") + estimateApproxTokens(strings.Repeat("appended input ", 100))
 							if path == "/v1/responses" {
 								request["input"] = messages
 							} else {
@@ -440,7 +442,11 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 							}
 							total, output = usage[input].(float64), usage[out].(float64)
 						}
-						if total != float64(nativeInput) || output != 137 || read+write > total || (round == 0 && (read != 0 || write < 7500 || write > 8500)) || (round > 0 && round < 4 && read != previousCache) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
+						expectedTotal := float64(nativeInput)
+						if path == "/v1/messages" {
+							expectedTotal = float64(semanticInput)
+						}
+						if total != expectedTotal || output != 137 || read+write > total || (round == 0 && (read != 0 || read+write < expectedTotal*.75 || read+write > expectedTotal*.85)) || (round > 0 && round < 4 && read != previousCache) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
 							t.Fatalf("round %d: %v", round, usage)
 						}
 						previousCache = read + write

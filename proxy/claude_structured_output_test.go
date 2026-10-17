@@ -42,13 +42,21 @@ func TestStructuredOutputFailureAccountsOnceAndDoesNotCommitCache(t *testing.T) 
 	}
 	h.pool.Reload()
 	body := `{"model":"claude-sonnet-4.5","max_tokens":2048,` + structuredFixture + `,"messages":[{"role":"user","content":"answer"}]}`
+	var publicRequest ClaudeRequest
+	if err := json.Unmarshal([]byte(body), &publicRequest); err != nil {
+		t.Fatal(err)
+	}
+	if msg := prepareClaudeStructuredOutput(&publicRequest); msg != "" {
+		t.Fatal(msg)
+	}
 	r := httptest.NewRecorder()
 	h.handleClaudeMessages(r, withApiKeyContext(httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)), &key))
 	if r.Code != 502 {
 		t.Fatalf("bad schema answer accepted: %d %s", r.Code, r.Body.String())
 	}
 	used := config.GetApiKeyEntry(key.ID)
-	if used.CreditsUsed != .25 || used.TokensUsed != 103 || used.RequestsCount != 1 {
+	wantTokens := int64(estimateClaudeRequestInputTokens(&publicRequest) + 3)
+	if used.CreditsUsed != .25 || used.TokensUsed != wantTokens || used.RequestsCount != 1 {
 		t.Fatalf("actual usage not finalized exactly once: %+v", used)
 	}
 	if len(h.promptCache.entriesByAccount["only"]) != 0 {

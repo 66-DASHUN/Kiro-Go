@@ -818,6 +818,12 @@ func buildClaudeUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, 
 	return result
 }
 
+// Anthropic's message_delta usage is an output increment. Input and cache
+// counters belong to message_start and the buffered message response.
+func buildClaudeMessageDeltaUsage(outputTokens int) map[string]interface{} {
+	return map[string]interface{}{"output_tokens": outputTokens}
+}
+
 func canonicalizeCacheValue(value interface{}) string {
 	var buf bytes.Buffer
 	writeCanonicalJSON(&buf, value)
