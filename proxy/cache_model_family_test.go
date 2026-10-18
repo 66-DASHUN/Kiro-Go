@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"fmt"
-	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,7 +22,7 @@ func TestTotalCacheFamilyLifecycle(t *testing.T) {
 		for _, alias := range []string{model, strings.ReplaceAll(model, ".", "-"), " ANTHROPIC." + strings.ToUpper(model) + " "} {
 			t.Run(alias, func(t *testing.T) {
 				tracker := newPromptCacheTracker(time.Hour)
-				policy := totalCachePolicy(.9)
+				policy := totalCachePolicy(1)
 				profile := &promptCacheProfile{Model: alias, TotalInputTokens: floor - 1, InputFingerprint: [32]byte{33}, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: floor - 1, TTL: 5 * time.Minute}}}
 				short := tracker.ComputeWithSettings("account", profile, policy)
 				if short.CacheReadInputTokens+short.CacheCreationInputTokens != 0 || short.limitation != "empty_cache_prefix" {
@@ -46,7 +45,7 @@ func TestTotalCacheFamilyLifecycle(t *testing.T) {
 				profile.TotalInputTokens += 1000
 				profile.Breakpoints = append(profile.Breakpoints, promptCacheBreakpoint{Fingerprint: [32]byte{2}, CumulativeTokens: profile.TotalInputTokens, TTL: time.Hour})
 				appended := tracker.ComputeWithSettings("account", profile, policy)
-				wantWrite := int(math.Round(1000 * variedPrefixReadRatio(.9, profile)))
+				wantWrite := 1000
 				if appended.CacheReadInputTokens != cold.CacheCreationInputTokens || appended.CacheCreationInputTokens != wantWrite || appended.CacheCreation1hInputTokens != wantWrite || appended.CacheCreation5mInputTokens != 0 {
 					t.Fatalf("append should only write its new interval: %+v", appended)
 				}
@@ -76,7 +75,7 @@ func TestTotalCacheAliasProfiles(t *testing.T) {
 	for _, protocol := range []string{"claude", "openai"} {
 		t.Run(protocol, func(t *testing.T) {
 			tracker := newPromptCacheTracker(time.Hour)
-			policy := totalCachePolicy(.9)
+			policy := totalCachePolicy(1)
 			build := func(model string) *promptCacheProfile {
 				if protocol == "claude" {
 					req := &ClaudeRequest{Model: model, Messages: []ClaudeMessage{{Role: "user", Content: strings.Repeat("stable cache input ", 1000)}}}
@@ -124,7 +123,7 @@ func TestTotalCacheAliasProfiles(t *testing.T) {
 func Example_totalCacheFamilySimulation() {
 	profile := &promptCacheProfile{Model: "claude-opus-5.5", TotalInputTokens: 21000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{1}, CumulativeTokens: 20000, TTL: 5 * time.Minute}}}
 	tracker := newPromptCacheTracker(time.Hour)
-	policy := totalCachePolicy(.9)
+	policy := totalCachePolicy(1)
 	cold := commitTotalCacheFixture(tracker, profile, policy)
 	warm := tracker.ComputeWithSettings("account", profile, policy)
 	fmt.Println(cold.CacheCreationInputTokens > 0, cold.CacheReadInputTokens == 0)

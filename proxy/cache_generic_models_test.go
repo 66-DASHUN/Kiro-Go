@@ -17,7 +17,7 @@ func TestGenericCacheModelLifecycle(t *testing.T) {
 			for _, total := range []int{12, 5000} {
 				t.Run(fmt.Sprintf("%s/%s/%d", model, protocol, total), func(t *testing.T) {
 					tracker := newPromptCacheTracker(time.Hour)
-					policy := totalCachePolicy(.9)
+					policy := totalCachePolicy(1)
 					build := func(tail string, tokens int) *promptCacheProfile {
 						if protocol == "claude" {
 							return tracker.BuildClaudeProfileWithSettings(&ClaudeRequest{Model: model, Messages: []ClaudeMessage{{Role: "user", Content: "stable first"}, {Role: "assistant", Content: "ok"}, {Role: "user", Content: tail}}}, tokens, policy)
@@ -72,7 +72,7 @@ func TestGenericCacheModelIdentityDoesNotMergeProviderIDs(t *testing.T) {
 		for _, pair := range [][2]string{{"future.model.v1", "future-model-v1"}, {"anthropic.future-v1", "future-v1"}, {"future/v1.2", "future/v1-2"}, {"future-v1", "future-v2"}} {
 			t.Run(protocol+"/"+pair[0], func(t *testing.T) {
 				tracker := newPromptCacheTracker(time.Hour)
-				policy := totalCachePolicy(.9)
+				policy := totalCachePolicy(1)
 				build := func(model string) *promptCacheProfile {
 					if protocol == "claude" {
 						return tracker.BuildClaudeProfileWithSettings(&ClaudeRequest{Model: model, Messages: []ClaudeMessage{{Role: "user", Content: "stable input"}}}, 12, policy)
@@ -114,7 +114,7 @@ func TestGenericCacheEveryProtocolUsesEffectiveModelAndKeyPolicy(t *testing.T) {
 					if err := config.UpdateModelMappings([]config.ModelMappingRule{{Key: "my-alias", Value: model}}); err != nil {
 						t.Fatal(err)
 					}
-					if err := config.UpdatePromptCacheSettings(true, "prefix_total", .9, 1, .9); err != nil {
+					if err := config.UpdatePromptCacheSettings(true, "prefix_total", 1, 1, 1); err != nil {
 						t.Fatal(err)
 					}
 					h.pool.SetModelList("only", []string{model})
@@ -188,7 +188,7 @@ func TestGenericCacheEveryProtocolRejectsUnavailableModelsWithoutStorage(t *test
 					if err := config.UpdateModelMappings([]config.ModelMappingRule{}); err != nil {
 						t.Fatal(err)
 					}
-					if err := config.UpdatePromptCacheSettings(true, "prefix_total", .9, 1, .9); err != nil {
+					if err := config.UpdatePromptCacheSettings(true, "prefix_total", 1, 1, 1); err != nil {
 						t.Fatal(err)
 					}
 					if knownUnavailable {

@@ -1,5 +1,7 @@
 # 通用模型缓存模拟 Implementation Plan
 
+> Task 1–2 的通用模型准入目标已完成。此计划中 `prefix-total-v4` 的行为描述属于历史记录；当前总缓存规则为 `prefix-total-v7`，以 [前缀准入设计](../specs/2026-10-18-cache-prefix-admission-design.md) 和 [本地验收](../reviews/2026-10-18-cache-prefix-admission-verification.md) 为准。
+
 > **For agentic workers:** Execute inline with superpowers:executing-plans. Request an independent reviewer before merge; do not delegate implementation.
 
 **Goal:** 使兼容现有接口的新模型无需新增缓存白名单即可按有效 Key 策略参与模拟。
@@ -27,8 +29,9 @@
 
 ### Task 3: 审查、验证与部署
 
-- [ ] 更新设计/计划勾选和 `docs/superpowers/reviews/2026-10-16-model-agnostic-cache-verification.md`，记录红绿验证、边界和未执行项。
-- [ ] 独立审查行为范围、未知模型失败及隔离；修复重要问题并按变更范围复测。
-- [ ] 提交代码；fetch 确认远端为祖先，禁止强推。复用 `ops/kiro-reverse-release/short-protocol-20261016-0af5f21` 的安全发布流程，使用独立发布目录和候选端口。
-- [ ] 资源受限 Linux 全量测试/vet/race/build，候选只读数据备份且移除副本刷新令牌。使用可用非 Claude 模型和 prefix_total Key 做小额短输入冷写/热读及原生协议回归。
-- [ ] 推送 GitHub、仅 Kiro 切换、公网复验，核对数据设置保持与其他容器基线，保存备份、回滚和发布报告。
+- [x] 记录 v7 规则、边界、红绿回归和未完成的 CCTest 验证，见 2026-10-18 前缀准入设计与验收报告。
+- [x] 完成独立审查；修复同一候选前缀被尾部变化影响和正比例时旧缓存读取被零浮动阈值挡住的问题，并复测。
+- [x] 本地全量 Go 测试、vet、build、locale 键一致性与 diff 检查通过。
+- [ ] 提交并 fetch 核对远端历史；仅快进推送 integration/main，不强推。
+- [ ] 使用独立发布目录，执行 Linux 测试/vet/race/build、候选副本测试、短输入冷写热读和原生协议检查。
+- [ ] 仅切换 Kiro；验证公网健康、SQLite/API Key/绑定/缓存配置保持，并比对其他容器基线；保存备份、回滚点和发布报告。无 CCTest 原始报告时不声称 CCTest 通过。

@@ -1,5 +1,7 @@
 # 总缓存率优化：本地验收报告
 
+> 历史验收：本报告针对旧 Token 预算算法，不代表当前实现。`prefix-total-v7` 的算法和验证记录见 [前缀准入修复验收](2026-10-18-cache-prefix-admission-verification.md)。
+
 日期：2026-10-15。基线：`bdc07ba`，分支：`integration/kiro-reverse-2.1.0`。
 
 ## 结果与范围

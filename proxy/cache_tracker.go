@@ -26,8 +26,11 @@ const (
 )
 
 type promptCacheUsage struct {
-	totalCacheRate             bool
-	totalRatio                 float64
+	totalCacheRate bool
+	totalRatio     float64
+	// The positive-rate lookup must remain valid when a varied write threshold is zero.
+	cacheAdmissionChecked      bool
+	cacheWriteAdmitted         bool
 	startedAt                  time.Time
 	matchedFingerprint         [32]byte
 	matchedTTL                 time.Duration
@@ -412,6 +415,9 @@ func computePrefixReadWriteUsage(usage promptCacheUsage, profile *promptCachePro
 func variedPrefixReadRatio(ratio float64, profile *promptCacheProfile) float64 {
 	if ratio <= 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
 		return 0
+	}
+	if ratio >= 1 {
+		return 1
 	}
 	reference := math.Min(.95, ratio)
 	lower, upper := math.Max(0, reference-promptCacheRatioVariation), math.Min(.95, reference+promptCacheRatioVariation)

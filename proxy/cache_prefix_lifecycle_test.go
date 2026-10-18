@@ -287,6 +287,9 @@ func TestCacheOptimizationFailureDoesNotRenewProtocols(t *testing.T) {
 					}
 					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": 10000, "outputTokens": 137}))
 				})
+				if err := config.UpdatePromptCacheSettings(true, "prefix_total", 1, 1, 1); err != nil {
+					t.Fatal(err)
+				}
 				if rec := runtimeProtocolRequest(t, h, path, stream, nil); rec.Code != 200 {
 					t.Fatalf("warm-up failed: %s", rec.Body.String())
 				}

@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"kiro-proxy/config"
@@ -9,7 +11,7 @@ import (
 	"time"
 )
 
-const totalCacheRuleVersion = "prefix-total-v4"
+const totalCacheRuleVersion = "prefix-total-v7"
 const promptCacheDiagnosticCapacity = 200
 const promptCacheDiagnosticRetention = 24 * time.Hour
 
@@ -55,7 +57,7 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 		usage.limitation = "disabled"
 		return usage
 	}
-	if usage.totalRatio <= 0 {
+	if settings.Ratio <= 0 || math.IsNaN(settings.Ratio) || math.IsInf(settings.Ratio, 0) {
 		usage.limitation = "zero_rate"
 		return usage
 	}
@@ -66,6 +68,7 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 	}
 	if usage.rawCacheable < floor {
 		usage.limitation = "empty_cache_prefix"
+		return usage
 	}
 	if t == nil || accountID == "" {
 		usage.limitation = "no_account"
@@ -95,12 +98,64 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 		usage.matchedPrefixTokens = entry.PrefixTokens
 		usage.matchedCachedTokens = entry.CachedTokens
 	}
+	usage.cacheAdmissionChecked = true
+	usage.cacheWriteAdmitted = usage.rawCacheable <= usage.rawRead
+	if usage.rawCacheable > usage.rawRead {
+		for i := len(profile.Breakpoints) - 1; i >= 0; i-- {
+			bp := profile.Breakpoints[i]
+			if bp.CumulativeTokens <= usage.rawRead || bp.CumulativeTokens > usage.rawCacheable {
+				continue
+			}
+			usage.totalRatio = totalCacheAdmissionRatio(settings.Ratio, profile.Model, bp.Fingerprint)
+			usage.cacheWriteAdmitted = totalCacheAdmission(usage.totalRatio, profile.Model, bp.Fingerprint)
+			break
+		}
+		if !usage.cacheWriteAdmitted {
+			usage.limitation = "cache_admission_miss"
+		}
+	}
 	return allocateTotalCacheUsage(usage, profile, usage.rawCacheable, usage.rawRead)
 }
 
-// Preserve the committed share of the matched prefix. Only newly eligible
-// content receives this request's floating reference; native calibration must
-// never multiply the saved share.
+func totalCacheAdmissionRatio(ratio float64, model string, fingerprint [32]byte) float64 {
+	if ratio <= 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
+		return 0
+	}
+	if ratio >= 1 {
+		return 1
+	}
+	spread := math.Min(promptCacheRatioVariation, math.Min(ratio, 1-ratio))
+	hasher := sha256.New()
+	hasher.Write(fingerprint[:])
+	writeHashChunk(hasher, model)
+	writeHashChunk(hasher, "prefix-total-admission-ratio-v1")
+	digest := hasher.Sum(nil)
+	unit := float64(binary.BigEndian.Uint16(digest[:2]))/65535*2 - 1
+	return math.Max(0, math.Min(1, ratio+unit*spread))
+}
+
+// A prefix-specific threshold admits whole content prefixes across requests.
+// It must not split one stable prefix into cached and ordinary token slices.
+func totalCacheAdmission(ratio float64, model string, fingerprint [32]byte) bool {
+	if ratio <= 0 {
+		return false
+	}
+	if ratio >= 1 {
+		return true
+	}
+	if fingerprint == ([32]byte{}) {
+		return false
+	}
+	hasher := sha256.New()
+	hasher.Write(fingerprint[:])
+	writeHashChunk(hasher, model)
+	writeHashChunk(hasher, "prefix-total-admission-v1")
+	digest := hasher.Sum(nil)
+	sample := float64(binary.BigEndian.Uint32(digest[:4])) / float64(^uint32(0))
+	return sample < ratio
+}
+
+// Preserve the committed read share; admission only controls the uncached tail.
 func allocateTotalCacheUsage(usage promptCacheUsage, profile *promptCacheProfile, eligible, matched int) promptCacheUsage {
 	usage.CacheCreationInputTokens = 0
 	usage.CacheReadInputTokens = 0
@@ -123,13 +178,15 @@ func allocateTotalCacheUsage(usage promptCacheUsage, profile *promptCacheProfile
 		usage.limitation = "empty_cache_prefix"
 		return usage
 	}
-	if usage.totalRatio <= 0 {
+	if usage.totalRatio <= 0 && !usage.cacheAdmissionChecked {
 		return usage
 	}
 	usage.CacheReadInputTokens = maxInt(0, minInt(usage.matchedCachedTokens, matched))
-	// Token counters are integers. Nearest-integer allocation keeps the error
-	// within half a token without silently excluding one-token intervals.
-	usage.CacheCreationInputTokens = int(math.Round(float64(eligible-matched) * math.Min(1, usage.totalRatio)))
+	if usage.cacheAdmissionChecked && !usage.cacheWriteAdmitted && eligible > matched {
+		usage.limitation = "cache_admission_miss"
+		return usage
+	}
+	usage.CacheCreationInputTokens = eligible - matched
 	raw5m, raw1h := computePromptCacheTTLBreakdownLimited(profile, matched, eligible-matched)
 	usage.CacheCreation5mInputTokens, usage.CacheCreation1hInputTokens = allocateCacheWriteTTL(usage.CacheCreationInputTokens, raw5m, raw1h)
 	usage.limitation = ""

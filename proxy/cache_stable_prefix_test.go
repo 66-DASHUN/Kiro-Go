@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"math"
 	"testing"
 	"time"
 )
@@ -15,19 +14,24 @@ func TestStablePrefixAppendRetainsCommittedShare(t *testing.T) {
 		tracker := newPromptCacheTracker(time.Hour)
 		old := promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour}
 		first := stablePrefixFixture(10000, 31, old)
-		coldPolicy := totalCachePolicy(.95)
+		coldPolicy := totalCachePolicy(1)
 		cold := tracker.ComputeWithSettings("account", first, coldPolicy)
 		tracker.UpdateWithSettings("account", first, coldPolicy, cold)
 		for seed := byte(32); seed < 40; seed++ {
 			next := stablePrefixFixture(11000, seed, old, promptCacheBreakpoint{Fingerprint: [32]byte{seed}, CumulativeTokens: 11000, TTL: 5 * time.Minute})
 			policy := totalCachePolicy(reference)
 			got := tracker.ComputeWithSettings("account", next, policy)
-			wantWrite := int(math.Round(1000 * variedPrefixReadRatio(reference, next)))
+			fingerprint := next.Breakpoints[len(next.Breakpoints)-1].Fingerprint
+			admitted := totalCacheAdmission(totalCacheAdmissionRatio(policy.Ratio, next.Model, fingerprint), next.Model, fingerprint)
+			wantWrite := 0
+			if admitted {
+				wantWrite = 1000
+			}
 			if got.CacheReadInputTokens != cold.CacheCreationInputTokens {
 				t.Fatalf("reference %.2f seed %d changed old cached share: read=%d previously written=%d", reference, seed, got.CacheReadInputTokens, cold.CacheCreationInputTokens)
 			}
-			if got.CacheCreationInputTokens != wantWrite || got.CacheCreation5mInputTokens != wantWrite || got.CacheCreation1hInputTokens != 0 {
-				t.Fatalf("new content allocation: %+v, want write %d", got, wantWrite)
+			if got.CacheCreationInputTokens != wantWrite || (admitted && got.CacheCreation5mInputTokens != wantWrite) || got.CacheCreation1hInputTokens != 0 {
+				t.Fatalf("new content admission: %+v, admitted=%v", got, admitted)
 			}
 			if billedClaudeInputTokens(11000, got)+got.CacheReadInputTokens+got.CacheCreationInputTokens != 11000 {
 				t.Fatal("input is not conserved")
@@ -38,7 +42,7 @@ func TestStablePrefixAppendRetainsCommittedShare(t *testing.T) {
 
 func TestStablePrefixSuccessiveAppendsReadPriorCachedTotal(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
-	policy := totalCachePolicy(.8)
+	policy := totalCachePolicy(1)
 	var breakpoints []promptCacheBreakpoint
 	previousCache := 0
 	for round := 0; round < 8; round++ {
@@ -60,7 +64,7 @@ func TestStablePrefixSuccessiveAppendsReadPriorCachedTotal(t *testing.T) {
 
 func TestStablePrefixNativeCorrectionKeepsSavedShare(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
-	policy := totalCachePolicy(.8)
+	policy := totalCachePolicy(1)
 	first := stablePrefixFixture(10000, 31, promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour})
 	cold := tracker.ComputeWithSettings("account", first, policy)
 	tracker.UpdateWithSettings("account", first, policy, cold)
@@ -72,14 +76,14 @@ func TestStablePrefixNativeCorrectionKeepsSavedShare(t *testing.T) {
 	if final.CacheReadInputTokens != cold.CacheCreationInputTokens {
 		t.Fatalf("native correction rescaled committed read: %+v, want %d", final, cold.CacheCreationInputTokens)
 	}
-	if final.CacheCreationInputTokens != int(math.Round(1000*snapshot.totalRatio)) {
-		t.Fatalf("native correction did not isolate new interval: %+v", final)
+	if final.CacheCreationInputTokens != 1000 {
+		t.Fatalf("native correction did not isolate the uncached tail: %+v", final)
 	}
 }
 
 func TestStablePrefixPartialExpiryRetainsAncestorShare(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
-	policy := totalCachePolicy(.8)
+	policy := totalCachePolicy(1)
 	ancestor := promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: 6000, TTL: time.Hour}
 	full := promptCacheBreakpoint{Fingerprint: [32]byte{2}, CumulativeTokens: 10000, TTL: 5 * time.Minute}
 	first := stablePrefixFixture(10000, 31, ancestor, full)
@@ -105,7 +109,7 @@ func TestStablePrefixDoesNotInventSharesFromLegacyEntries(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := stablePrefixFixture(10000, 31, promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour})
 	tracker.Update("account", profile)
-	got := tracker.ComputeWithSettings("account", profile, totalCachePolicy(.8))
+	got := tracker.ComputeWithSettings("account", profile, totalCachePolicy(1))
 	if got.CacheReadInputTokens != 0 || got.CacheCreationInputTokens == 0 {
 		t.Fatalf("unmeasured legacy entry invented a cached share: %+v", got)
 	}
@@ -114,20 +118,20 @@ func TestStablePrefixDoesNotInventSharesFromLegacyEntries(t *testing.T) {
 func TestStablePrefixConcurrentCompletionsKeepFirstCommit(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := stablePrefixFixture(10000, 31, promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour})
-	firstPolicy, secondPolicy := totalCachePolicy(.8), totalCachePolicy(.2)
+	firstPolicy, secondPolicy := totalCachePolicy(1), totalCachePolicy(.2)
 	first := tracker.ComputeWithSettings("account", profile, firstPolicy)
 	second := tracker.ComputeWithSettings("account", profile, secondPolicy)
 	tracker.UpdateWithSettings("account", profile, firstPolicy, first)
 	tracker.UpdateWithSettings("account", profile, secondPolicy, second)
 	warm := tracker.ComputeWithSettings("account", profile, secondPolicy)
-	if first.CacheCreationInputTokens == second.CacheCreationInputTokens || warm.CacheReadInputTokens != first.CacheCreationInputTokens || warm.CacheCreationInputTokens != 0 {
+	if first.CacheCreationInputTokens != 10000 || second.CacheCreationInputTokens != 0 || warm.CacheReadInputTokens != first.CacheCreationInputTokens || warm.CacheCreationInputTokens != 0 {
 		t.Fatalf("later completion replaced the committed share: first=%+v second=%+v warm=%+v", first, second, warm)
 	}
 }
 
 func TestStablePrefixNativeClampAndExpiredSnapshotRenewal(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
-	policy := totalCachePolicy(.8)
+	policy := totalCachePolicy(1)
 	profile := stablePrefixFixture(10000, 31, promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour})
 	cold := commitTotalCacheFixture(tracker, profile, policy)
 	snapshot := tracker.ComputeWithSettings("account", profile, policy)

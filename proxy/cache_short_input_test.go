@@ -3,7 +3,6 @@ package proxy
 import (
 	"fmt"
 	"kiro-proxy/config"
-	"math"
 	"net/http"
 	"testing"
 	"time"
@@ -17,7 +16,7 @@ func TestTotalCacheShortProtocolAccounting(t *testing.T) {
 					h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 						writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "seven"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"inputTokens": 12, "outputTokens": 1, "stopReason": "end_turn"}))
 					})
-					if err := config.UpdatePromptCacheSettings(true, "prefix_total", .9, 1, .9); err != nil {
+					if err := config.UpdatePromptCacheSettings(true, "prefix_total", 1, 1, 1); err != nil {
 						t.Fatal(err)
 					}
 					body := map[string]interface{}{"model": model, "stream": stream, "max_tokens": 64}
@@ -57,12 +56,12 @@ func TestTotalCacheShortInputLifecycle(t *testing.T) {
 		for _, tokens := range []int{1, 2, 3, 10, 100, 1023, 4095} {
 			t.Run(fmt.Sprintf("%s/%d", model, tokens), func(t *testing.T) {
 				tracker := newPromptCacheTracker(time.Hour)
-				policy := totalCachePolicy(.9)
+				policy := totalCachePolicy(1)
 				bp := promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: tokens, TTL: 5 * time.Minute}
 				profile := &promptCacheProfile{Model: model, TotalInputTokens: tokens, Breakpoints: []promptCacheBreakpoint{bp}}
 				cold := tracker.ComputeWithSettings("account", profile, policy)
-				if cold.CacheCreationInputTokens <= 0 || cold.CacheReadInputTokens != 0 || math.Abs(float64(cold.CacheCreationInputTokens)-float64(tokens)*cold.totalRatio) > .500001 {
-					t.Fatalf("nonempty cold input should write a rounded share: %+v", cold)
+				if cold.CacheCreationInputTokens != tokens || cold.CacheReadInputTokens != 0 {
+					t.Fatalf("admitted cold prefix should write its full content: %+v", cold)
 				}
 				// A dispatch or failed request must not make a prefix readable.
 				if again := tracker.ComputeWithSettings("account", profile, policy); again.CacheReadInputTokens != 0 {
@@ -103,7 +102,10 @@ func TestTotalCacheShortIntegerAllocation(t *testing.T) {
 		for _, ratio := range []float64{0, .01, .2, .5, .8, .9, .95} {
 			profile := &promptCacheProfile{Model: "claude-opus-5.5", TotalInputTokens: tokens, Breakpoints: []promptCacheBreakpoint{{CumulativeTokens: tokens, TTL: time.Hour}}}
 			got := allocateTotalCacheUsage(promptCacheUsage{totalCacheRate: true, totalRatio: ratio}, profile, tokens, 0)
-			want := int(math.Round(float64(tokens) * ratio))
+			want := tokens
+			if ratio == 0 {
+				want = 0
+			}
 			if got.CacheCreationInputTokens != want || got.CacheReadInputTokens != 0 || got.CacheCreation1hInputTokens != want || got.CacheCreation5mInputTokens != 0 || billedClaudeInputTokens(tokens, got)+want != tokens {
 				t.Fatalf("tokens=%d ratio=%v: %+v want=%d", tokens, ratio, got, want)
 			}
