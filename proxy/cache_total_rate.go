@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const totalCacheRuleVersion = "prefix-total-v7"
+const totalCacheRuleVersion = "prefix-total-v8"
 const promptCacheDiagnosticCapacity = 200
 const promptCacheDiagnosticRetention = 24 * time.Hour
 
@@ -99,8 +99,8 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 		usage.matchedCachedTokens = entry.CachedTokens
 	}
 	usage.cacheAdmissionChecked = true
-	usage.cacheWriteAdmitted = usage.rawCacheable <= usage.rawRead
-	if usage.rawCacheable > usage.rawRead {
+	usage.cacheWriteAdmitted = usage.rawCacheable <= usage.rawRead || usage.rawRead > 0
+	if usage.rawCacheable > usage.rawRead && usage.rawRead == 0 {
 		for i := len(profile.Breakpoints) - 1; i >= 0; i-- {
 			bp := profile.Breakpoints[i]
 			if bp.CumulativeTokens <= usage.rawRead || bp.CumulativeTokens > usage.rawCacheable {

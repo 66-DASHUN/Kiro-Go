@@ -9,7 +9,7 @@ func stablePrefixFixture(total int, seed byte, breakpoints ...promptCacheBreakpo
 	return &promptCacheProfile{Model: "claude-sonnet-4.5", TotalInputTokens: total, InputFingerprint: [32]byte{seed}, Breakpoints: breakpoints}
 }
 
-func TestStablePrefixAppendRetainsCommittedShare(t *testing.T) {
+func TestStablePrefixAppendAlwaysAdmitsAfterMatch(t *testing.T) {
 	for _, reference := range []float64{.95, .8, .2} {
 		tracker := newPromptCacheTracker(time.Hour)
 		old := promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour}
@@ -21,17 +21,11 @@ func TestStablePrefixAppendRetainsCommittedShare(t *testing.T) {
 			next := stablePrefixFixture(11000, seed, old, promptCacheBreakpoint{Fingerprint: [32]byte{seed}, CumulativeTokens: 11000, TTL: 5 * time.Minute})
 			policy := totalCachePolicy(reference)
 			got := tracker.ComputeWithSettings("account", next, policy)
-			fingerprint := next.Breakpoints[len(next.Breakpoints)-1].Fingerprint
-			admitted := totalCacheAdmission(totalCacheAdmissionRatio(policy.Ratio, next.Model, fingerprint), next.Model, fingerprint)
-			wantWrite := 0
-			if admitted {
-				wantWrite = 1000
-			}
 			if got.CacheReadInputTokens != cold.CacheCreationInputTokens {
 				t.Fatalf("reference %.2f seed %d changed old cached share: read=%d previously written=%d", reference, seed, got.CacheReadInputTokens, cold.CacheCreationInputTokens)
 			}
-			if got.CacheCreationInputTokens != wantWrite || (admitted && got.CacheCreation5mInputTokens != wantWrite) || got.CacheCreation1hInputTokens != 0 {
-				t.Fatalf("new content admission: %+v, admitted=%v", got, admitted)
+			if got.CacheCreationInputTokens != 1000 || got.CacheCreation5mInputTokens != 1000 || got.CacheCreation1hInputTokens != 0 || got.limitation != "" {
+				t.Fatalf("matched prefix must admit the entire new tail at reference %.2f, seed %d: %+v", reference, seed, got)
 			}
 			if billedClaudeInputTokens(11000, got)+got.CacheReadInputTokens+got.CacheCreationInputTokens != 11000 {
 				t.Fatal("input is not conserved")

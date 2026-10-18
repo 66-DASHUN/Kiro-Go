@@ -196,7 +196,7 @@ func TestTotalCacheShortInputExplainedInDiagnostic(t *testing.T) {
 		t.Fatalf("missing short input diagnostic: %+v", tracker.diagnostics)
 	}
 	d := tracker.diagnostics[0]
-	if d.Rule != "prefix-total-v7" || d.Limitation != "" || d.Ordinary+d.Read+d.Write != 3 || d.Write != got.CacheWriteTokens {
+	if d.Rule != "prefix-total-v8" || d.Limitation != "" || d.Ordinary+d.Read+d.Write != 3 || d.Write != got.CacheWriteTokens {
 		t.Fatalf("incorrect short input diagnostic: %+v", d)
 	}
 	if len(tracker.entriesByAccount["account"]) == 0 {
@@ -446,7 +446,7 @@ func TestTotalCacheRejectedColdPrefixStaysOrdinaryAndUnstored(t *testing.T) {
 	}
 }
 
-func TestTotalCacheAdmissionMissRetainsExistingPrefixRead(t *testing.T) {
+func TestTotalCacheMatchedPrefixAdmitsNewTail(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	model := "claude-sonnet-4.5"
 	old := promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour}
@@ -479,12 +479,12 @@ func TestTotalCacheAdmissionMissRetainsExistingPrefixRead(t *testing.T) {
 		t.Fatal("failed to find a deterministic rejected tail fixture")
 	}
 	usage := tracker.ComputeWithSettings("account", next, policy)
-	if usage.CacheReadInputTokens != 10000 || usage.CacheCreationInputTokens != 0 || usage.limitation != "cache_admission_miss" || billedClaudeInputTokens(11000, usage) != 1000 {
-		t.Fatalf("rejected tail must retain its old read and leave only the tail ordinary: %+v", usage)
+	if usage.CacheReadInputTokens != 10000 || usage.CacheCreationInputTokens != 1000 || usage.limitation != "" || billedClaudeInputTokens(11000, usage) != 0 {
+		t.Fatalf("matched prefix must admit its entire new tail: %+v", usage)
 	}
 	tracker.UpdateWithSettings("account", next, policy, usage)
-	if warm := tracker.ComputeWithSettings("account", first, policy); warm.CacheReadInputTokens != 10000 {
-		t.Fatalf("rejected tail changed the existing prefix: %+v", warm)
+	if warm := tracker.ComputeWithSettings("account", next, policy); warm.CacheReadInputTokens != 11000 || warm.CacheCreationInputTokens != 0 {
+		t.Fatalf("successful tail write was not reusable: %+v", warm)
 	}
 }
 
