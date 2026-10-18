@@ -27,7 +27,7 @@ func TestTotalCacheShortProtocolAccounting(t *testing.T) {
 					}
 					expectedInput := 12
 					if path == "/v1/messages" {
-						expectedInput = estimateApproxTokens("Reply with seven.")
+						expectedInput = estimateApproxTokens("Reply with seven.") + 4
 					}
 					coldWrite := 0
 					for round := 0; round < 3; round++ {

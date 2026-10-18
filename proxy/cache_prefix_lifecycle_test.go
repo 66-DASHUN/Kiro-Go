@@ -38,8 +38,10 @@ func TestCacheOptimizationToolMarkersSurviveDecoding(t *testing.T) {
 		t.Fatalf("unchanged explicit tool prefix was not reused: %+v", got)
 	}
 	tracker.Update("account", tracker.BuildClaudeProfile(&req, 10000))
+	expectedPrefixes := tracker.BuildClaudeProfile(&req, 10000).Breakpoints
+	expectedCachedTokens := expectedPrefixes[len(expectedPrefixes)-1].CumulativeTokens
 	req.Tools[0].CacheControl["ttl"] = "5m"
-	if got := tracker.Compute("account", tracker.BuildClaudeProfile(&req, 10000)); got.CacheReadInputTokens != 10000 {
+	if got := tracker.Compute("account", tracker.BuildClaudeProfile(&req, 10000)); got.CacheReadInputTokens != expectedCachedTokens {
 		t.Fatalf("TTL metadata must not change a content fingerprint: %+v", got)
 	}
 }
@@ -240,7 +242,7 @@ func TestCacheOptimizationProtocolMultiTurnReferenceRatios(t *testing.T) {
 					}
 					expectedTotal := 10000
 					if path == "/v1/messages" {
-						expectedTotal = semanticInput
+						expectedTotal = semanticInput + 8 // Three message headers and the generation prefix.
 					}
 					if total != float64(expectedTotal) || output != 137 || read+creation < float64(expectedTotal)*.75 || read+creation > float64(expectedTotal)*.85 || (i == 0 && read != 0) || (i == 1 && creation != 0) {
 						t.Fatalf("request %d has inconsistent native totals or reference ratio: %v", i, usage)

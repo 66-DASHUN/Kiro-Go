@@ -157,7 +157,7 @@ func TestPrefixClaudeCountsSemanticContentAtBreakpoint(t *testing.T) {
 		t.Fatalf("fingerprint wrappers changed breakpoint: %+v, wanted %d", profile, eligible)
 	}
 	cold := tracker.ComputeWithSettings("account", profile, config.PromptCacheSettings{Enabled: true, Mode: "prefix", Ratio: .95})
-	uncachedUserTokens := estimateApproxTokens("current uncached message")
+	uncachedUserTokens := estimateApproxTokens("current uncached message") + 4
 	if cold.CacheCreationInputTokens != eligible || billedClaudeInputTokens(total, cold) != uncachedUserTokens {
 		t.Fatalf("tail or billing header allocated into cache: %+v", cold)
 	}
@@ -228,10 +228,12 @@ func TestPrefixProtocolsJSONAndSSE(t *testing.T) {
 						total, output = usage[input].(float64), usage[out].(float64)
 					}
 					expectedTotal := 10000.0
+					expectedCacheable := expectedTotal
 					if path == "/v1/messages" {
-						expectedTotal = float64(semanticInput)
+						expectedTotal = float64(semanticInput + 4)
+						expectedCacheable = expectedTotal - 2
 					}
-					if total != expectedTotal || output != 137 || read+write != expectedTotal || (round == 0 && read != 0) || (round == 1 && (read < expectedTotal*.9 || read > expectedTotal*.95 || write <= 0)) {
+					if total != expectedTotal || output != 137 || read+write != expectedCacheable || (round == 0 && read != 0) || (round == 1 && (read < expectedCacheable*.9 || read > expectedCacheable*.95 || write <= 0)) {
 						t.Fatalf("round %d: inconsistent usage %v", round, usage)
 					}
 				}

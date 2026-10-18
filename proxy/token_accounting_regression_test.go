@@ -87,7 +87,11 @@ func TestLocalUsageCountsInjectedThinkingInEveryProtocol(t *testing.T) {
 				}
 				usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, path, body, nil), stream)
 				input, _, _, _ := localUsageTotals(path, usage)
-				if want := estimateApproxTokens("hello") + estimateApproxTokens(ThinkingModePrompt); input != want {
+				want := estimateApproxTokens("hello") + estimateApproxTokens(ThinkingModePrompt)
+				if path == "/v1/messages" {
+					want += 4
+				}
+				if input != want {
 					t.Fatalf("injected thinking prompt was omitted: input=%d want=%d", input, want)
 				}
 			})
@@ -126,7 +130,11 @@ func TestLocalUsageColdWarmCacheWithKeyRatios(t *testing.T) {
 					for call := 0; call < 2; call++ {
 						usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, path, body, &key), stream)
 						input, output, read, write := localUsageTotals(path, usage)
-						if input != 2000 || output != 1 || read < 0 || write < 0 || read+write > input {
+						expectedInput := 2000
+						if path == "/v1/messages" {
+							expectedInput += 4
+						}
+						if input != expectedInput || output != 1 || read < 0 || write < 0 || read+write > input {
 							t.Fatalf("local input/output/cache total invalid: %v", usage)
 						}
 						cached := write
@@ -210,6 +218,9 @@ func TestLocalUsageProtocolsIgnoreContextOccupancy(t *testing.T) {
 				})
 				content := "Reply with hello."
 				wantInput := estimateApproxTokens(content)
+				if path == "/v1/messages" {
+					wantInput += 4
+				}
 				priorWrite := 0
 				for i, answer := range answers {
 					rec := localUsageRequest(t, h, path, stream, content)

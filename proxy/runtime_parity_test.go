@@ -50,11 +50,12 @@ func TestRuntimeCachePolicyRatiosDisableAndConfiguredReference(t *testing.T) {
 func TestRuntimeClaudeDefaultCacheProfileWithoutMarkers(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	req := &ClaudeRequest{Model: "claude-sonnet-4.5", Messages: []ClaudeMessage{{Role: "user", Content: strings.Repeat("stable prefix ", 1000)}}}
-	profile := tracker.BuildClaudeProfile(req, 10000)
+	total := estimateClaudeRequestInputTokens(req)
+	profile := tracker.BuildClaudeProfile(req, total)
 	if profile == nil {
 		t.Fatal("default profile missing")
 	}
-	if profile.Breakpoints[len(profile.Breakpoints)-1].CumulativeTokens != 10000 {
+	if profile.Breakpoints[len(profile.Breakpoints)-1].CumulativeTokens != total-2 {
 		t.Fatalf("profile=%+v", profile)
 	}
 }
@@ -355,8 +356,8 @@ func TestClaudeUsageDoesNotExposeKiroContextAsPublicInput(t *testing.T) {
 				"messages": []map[string]interface{}{{"role": "user", "content": "hello"}},
 			}
 			usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, "/v1/messages", body, nil), stream)
-			if got := int(usage["input_tokens"].(float64)); got != estimateApproxTokens("hello") {
-				t.Fatalf("public input=%d, want semantic input=%d; usage=%v", got, estimateApproxTokens("hello"), usage)
+			if got := int(usage["input_tokens"].(float64)); got != estimateApproxTokens("hello")+4 {
+				t.Fatalf("public input=%d, want semantic input=%d; usage=%v", got, estimateApproxTokens("hello")+4, usage)
 			}
 		})
 	}
@@ -383,7 +384,7 @@ func TestRuntimeEveryProtocolPreservesNativeCountersAndEffectiveCachePolicy(t *t
 						}
 						usage := runtimeProtocolUsage(t, rec, stream)
 						if path == "/v1/messages" {
-							expectedInput := float64(estimateApproxTokens(strings.Repeat("stable prefix ", 1500)))
+							expectedInput := float64(estimateApproxTokens(strings.Repeat("stable prefix ", 1500)) + 4)
 							creation, _ := usage["cache_creation_input_tokens"].(float64)
 							cached, _ := usage["cache_read_input_tokens"].(float64)
 							if usage["input_tokens"].(float64)+creation+cached != expectedInput || usage["output_tokens"] != float64(10) {
@@ -627,7 +628,7 @@ func TestRuntimeConcurrentColdRequestsKeepDispatchCacheMiss(t *testing.T) {
 				}
 				expectedInput := float64(10000)
 				if path == "/v1/messages" {
-					expectedInput = float64(estimateApproxTokens(strings.Repeat("stable prefix ", 1500)))
+					expectedInput = float64(estimateApproxTokens(strings.Repeat("stable prefix ", 1500)) + 4)
 				}
 				if creation < expectedInput*.2 || creation > expectedInput*.3 || cached != float64(0) {
 					t.Fatalf("request %d changed dispatch miss after concurrent completion: %v", i, usage)

@@ -243,7 +243,7 @@ func TestTotalCacheShortInputExplainedInDiagnostic(t *testing.T) {
 		t.Fatalf("missing short input diagnostic: %+v", tracker.diagnostics)
 	}
 	d := tracker.diagnostics[0]
-	if d.Rule != "prefix-total-v10" || d.Limitation != "" || d.Ordinary+d.Read+d.Write != 3 || d.Write != got.CacheWriteTokens {
+	if d.Rule != totalCacheRuleVersion || d.Limitation != "" || d.Ordinary+d.Read+d.Write != 3 || d.Write != got.CacheWriteTokens {
 		t.Fatalf("incorrect short input diagnostic: %+v", d)
 	}
 	if len(tracker.entriesByAccount["account"]) == 0 {
@@ -744,10 +744,12 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 							total, output = usage[input].(float64), usage[out].(float64)
 						}
 						expectedTotal := float64(nativeInput)
+						expectedCacheable := expectedTotal
 						if path == "/v1/messages" {
-							expectedTotal = float64(semanticInput)
+							expectedTotal = float64(semanticInput + 2*len(messages) + 2)
+							expectedCacheable = expectedTotal - 2
 						}
-						if total != expectedTotal || output != 137 || read+write > total || (round == 0 && (read != 0 || write != expectedTotal)) || (round > 0 && round < 4 && read < previousCache) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
+						if total != expectedTotal || output != 137 || read+write > total || (round == 0 && (read != 0 || write != expectedCacheable)) || (round > 0 && round < 4 && read < previousCache) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
 							t.Fatalf("round %d: %v", round, usage)
 						}
 						previousCache = read + write

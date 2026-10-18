@@ -612,6 +612,7 @@ func appendSystemCacheBlocks(blocks *[]cacheablePromptBlock, system interface{})
 }
 
 func appendMessageCacheBlocks(blocks *[]cacheablePromptBlock, messageIndex int, msg ClaudeMessage) {
+	first := len(*blocks)
 	role := msg.Role
 	switch content := msg.Content.(type) {
 	case string:
@@ -646,6 +647,11 @@ func appendMessageCacheBlocks(blocks *[]cacheablePromptBlock, messageIndex int, 
 				"block":         content,
 			}, true)
 		}
+	}
+	// The role header belongs to the message prefix. The pending assistant
+	// generation header is counted only in the total, outside every breakpoint.
+	if len(*blocks) > first {
+		(*blocks)[first].Tokens += claudeMessageFramingTokens
 	}
 }
 

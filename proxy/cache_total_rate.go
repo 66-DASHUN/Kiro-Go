@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const totalCacheRuleVersion = "prefix-total-v10"
+const totalCacheRuleVersion = "prefix-total-v11"
 const promptCacheDiagnosticCapacity = 200
 const promptCacheDiagnosticRetention = 24 * time.Hour
 
@@ -110,7 +110,13 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 			}
 			admissionRatio := totalCacheAdmissionRatio(settings.Ratio, profile.Model, bp.Fingerprint)
 			usage.cacheWriteAdmitted = totalCacheAdmission(admissionRatio, profile.Model, bp.Fingerprint)
-			break
+			if usage.cacheWriteAdmitted {
+				// A rejected final boundary must not discard an earlier eligible
+				// prefix. Store only the longest admitted boundary; its remaining
+				// tail is ordinary until a later request can extend a real hit.
+				usage.rawCacheable = bp.CumulativeTokens
+				break
+			}
 		}
 		if !usage.cacheWriteAdmitted {
 			usage.limitation = "cache_admission_miss"

@@ -5,7 +5,10 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 
+	"github.com/dlclark/regexp2"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -18,9 +21,28 @@ type ClaudeOutputFormat struct {
 // adapter sends the schema as instructions and validates the complete answer
 // before emitting JSON or SSE. It never repairs values or retries paid calls.
 type claudeStructuredOutput struct {
-	schema      *jsonschema.Schema
-	stream      bool
-	instruction string
+	schema        *jsonschema.Schema
+	stream        bool
+	instruction   string
+	regexTimedOut *atomic.Bool
+}
+
+// JSON Schema patterns use ECMAScript, including lookaround and backreferences.
+// Bound backtracking, and reject the whole validation on timeout even when a
+// pattern appears below `not` (a failed match must not turn into success).
+type claudeSchemaRegexp struct {
+	re       *regexp2.Regexp
+	timedOut *atomic.Bool
+}
+
+func (r *claudeSchemaRegexp) String() string { return r.re.String() }
+func (r *claudeSchemaRegexp) MatchString(s string) bool {
+	matched, err := r.re.MatchString(s)
+	if err != nil {
+		r.timedOut.Store(true)
+		return false
+	}
+	return matched
 }
 
 type noExternalSchemaLoader struct{}
@@ -42,7 +64,10 @@ func prepareClaudeStructuredOutput(req *ClaudeRequest) string {
 		if format != nil {
 			// Normalize the legacy field so effort forwarding, cache identity and
 			// all response paths observe the same structured-output request.
-			req.OutputConfig = &ClaudeOutputConfig{Format: format}
+			if req.OutputConfig == nil {
+				req.OutputConfig = &ClaudeOutputConfig{}
+			}
+			req.OutputConfig.Format = format
 		}
 	}
 	if format == nil {
@@ -62,7 +87,17 @@ func prepareClaudeStructuredOutput(req *ClaudeRequest) string {
 		return "output_config.format.schema must be an object"
 	}
 	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft2020)
 	compiler.UseLoader(noExternalSchemaLoader{})
+	regexTimedOut := &atomic.Bool{}
+	compiler.UseRegexpEngine(func(pattern string) (jsonschema.Regexp, error) {
+		re, err := regexp2.Compile(pattern, regexp2.ECMAScript)
+		if err != nil {
+			return nil, err
+		}
+		re.MatchTimeout = 50 * time.Millisecond
+		return &claudeSchemaRegexp{re: re, timedOut: regexTimedOut}, nil
+	})
 	compiler.AssertFormat()
 	const schemaURL = "https://kiro.invalid/structured-response.json"
 	if err := compiler.AddResource(schemaURL, doc); err != nil {
@@ -70,7 +105,13 @@ func prepareClaudeStructuredOutput(req *ClaudeRequest) string {
 	}
 	schema, err := compiler.Compile(schemaURL)
 	if err != nil {
-		return "output_config.format.schema is invalid or contains unsupported external references"
+		// Return the compiler's diagnostic to the requesting client so an
+		// unsupported dialect, invalid pattern or external ref is distinguishable.
+		detail := err.Error()
+		if len(detail) > 1024 {
+			detail = detail[:1024]
+		}
+		return "output_config.format.schema could not be compiled: " + detail
 	}
 	instruction := "The client requires structured output. When returning a final answer, return exactly one JSON value conforming to the following JSON Schema. Do not add Markdown fences or prose. Tool calls remain available when needed; the schema applies to the final answer text.\nJSON Schema:\n" + string(format.Schema)
 	switch req.System.(type) {
@@ -78,7 +119,7 @@ func prepareClaudeStructuredOutput(req *ClaudeRequest) string {
 	default:
 		return "system must be text or an array of content blocks"
 	}
-	req.structuredOutput = &claudeStructuredOutput{schema: schema, stream: req.Stream, instruction: instruction}
+	req.structuredOutput = &claudeStructuredOutput{schema: schema, stream: req.Stream, instruction: instruction, regexTimedOut: regexTimedOut}
 	return ""
 }
 
@@ -91,6 +132,9 @@ func (format *claudeStructuredOutput) validate(text string, toolCount int, stopR
 	doc, err := jsonschema.UnmarshalJSON(strings.NewReader(text))
 	if err == nil {
 		err = format.schema.Validate(doc)
+	}
+	if format.regexTimedOut != nil && format.regexTimedOut.Load() {
+		return errors.New("structured-output schema pattern validation timed out")
 	}
 	if err != nil {
 		return errors.New("upstream response did not conform to output_config.format.schema")

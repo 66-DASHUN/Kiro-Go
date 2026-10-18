@@ -160,7 +160,7 @@ func TestGenericCacheEveryProtocolUsesEffectiveModelAndKeyPolicy(t *testing.T) {
 						input, output, read, write := localUsageTotals(path, usage)
 						expectedInput := 12
 						if path == "/v1/messages" {
-							expectedInput = estimateApproxTokens("Reply with seven.")
+							expectedInput = estimateApproxTokens("Reply with seven.") + 4
 						}
 						if input != expectedInput || output != 1 || read+write > input || (round == 0 && (write <= 0 || read != 0)) || (round == 1 && (read != coldWrite || write != 0)) {
 							t.Fatalf("round %d: %v", round, usage)

@@ -129,7 +129,7 @@ func TestOutputBudgetThinkingSignaturesToolsAndNativeUsage(t *testing.T) {
 				if mode == "native" {
 					usage := runtimeProtocolUsage(t, rec, stream)
 					input, output, _, _ := localUsageTotals("/v1/messages", usage)
-					if input != estimateApproxTokens("long answer") || output != 99 {
+					if input != estimateApproxTokens("long answer")+4 || output != 99 {
 						t.Fatalf("public usage must use semantic input while preserving output: %v", usage)
 					}
 				}

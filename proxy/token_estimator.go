@@ -5,6 +5,12 @@ import (
 	"math"
 )
 
+// Local protocol framing estimates: a role/boundary pair per message and a
+// pending assistant role/boundary pair. These are counted once, not a usage
+// floor, and are not claimed to be Anthropic's private tokenizer/serialization.
+const claudeMessageFramingTokens = 2
+const claudeGenerationPrefixTokens = 2
+
 func estimateApproxTokens(text string) int {
 	n, err := countLocalTokens(text)
 	if err == nil {
@@ -60,13 +66,13 @@ func estimateClaudeRequestInputTokens(req *ClaudeRequest) int {
 		return 0
 	}
 
-	total := estimateClaudeSystemTokens(req.System)
+	total := estimateClaudeSystemTokens(req.System) + claudeGenerationPrefixTokens
 	if req.structuredOutput != nil {
 		total += estimateApproxTokens(req.structuredOutput.instruction)
 	}
 
 	for _, msg := range req.Messages {
-		total += estimateClaudeValueTokens(msg.Content)
+		total += estimateClaudeValueTokens(msg.Content) + claudeMessageFramingTokens
 	}
 
 	for _, tool := range req.Tools {
