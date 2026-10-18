@@ -655,6 +655,8 @@ func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroT
 				status := "success"
 				if isError, _ := block["is_error"].(bool); isError {
 					status = "error"
+					// Kiro does not reliably expose the status field to the model.
+					resultContent = "[tool_error] " + resultContent
 				}
 				toolResults = append(toolResults, KiroToolResult{
 					ToolUseID: toolUseID,
@@ -1485,7 +1487,7 @@ func narrateToolResults(toolResults []KiroToolResult, names map[string]string) s
 		if strings.TrimSpace(body) == "" {
 			body = "(no output)"
 		}
-		if tr.Status == "error" {
+		if tr.Status == "error" && !strings.HasPrefix(body, "[tool_error]") {
 			body = "[tool_error] " + body
 		}
 		if name := names[tr.ToolUseID]; name != "" {

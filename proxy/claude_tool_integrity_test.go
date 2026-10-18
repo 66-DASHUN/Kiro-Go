@@ -47,6 +47,10 @@ func TestClaudeToolResultStatusSurvivesTranslation(t *testing.T) {
 					if got := ctx.ToolResults[0].Status; got != status.want {
 						t.Fatalf("tool result status = %q, want %q", got, status.want)
 					}
+					body := ctx.ToolResults[0].Content[0].Text
+					if !strings.Contains(body, "RESULT-MARKER") || strings.Contains(body, "[tool_error]") != (status.want == "error") {
+						t.Fatalf("model-visible tool result does not preserve status %q: %q", status.want, body)
+					}
 					return
 				}
 				text := current.Content
@@ -62,6 +66,9 @@ func TestClaudeToolResultStatusSurvivesTranslation(t *testing.T) {
 				}
 				if got := strings.Contains(text, "[tool_error]"); got != (status.want == "error") {
 					t.Fatalf("narration error marker = %t, want status %q: %q", got, status.want, text)
+				}
+				if status.want == "error" && strings.Count(text, "[tool_error]") != 1 {
+					t.Fatalf("error marker duplicated: %q", text)
 				}
 			})
 		}
