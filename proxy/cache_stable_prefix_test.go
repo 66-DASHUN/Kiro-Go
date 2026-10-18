@@ -22,12 +22,13 @@ func TestStablePrefixAppendAlwaysAdmitsAfterMatch(t *testing.T) {
 			policy := totalCachePolicy(reference)
 			got := tracker.ComputeWithSettings("account", next, policy)
 			if got.CacheReadInputTokens != cold.CacheCreationInputTokens {
-				t.Fatalf("reference %.2f seed %d changed old cached share: read=%d previously written=%d", reference, seed, got.CacheReadInputTokens, cold.CacheCreationInputTokens)
+				t.Fatalf("reference %.2f seed %d read=%d, want the full live cached prefix %d", reference, seed, got.CacheReadInputTokens, cold.CacheCreationInputTokens)
 			}
 			if got.CacheCreationInputTokens != 1000 || got.CacheCreation5mInputTokens != 1000 || got.CacheCreation1hInputTokens != 0 || got.limitation != "" {
-				t.Fatalf("matched prefix must admit the entire new tail at reference %.2f, seed %d: %+v", reference, seed, got)
+				t.Fatalf("a live prefix hit should write the new stable tail at reference %.2f, seed %d: %+v", reference, seed, got)
 			}
-			if billedClaudeInputTokens(11000, got)+got.CacheReadInputTokens+got.CacheCreationInputTokens != 11000 {
+			ordinary := billedClaudeInputTokens(11000, got)
+			if ordinary != 0 || ordinary+got.CacheReadInputTokens+got.CacheCreationInputTokens != 11000 {
 				t.Fatal("input is not conserved")
 			}
 		}
@@ -118,7 +119,7 @@ func TestStablePrefixConcurrentCompletionsKeepFirstCommit(t *testing.T) {
 	tracker.UpdateWithSettings("account", profile, firstPolicy, first)
 	tracker.UpdateWithSettings("account", profile, secondPolicy, second)
 	warm := tracker.ComputeWithSettings("account", profile, secondPolicy)
-	if first.CacheCreationInputTokens != 10000 || second.CacheCreationInputTokens != 0 || warm.CacheReadInputTokens != first.CacheCreationInputTokens || warm.CacheCreationInputTokens != 0 {
+	if first.CacheCreationInputTokens != 10000 || second.CacheReadInputTokens != 0 || second.CacheCreationInputTokens != 0 || warm.CacheReadInputTokens != 10000 || warm.CacheCreationInputTokens != 0 || billedClaudeInputTokens(profile.TotalInputTokens, warm) != 0 {
 		t.Fatalf("later completion replaced the committed share: first=%+v second=%+v warm=%+v", first, second, warm)
 	}
 }

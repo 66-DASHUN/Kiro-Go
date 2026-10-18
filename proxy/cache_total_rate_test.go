@@ -117,6 +117,53 @@ func TestTotalCacheDiagnosticsExposeMatchLifecycle(t *testing.T) {
 	}
 }
 
+func TestTotalCacheRatioDoesNotSplitTokensWithinAnAdmittedPrefix(t *testing.T) {
+	const ratio = 0.9
+	model := "claude-sonnet-4.5"
+	var fingerprint [32]byte
+	for i := 1; i < 256; i++ {
+		fingerprint[0] = byte(i)
+		if totalCacheAdmission(totalCacheAdmissionRatio(ratio, model, fingerprint), model, fingerprint) {
+			break
+		}
+	}
+	if !totalCacheAdmission(totalCacheAdmissionRatio(ratio, model, fingerprint), model, fingerprint) {
+		t.Fatal("failed to find an admitted prefix fixture")
+	}
+
+	tracker := newPromptCacheTracker(time.Hour)
+	policy := totalCachePolicy(ratio)
+	first := &promptCacheProfile{
+		Model:            model,
+		TotalInputTokens: 10000,
+		Breakpoints:      []promptCacheBreakpoint{{Fingerprint: fingerprint, CumulativeTokens: 9800, TTL: 5 * time.Minute}},
+	}
+	cold := tracker.ComputeWithSettings("account", first, policy)
+	if cold.CacheReadInputTokens != 0 || cold.CacheCreationInputTokens != 9800 || billedClaudeInputTokens(first.TotalInputTokens, cold) != 200 {
+		t.Fatalf("an admitted cold prefix must be fully created and leave only its actual tail ordinary: %+v", cold)
+	}
+	tracker.UpdateWithSettings("account", first, policy, cold)
+	warm := tracker.ComputeWithSettings("account", first, policy)
+	if warm.CacheReadInputTokens != 9800 || warm.CacheCreationInputTokens != 0 || billedClaudeInputTokens(first.TotalInputTokens, warm) != 200 {
+		t.Fatalf("an admitted warm prefix must be fully read without an artificial ordinary share: %+v", warm)
+	}
+
+	appendedFingerprint := fingerprint
+	appendedFingerprint[1] = 1
+	appended := &promptCacheProfile{
+		Model:            model,
+		TotalInputTokens: 10500,
+		Breakpoints: []promptCacheBreakpoint{
+			{Fingerprint: fingerprint, CumulativeTokens: 9800, TTL: 5 * time.Minute},
+			{Fingerprint: appendedFingerprint, CumulativeTokens: 10300, TTL: 5 * time.Minute},
+		},
+	}
+	appendUsage := tracker.ComputeWithSettings("account", appended, policy)
+	if appendUsage.CacheReadInputTokens != 9800 || appendUsage.CacheCreationInputTokens != 500 || billedClaudeInputTokens(appended.TotalInputTokens, appendUsage) != 200 {
+		t.Fatalf("an appended request must read the matched prefix, write only the new stable tail, and keep the current tail ordinary: %+v", appendUsage)
+	}
+}
+
 func TestTotalCacheConcurrentSnapshotAndNativeShortInput(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := &promptCacheProfile{Model: "claude-haiku-4.5", TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: [32]byte{3}, CumulativeTokens: 10000, TTL: time.Hour}}}
@@ -196,7 +243,7 @@ func TestTotalCacheShortInputExplainedInDiagnostic(t *testing.T) {
 		t.Fatalf("missing short input diagnostic: %+v", tracker.diagnostics)
 	}
 	d := tracker.diagnostics[0]
-	if d.Rule != "prefix-total-v8" || d.Limitation != "" || d.Ordinary+d.Read+d.Write != 3 || d.Write != got.CacheWriteTokens {
+	if d.Rule != "prefix-total-v10" || d.Limitation != "" || d.Ordinary+d.Read+d.Write != 3 || d.Write != got.CacheWriteTokens {
 		t.Fatalf("incorrect short input diagnostic: %+v", d)
 	}
 	if len(tracker.entriesByAccount["account"]) == 0 {
@@ -278,21 +325,21 @@ func TestTotalCacheExactAllocationAndTTL(t *testing.T) {
 	baseProfile := &promptCacheProfile{Model: "claude-sonnet-4.5", TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{CumulativeTokens: 10000, TTL: time.Hour}}}
 	cold := allocateTotalCacheUsage(promptCacheUsage{totalCacheRate: true, totalRatio: .8}, baseProfile, 10000, 0)
 	if cold.CacheCreationInputTokens != 10000 || billedClaudeInputTokens(10000, cold) != 0 {
-		t.Fatalf("accepted cold prefix must be counted as a whole write: %+v", cold)
+		t.Fatalf("an admitted cold prefix should be created in full: %+v", cold)
 	}
 	warm := allocateTotalCacheUsage(promptCacheUsage{totalCacheRate: true, totalRatio: .8, matchedCachedTokens: 10000}, baseProfile, 10000, 10000)
 	if warm.CacheReadInputTokens != 10000 || warm.CacheCreationInputTokens != 0 || billedClaudeInputTokens(10000, warm) != 0 {
-		t.Fatalf("accepted warm prefix must be counted as a whole read: %+v", warm)
+		t.Fatalf("a warm cache must read the saved prefix in full: %+v", warm)
 	}
 	appendedProfile := &promptCacheProfile{Model: baseProfile.Model, TotalInputTokens: 11000, Breakpoints: []promptCacheBreakpoint{{CumulativeTokens: 10000, TTL: time.Hour}, {CumulativeTokens: 11000, TTL: time.Hour}}}
 	appended := allocateTotalCacheUsage(promptCacheUsage{totalCacheRate: true, totalRatio: .8, matchedCachedTokens: 10000}, appendedProfile, 11000, 10000)
 	if appended.CacheReadInputTokens != 10000 || appended.CacheCreationInputTokens != 1000 || billedClaudeInputTokens(11000, appended) != 0 {
-		t.Fatalf("accepted appended prefix must read old content and write only the tail: %+v", appended)
+		t.Fatalf("an appended request must read its prior prefix and write only the new stable tail: %+v", appended)
 	}
 
 	for _, test := range []struct{ total, eligible, matched, saved, read, write, ordinary int }{
-		{10000, 10000, 0, 0, 0, 10000, 0}, {10000, 10000, 10000, 8000, 8000, 0, 2000},
-		{11000, 11000, 10000, 8000, 8000, 1000, 2000}, {10000, 2000, 2000, 1600, 1600, 0, 8400},
+		{10000, 10000, 0, 0, 0, 10000, 0}, {10000, 10000, 10000, 10000, 10000, 0, 0},
+		{11000, 11000, 10000, 10000, 10000, 1000, 0}, {10000, 2000, 2000, 1600, 1600, 0, 8400},
 	} {
 		profile := &promptCacheProfile{Model: "claude-sonnet-4.5", TotalInputTokens: test.total, Breakpoints: []promptCacheBreakpoint{{CumulativeTokens: test.eligible, TTL: time.Hour}}}
 		usage := allocateTotalCacheUsage(promptCacheUsage{totalCacheRate: true, totalRatio: .8, matchedCachedTokens: test.saved}, profile, test.eligible, test.matched)
@@ -313,14 +360,59 @@ func TestTotalCacheExactAllocationAndTTL(t *testing.T) {
 	}
 }
 
+func TestTotalCacheConfiguredRatioLeavesOrdinaryInputColdAndWarm(t *testing.T) {
+	const model = "claude-sonnet-4.5"
+	policy := totalCachePolicy(.95)
+	for _, total := range []int{13, 10000} {
+		t.Run(fmt.Sprintf("tokens=%d", total), func(t *testing.T) {
+			tracker := newPromptCacheTracker(time.Hour)
+			var profile *promptCacheProfile
+			for seed := 1; seed < 256; seed++ {
+				fingerprint := [32]byte{byte(seed), 23}
+				candidate := &promptCacheProfile{
+					Model:            model,
+					TotalInputTokens: total,
+					InputFingerprint: fingerprint,
+					Breakpoints:      []promptCacheBreakpoint{{Fingerprint: fingerprint, CumulativeTokens: total, TTL: 5 * time.Minute}},
+				}
+				admissionRatio := totalCacheAdmissionRatio(policy.Ratio, model, fingerprint)
+				if totalCacheAdmission(admissionRatio, model, fingerprint) {
+					profile = candidate
+					break
+				}
+			}
+			if profile == nil {
+				t.Fatal("failed to find an admitted prefix fixture")
+			}
+
+			cold := tracker.ComputeWithSettings("account", profile, policy)
+			coldOrdinary := billedClaudeInputTokens(total, cold)
+			if cold.CacheCreationInputTokens != total || cold.CacheReadInputTokens != 0 || coldOrdinary != 0 || coldOrdinary+cold.CacheCreationInputTokens != total {
+				t.Fatalf("admitted cold prefix should be created in full: %+v ordinary=%d", cold, coldOrdinary)
+			}
+			if cold.CacheCreation5mInputTokens+cold.CacheCreation1hInputTokens != cold.CacheCreationInputTokens {
+				t.Fatalf("cold cache TTL buckets do not sum to write: %+v", cold)
+			}
+			tracker.UpdateWithSettings("account", profile, policy, cold)
+
+			warm := tracker.ComputeWithSettings("account", profile, policy)
+			warmOrdinary := billedClaudeInputTokens(total, warm)
+			if warm.CacheReadInputTokens != cold.CacheCreationInputTokens || warm.CacheCreationInputTokens != 0 || warmOrdinary != 0 || warmOrdinary+warm.CacheReadInputTokens != total {
+				t.Fatalf("warm request should read the saved prefix in full: %+v ordinary=%d", warm, warmOrdinary)
+			}
+		})
+	}
+}
+
 func TestTotalCacheAdmissionTracksWholePrefixesByConfiguredRatio(t *testing.T) {
 	const samples = 1000
 	accepted := 0
 	for i := 0; i < samples; i++ {
 		var fingerprint [32]byte
 		fingerprint[0], fingerprint[1] = byte(i>>8), byte(i)
-		first := totalCacheAdmission(.8, "claude-sonnet-4.5", fingerprint)
-		if first != totalCacheAdmission(.8, "claude-sonnet-4.5", fingerprint) {
+		ratio := totalCacheAdmissionRatio(.8, "claude-sonnet-4.5", fingerprint)
+		first := totalCacheAdmission(ratio, "claude-sonnet-4.5", fingerprint)
+		if first != totalCacheAdmission(totalCacheAdmissionRatio(.8, "claude-sonnet-4.5", fingerprint), "claude-sonnet-4.5", fingerprint) {
 			t.Fatalf("admission changed for stable fingerprint %d", i)
 		}
 		if first {
@@ -334,6 +426,33 @@ func TestTotalCacheAdmissionTracksWholePrefixesByConfiguredRatio(t *testing.T) {
 	fingerprint[0] = 1
 	if totalCacheAdmission(0, "claude-sonnet-4.5", fingerprint) || !totalCacheAdmission(1, "claude-sonnet-4.5", fingerprint) {
 		t.Fatal("zero and full admission boundaries are incorrect")
+	}
+}
+
+func TestTotalCacheAdmissionRatioHonorsConfiguredUpperCap(t *testing.T) {
+	for _, test := range []struct {
+		ratio float64
+		low   float64
+		high  float64
+	}{
+		{ratio: 0, low: 0, high: 0},
+		{ratio: .01, low: 0, high: .06},
+		{ratio: .8, low: .75, high: .85},
+		{ratio: .95, low: .9, high: .95},
+		{ratio: .99, low: .9, high: .95},
+		{ratio: 1, low: 1, high: 1},
+	} {
+		for i := 0; i < 1000; i++ {
+			var fingerprint [32]byte
+			fingerprint[0], fingerprint[1] = byte(i>>8), byte(i)
+			got := totalCacheAdmissionRatio(test.ratio, "claude-sonnet-4.5", fingerprint)
+			if got < test.low || got > test.high {
+				t.Fatalf("ratio %.2f produced threshold %.5f outside [%.2f, %.2f]", test.ratio, got, test.low, test.high)
+			}
+			if again := totalCacheAdmissionRatio(test.ratio, "claude-sonnet-4.5", fingerprint); again != got {
+				t.Fatalf("ratio threshold changed for stable fingerprint: %.5f != %.5f", got, again)
+			}
+		}
 	}
 }
 
@@ -379,7 +498,7 @@ func TestTotalCacheAdmissionForPrefixIgnoresUncachedSuffix(t *testing.T) {
 	}
 }
 
-func TestTotalCachePositiveRateReadsWhenFloatingWriteThresholdIsZero(t *testing.T) {
+func TestTotalCacheRatioDoesNotTruncateAnExistingCacheHit(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	profile := &promptCacheProfile{
 		Model:            "claude-sonnet-4.5",
@@ -391,24 +510,9 @@ func TestTotalCachePositiveRateReadsWhenFloatingWriteThresholdIsZero(t *testing.
 	tracker.UpdateWithSettings("account", profile, fullPolicy, cold)
 
 	lowPolicy := totalCachePolicy(.01)
-	foundZero := false
-	for seed := uint32(0); seed < 1<<20; seed++ {
-		profile.InputFingerprint = [32]byte{byte(seed), byte(seed >> 8), byte(seed >> 16), byte(seed >> 24)}
-		if variedPrefixReadRatio(lowPolicy.Ratio, profile) == 0 {
-			foundZero = true
-			break
-		}
-	}
-	if !foundZero {
-		t.Fatal("failed to find a positive-rate profile with zero floating threshold")
-	}
-
 	usage := tracker.ComputeWithSettings("account", profile, lowPolicy)
-	if usage.totalRatio != 0 {
-		t.Fatalf("fixture did not produce a zero floating threshold: %+v", usage)
-	}
-	if usage.CacheReadInputTokens != cold.CacheCreationInputTokens || usage.CacheCreationInputTokens != 0 {
-		t.Fatalf("positive configured rate must preserve existing reads when write threshold is zero: cold=%+v usage=%+v", cold, usage)
+	if usage.CacheReadInputTokens != cold.CacheCreationInputTokens || usage.CacheCreationInputTokens != 0 || billedClaudeInputTokens(profile.TotalInputTokens, usage) != 0 {
+		t.Fatalf("configured admission ratio must not truncate an already matching cache entry: cold=%+v usage=%+v", cold, usage)
 	}
 }
 
@@ -449,42 +553,49 @@ func TestTotalCacheRejectedColdPrefixStaysOrdinaryAndUnstored(t *testing.T) {
 func TestTotalCacheMatchedPrefixAdmitsNewTail(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	model := "claude-sonnet-4.5"
-	old := promptCacheBreakpoint{Fingerprint: [32]byte{1}, CumulativeTokens: 10000, TTL: time.Hour}
-	first := &promptCacheProfile{Model: model, TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{old}}
-	cold := tracker.ComputeWithSettings("account", first, totalCachePolicy(1))
-	if cold.CacheCreationInputTokens != 10000 {
-		t.Fatalf("full-admission fixture did not write the whole prefix: %+v", cold)
-	}
-	tracker.UpdateWithSettings("account", first, totalCachePolicy(1), cold)
-
 	policy := totalCachePolicy(.8)
+	var first *promptCacheProfile
 	var next *promptCacheProfile
-	for i := 1; i < 256; i++ {
-		fingerprint := [32]byte{byte(i)}
-		candidate := &promptCacheProfile{
-			Model:            model,
-			TotalInputTokens: 11000,
-			InputFingerprint: [32]byte{byte(i), 1},
-			Breakpoints: []promptCacheBreakpoint{
-				old,
-				{Fingerprint: fingerprint, CumulativeTokens: 11000, TTL: 5 * time.Minute},
-			},
+	for oldSeed := 1; oldSeed < 256 && next == nil; oldSeed++ {
+		oldFingerprint := [32]byte{byte(oldSeed), 1}
+		admission := totalCacheAdmissionRatio(policy.Ratio, model, oldFingerprint)
+		if !totalCacheAdmission(admission, model, oldFingerprint) {
+			continue
 		}
-		if !totalCacheAdmission(totalCacheAdmissionRatio(policy.Ratio, model, fingerprint), model, fingerprint) {
-			next = candidate
+		candidateFirst := &promptCacheProfile{Model: model, TotalInputTokens: 10000, Breakpoints: []promptCacheBreakpoint{{Fingerprint: oldFingerprint, CumulativeTokens: 10000, TTL: time.Hour}}}
+		for newSeed := 1; newSeed < 256; newSeed++ {
+			newFingerprint := [32]byte{byte(newSeed), 2}
+			if newFingerprint == oldFingerprint {
+				continue
+			}
+			first = candidateFirst
+			next = &promptCacheProfile{
+				Model:            model,
+				TotalInputTokens: 11000,
+				Breakpoints: []promptCacheBreakpoint{
+					candidateFirst.Breakpoints[0],
+					{Fingerprint: newFingerprint, CumulativeTokens: 11000, TTL: 5 * time.Minute},
+				},
+			}
 			break
 		}
 	}
-	if next == nil {
-		t.Fatal("failed to find a deterministic rejected tail fixture")
+	if first == nil || next == nil {
+		t.Fatal("failed to find an admitted prefix and distinct appended tail")
 	}
+	cold := tracker.ComputeWithSettings("account", first, policy)
+	if cold.CacheCreationInputTokens != 10000 || billedClaudeInputTokens(10000, cold) != 0 {
+		t.Fatalf("admitted cold prefix should be created in full: %+v", cold)
+	}
+	tracker.UpdateWithSettings("account", first, policy, cold)
 	usage := tracker.ComputeWithSettings("account", next, policy)
-	if usage.CacheReadInputTokens != 10000 || usage.CacheCreationInputTokens != 1000 || usage.limitation != "" || billedClaudeInputTokens(11000, usage) != 0 {
-		t.Fatalf("matched prefix must admit its entire new tail: %+v", usage)
+	if usage.CacheReadInputTokens != 10000 || usage.CacheCreationInputTokens != 1000 || usage.limitation != "" || billedClaudeInputTokens(11000, usage) != 0 || usage.CacheReadInputTokens+usage.CacheCreationInputTokens+billedClaudeInputTokens(11000, usage) != 11000 {
+		t.Fatalf("matched prefix must read the stored prefix and write only the new stable tail: %+v", usage)
 	}
 	tracker.UpdateWithSettings("account", next, policy, usage)
-	if warm := tracker.ComputeWithSettings("account", next, policy); warm.CacheReadInputTokens != 11000 || warm.CacheCreationInputTokens != 0 {
-		t.Fatalf("successful tail write was not reusable: %+v", warm)
+	warm := tracker.ComputeWithSettings("account", next, policy)
+	if warm.CacheReadInputTokens != 11000 || warm.CacheCreationInputTokens != 0 || billedClaudeInputTokens(11000, warm) != 0 {
+		t.Fatalf("successful tail write was not fully reusable: %+v", warm)
 	}
 }
 

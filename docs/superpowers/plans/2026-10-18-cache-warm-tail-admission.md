@@ -1,5 +1,7 @@
 # Warm Cache Tail Admission Implementation Plan
 
+> Historical implementation plan. The current accounting rule is `prefix-total-v10` in `../specs/2026-10-18-cache-prefix-admission-design.md`; v10 uses the configured ratio for stable cold-prefix admission and preserves full-prefix read/write lifecycle accounting.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Admit a newly appended cacheable tail when a live prefix matched, while retaining configured-rate admission for cold prefixes.

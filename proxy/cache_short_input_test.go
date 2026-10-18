@@ -99,15 +99,15 @@ func TestTotalCacheShortInputLifecycle(t *testing.T) {
 
 func TestTotalCacheShortIntegerAllocation(t *testing.T) {
 	for _, tokens := range []int{1, 2, 3, 7, 19, 99} {
-		for _, ratio := range []float64{0, .01, .2, .5, .8, .9, .95} {
+		for _, ratio := range []float64{0, .01, .2, .5, .8, .9, .95, 1} {
 			profile := &promptCacheProfile{Model: "claude-opus-5.5", TotalInputTokens: tokens, Breakpoints: []promptCacheBreakpoint{{CumulativeTokens: tokens, TTL: time.Hour}}}
 			got := allocateTotalCacheUsage(promptCacheUsage{totalCacheRate: true, totalRatio: ratio}, profile, tokens, 0)
-			want := tokens
-			if ratio == 0 {
-				want = 0
+			wantWrite := tokens
+			if ratio <= 0 {
+				wantWrite = 0
 			}
-			if got.CacheCreationInputTokens != want || got.CacheReadInputTokens != 0 || got.CacheCreation1hInputTokens != want || got.CacheCreation5mInputTokens != 0 || billedClaudeInputTokens(tokens, got)+want != tokens {
-				t.Fatalf("tokens=%d ratio=%v: %+v want=%d", tokens, ratio, got, want)
+			if got.CacheCreationInputTokens != wantWrite || got.CacheReadInputTokens != 0 || got.CacheCreation1hInputTokens != wantWrite || got.CacheCreation5mInputTokens != 0 || billedClaudeInputTokens(tokens, got)+wantWrite != tokens {
+				t.Fatalf("short content did not preserve lifecycle allocation; tokens=%d ratio=%v: %+v want write=%d", tokens, ratio, got, wantWrite)
 			}
 		}
 	}

@@ -60,7 +60,7 @@ func estimateClaudeRequestInputTokens(req *ClaudeRequest) int {
 		return 0
 	}
 
-	total := estimateClaudeValueTokens(req.System)
+	total := estimateClaudeSystemTokens(req.System)
 	if req.structuredOutput != nil {
 		total += estimateApproxTokens(req.structuredOutput.instruction)
 	}
@@ -74,6 +74,39 @@ func estimateClaudeRequestInputTokens(req *ClaudeRequest) int {
 	}
 
 	return total
+}
+
+func estimateClaudeSystemTokens(system interface{}) int {
+	switch value := system.(type) {
+	case string:
+		if isAnthropicBillingHeaderBlock(map[string]interface{}{"type": "text", "text": value}) {
+			return 0
+		}
+		return estimateApproxTokens(value)
+	case []string:
+		total := 0
+		for _, block := range value {
+			if isAnthropicBillingHeaderBlock(map[string]interface{}{"type": "text", "text": block}) {
+				continue
+			}
+			total += estimateApproxTokens(block)
+		}
+		return total
+	case []interface{}:
+		total := 0
+		for _, block := range value {
+			if isAnthropicBillingHeaderBlock(block) {
+				continue
+			}
+			total += estimateClaudeValueTokens(block)
+		}
+		return total
+	default:
+		if isAnthropicBillingHeaderBlock(system) {
+			return 0
+		}
+		return estimateClaudeValueTokens(system)
+	}
 }
 
 func estimateClaudeToolTokens(tool ClaudeTool) int {

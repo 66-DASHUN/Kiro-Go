@@ -18,6 +18,7 @@ type AccountPool struct {
 	cooldowns     map[string]time.Time
 	errorCounts   map[string]int
 	modelLists    map[string]map[string]bool
+	persistenceWG sync.WaitGroup
 }
 
 var (
@@ -275,11 +276,21 @@ func (p *AccountPool) recordError(id string, isQuotaError bool, retryAfter time.
 	}
 	p.mu.Unlock()
 
+	p.persistenceWG.Add(1)
 	go func() {
+		defer p.persistenceWG.Done()
 		_ = p.SaveCooldowns()
 	}()
 
 	return count
+}
+
+// WaitForPersistence waits for cooldown saves started before the call to finish.
+// Call it after stopping new request handling, such as during shutdown or test cleanup.
+func (p *AccountPool) WaitForPersistence() {
+	if p != nil {
+		p.persistenceWG.Wait()
+	}
 }
 
 func (p *AccountPool) calculateQuotaCooldown(accountID string) time.Time {

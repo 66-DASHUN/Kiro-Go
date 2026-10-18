@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const totalCacheRuleVersion = "prefix-total-v8"
+const totalCacheRuleVersion = "prefix-total-v10"
 const promptCacheDiagnosticCapacity = 200
 const promptCacheDiagnosticRetention = 24 * time.Hour
 
@@ -51,7 +51,9 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 		return usage
 	}
 	usage.rawCacheable = maxInt(0, minInt(profile.Breakpoints[len(profile.Breakpoints)-1].CumulativeTokens, profile.TotalInputTokens))
-	usage.totalRatio = variedPrefixReadRatio(settings.Ratio, profile)
+	shareProfile := *profile
+	shareProfile.InputFingerprint = profile.Breakpoints[len(profile.Breakpoints)-1].Fingerprint
+	usage.totalRatio = variedPrefixReadRatio(settings.Ratio, &shareProfile)
 	if !settings.Enabled {
 		usage.totalRatio = 0
 		usage.limitation = "disabled"
@@ -106,8 +108,8 @@ func (t *promptCacheTracker) computeTotalCacheUsage(accountID string, profile *p
 			if bp.CumulativeTokens <= usage.rawRead || bp.CumulativeTokens > usage.rawCacheable {
 				continue
 			}
-			usage.totalRatio = totalCacheAdmissionRatio(settings.Ratio, profile.Model, bp.Fingerprint)
-			usage.cacheWriteAdmitted = totalCacheAdmission(usage.totalRatio, profile.Model, bp.Fingerprint)
+			admissionRatio := totalCacheAdmissionRatio(settings.Ratio, profile.Model, bp.Fingerprint)
+			usage.cacheWriteAdmitted = totalCacheAdmission(admissionRatio, profile.Model, bp.Fingerprint)
 			break
 		}
 		if !usage.cacheWriteAdmitted {
@@ -124,14 +126,16 @@ func totalCacheAdmissionRatio(ratio float64, model string, fingerprint [32]byte)
 	if ratio >= 1 {
 		return 1
 	}
-	spread := math.Min(promptCacheRatioVariation, math.Min(ratio, 1-ratio))
+	reference := math.Min(.95, ratio)
+	lower := math.Max(0, reference-promptCacheRatioVariation)
+	upper := math.Min(.95, reference+promptCacheRatioVariation)
 	hasher := sha256.New()
 	hasher.Write(fingerprint[:])
 	writeHashChunk(hasher, model)
 	writeHashChunk(hasher, "prefix-total-admission-ratio-v1")
 	digest := hasher.Sum(nil)
-	unit := float64(binary.BigEndian.Uint16(digest[:2]))/65535*2 - 1
-	return math.Max(0, math.Min(1, ratio+unit*spread))
+	unit := float64(binary.BigEndian.Uint16(digest[:2])) / 65535
+	return lower + (upper-lower)*unit
 }
 
 // A prefix-specific threshold admits whole content prefixes across requests.
@@ -155,7 +159,6 @@ func totalCacheAdmission(ratio float64, model string, fingerprint [32]byte) bool
 	return sample < ratio
 }
 
-// Preserve the committed read share; admission only controls the uncached tail.
 func allocateTotalCacheUsage(usage promptCacheUsage, profile *promptCacheProfile, eligible, matched int) promptCacheUsage {
 	usage.CacheCreationInputTokens = 0
 	usage.CacheReadInputTokens = 0
@@ -186,7 +189,7 @@ func allocateTotalCacheUsage(usage promptCacheUsage, profile *promptCacheProfile
 		usage.limitation = "cache_admission_miss"
 		return usage
 	}
-	usage.CacheCreationInputTokens = eligible - matched
+	usage.CacheCreationInputTokens = maxInt(eligible-matched, 0)
 	raw5m, raw1h := computePromptCacheTTLBreakdownLimited(profile, matched, eligible-matched)
 	usage.CacheCreation5mInputTokens, usage.CacheCreation1hInputTokens = allocateCacheWriteTTL(usage.CacheCreationInputTokens, raw5m, raw1h)
 	usage.limitation = ""

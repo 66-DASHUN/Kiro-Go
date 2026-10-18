@@ -55,6 +55,7 @@ func TestProfileUnavailableFailureDoesNotDisableAccount(t *testing.T) {
 	p.Reload()
 	h := &Handler{pool: p}
 	h.handleAccountFailure(&account, errors.New("no available Kiro profile"))
+	p.WaitForPersistence()
 
 	accounts := config.GetAccounts()
 	if len(accounts) != 1 {

@@ -157,7 +157,8 @@ func TestPrefixClaudeCountsSemanticContentAtBreakpoint(t *testing.T) {
 		t.Fatalf("fingerprint wrappers changed breakpoint: %+v, wanted %d", profile, eligible)
 	}
 	cold := tracker.ComputeWithSettings("account", profile, config.PromptCacheSettings{Enabled: true, Mode: "prefix", Ratio: .95})
-	if cold.CacheCreationInputTokens != eligible || billedClaudeInputTokens(total, cold) != total-eligible {
+	uncachedUserTokens := estimateApproxTokens("current uncached message")
+	if cold.CacheCreationInputTokens != eligible || billedClaudeInputTokens(total, cold) != uncachedUserTokens {
 		t.Fatalf("tail or billing header allocated into cache: %+v", cold)
 	}
 }

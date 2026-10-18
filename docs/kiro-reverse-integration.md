@@ -2,7 +2,7 @@
 
 This fork merges tanu360/kiro-reverse-api at 9290b3565528677085ff75d174f996d120e81a6d with the deployed Kiro-Go ef60b42 history.
 
-The new admin interface, SQLite, Responses endpoint, documents, backups, audit and stream completion fixes come from upstream. This fork retains account ownership by API key, global/per-key prompt cache policy, and independent creation/read ratios. Cache policy values are references for local usage emulation: eligible creation/read portions vary deterministically with request input by up to five percentage points, without a fixed 90 percent cap. Endpoint settings of 0 and 100 percent remain exact. Partial-prefix hits and cold requests can have an overall read rate below that reference. Output tokens remain independent.
+The new admin interface, SQLite, Responses endpoint, documents, backups, audit and stream completion fixes come from upstream. This fork retains account ownership by API key, global/per-key prompt cache policy, and independent creation/read ratios. In `prefix_total` mode, the ratio is the stable admission reference for cold prefixes; deterministic content variation can shift admission by up to five percentage points. An admitted cold prefix is written through its final cache breakpoint, a live hit reads the saved share, and an appended request writes only its new stable tail. The ratio is not a per-request token budget. A 100% setting admits every eligible cold prefix. Other cache modes retain their separate creation/read semantics. Output tokens remain independent.
 
 ## Existing deployments
 
@@ -22,7 +22,7 @@ Cache matching uses cumulative content prefixes and is isolated by account, mode
 
 Chat Completions and Responses profiles include the current message as well as history. Complete repeated requests can reuse the full eligible input. When the current turn changes or history grows, only unchanged earlier prefixes are read and the new tail is counted as creation. Prefix weights are normalized into total input token space, then scaled at completion to native upstream input usage. Current user messages have the same semantic fingerprint shape when moved into history; routing/conversation identifiers are excluded, while tool results, images and documents participate in content matching.
 
-The dispatch snapshot fixes the cache hit/miss decision and effective ratios for the entire request, including concurrent requests. Claude ordinary input plus cache creation plus cache reads equals total input. OpenAI cache details are subsets of inclusive input/prompt totals. Output tokens do not participate in input cache policy. These are in-memory local usage estimates, not upstream cache telemetry; restarting the service clears the simulated cache.
+The dispatch snapshot fixes the cache hit/miss decision and effective admission ratio for the entire request, including concurrent requests. In `prefix_total`, input beyond the final cache breakpoint and any cache-admission miss remain ordinary input. Claude ordinary input plus cache creation plus cache reads equals total input. OpenAI cache details are subsets of inclusive input/prompt totals. Output tokens do not participate in input cache policy. These are in-memory local usage estimates, not upstream cache telemetry; restarting the service clears the simulated cache.
 
 ## Production scope
 
