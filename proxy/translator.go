@@ -652,10 +652,14 @@ func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroT
 				if strings.TrimSpace(resultContent) == "" && len(collectDocuments(block["content"])) > 0 {
 					resultContent = toolResultDocumentPlaceholder
 				}
+				status := "success"
+				if isError, _ := block["is_error"].(bool); isError {
+					status = "error"
+				}
 				toolResults = append(toolResults, KiroToolResult{
 					ToolUseID: toolUseID,
 					Content:   []KiroResultContent{{Text: resultContent}},
-					Status:    "success",
+					Status:    status,
 				})
 			}
 		}
@@ -918,14 +922,34 @@ func cleanSchema(m map[string]interface{}) {
 		}
 	}
 
-	for _, v := range m {
-		switch val := v.(type) {
-		case map[string]interface{}:
-			cleanSchema(val)
-		case []interface{}:
-			for _, item := range val {
-				if sub, ok := item.(map[string]interface{}); ok {
-					cleanSchema(sub)
+	// Only schema-valued keywords contain schemas. Property names may themselves
+	// be keywords, and defaults/examples/enum objects are literal data.
+	for key, value := range m {
+		switch key {
+		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
+			if children, ok := value.(map[string]interface{}); ok {
+				for _, child := range children {
+					if schema, ok := child.(map[string]interface{}); ok {
+						cleanSchema(schema)
+					}
+				}
+			}
+		case "items", "additionalItems", "contains", "not", "if", "then", "else", "propertyNames", "unevaluatedItems", "unevaluatedProperties":
+			if schema, ok := value.(map[string]interface{}); ok {
+				cleanSchema(schema)
+			} else if schemas, ok := value.([]interface{}); ok {
+				for _, child := range schemas {
+					if schema, ok := child.(map[string]interface{}); ok {
+						cleanSchema(schema)
+					}
+				}
+			}
+		case "allOf", "anyOf", "oneOf", "prefixItems":
+			if schemas, ok := value.([]interface{}); ok {
+				for _, child := range schemas {
+					if schema, ok := child.(map[string]interface{}); ok {
+						cleanSchema(schema)
+					}
 				}
 			}
 		}
@@ -1460,6 +1484,9 @@ func narrateToolResults(toolResults []KiroToolResult, names map[string]string) s
 		body := strings.Join(texts, "\n")
 		if strings.TrimSpace(body) == "" {
 			body = "(no output)"
+		}
+		if tr.Status == "error" {
+			body = "[tool_error] " + body
 		}
 		if name := names[tr.ToolUseID]; name != "" {
 			parts = append(parts, fmt.Sprintf("[%s] %s", name, body))
