@@ -1,4 +1,4 @@
-# 前缀准入修复：本地验证
+# 前缀准入修复：本地与线上验收
 
 日期：2026-10-18。规则版本：`prefix-total-v7`。
 
@@ -20,4 +20,14 @@
 
 独立复核发现两项边界并已修复：不同未缓存尾部不再改变同一候选前缀的写入准入；正后台比例下，新写阈值浮动到 0 不再屏蔽旧缓存读取。新增回归测试分别先复现旧行为，再验证修复。
 
-回归覆盖内容准入比例和确定性、冷前缀拒绝后不建条目、尾部拒绝时仍读取旧前缀、重复/追加/过期、模型与账号隔离、原生 Token 校准、TTL、短输入，以及 JSON/SSE 多协议的输入守恒。没有取得 CCTest 的原始请求或响应，因此此报告不能声称 CCTest 已通过；线上服务也未修改或部署，Sub2API 未修改。
+回归覆盖内容准入比例和确定性、冷前缀拒绝后不建条目、尾部拒绝时仍读取旧前缀、重复/追加/过期、模型与账号隔离、原生 Token 校准、TTL、短输入，以及 JSON/SSE 多协议的输入守恒。没有取得 CCTest 的原始请求或响应，因此不能据本地验证声称 CCTest 已通过。
+
+## 线上部署
+
+2026-10-18 已将提交 `6a32a027013747a1f411134be7063dde8c45a5be` 部署到 Kiro，镜像为 `kiro-go:generic-cache-2.1.0-6a32a02`。部署前版本为 `6a7bfb0`。Linux 全量测试、vet、race 和静态构建均通过，部署二进制 SHA-256 为 `f732fb16f35c02acb7bdaf93c4186d5002c757b35a15e2ecae0dd15b0521fe84`。
+
+候选实例的三种 API 协议共完成 6 次短请求，均验证冷写和重复读取；原生 Claude schema、结构化结果、thinking 签名和 `stop_sequence` 检查通过。公网验证确认 12-token 短输入首次全部记为 5m 写入，重复请求全部读取，1h 写入为 0。线上原生 Claude 检查也通过。第一次候选 Responses 流探测未收到终止事件，随后单项诊断及整套候选、公网复测均成功。
+
+切换后 Kiro 健康、SQLite 完整，API Key、绑定、缓存比例、并发限制、端口、挂载及网络配置保持原样；32 个其他容器状态无变化，Sub2API 原有内部 Kiro 别名健康。部署前数据备份位于 `/opt/kiro-go/deployment/cache-prefix-admission-20261018-6a32a02/final-data-backup`；原镜像保留为停止状态的回滚容器 `kiro-generic-cache-rollback-6a32a02`。完整报告在 `/opt/kiro-go/deployment/cache-prefix-admission-20261018-6a32a02/release-report.json`，本机副本位于发布目录。
+
+没有取得 CCTest 原始请求或响应，因此不能据此声称 CCTest 已通过。没有修改 Sub2API。
