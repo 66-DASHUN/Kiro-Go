@@ -105,6 +105,9 @@ func buildWebSearchFollowupPayload(base *KiroPayload, toolUses []KiroToolUse, re
 		return nil
 	}
 	next := *base
+	if base.usageRequest != nil {
+		next.usageRequest = appendHostedUsageRound(base.usageRequest, toolUses, results)
+	}
 	current := base.ConversationState.CurrentMessage.UserInputMessage
 	historyUser := current
 	if current.UserInputMessageContext != nil {
@@ -380,6 +383,9 @@ func callKiroWithHostedSearch(ctx context.Context, account *config.Account, payl
 		roundInputEstimate := initialInputTokens
 		if round > 0 {
 			roundInputEstimate = estimateKiroPayloadInputTokens(next)
+			if next.usageRequest != nil {
+				roundInputEstimate = referenceRequestInputTokens(next.usageRequest)
+			}
 		}
 		cacheSnapshot := beginOpenAICacheUsage(tracker, account.ID, next, roundInputEstimate, settings)
 		var tools []KiroToolUse
@@ -407,13 +413,14 @@ func callKiroWithHostedSearch(ctx context.Context, account *config.Account, payl
 		}
 		text, inlineReasoning := extractThinkingFromContent(roundText.String())
 		reasoning := roundReasoning.String()
-		if thinking && reasoning == "" {
+		if reasoning == "" {
 			reasoning = inlineReasoning
-		} else if !thinking {
-			reasoning = ""
 		}
 		nativeRoundOutput := roundOut
 		roundIn, roundOut = finalizeUsageTokens(roundIn, roundOut, roundInputEstimate, estimateOpenAIOutputTokens(text, reasoning, tools))
+		if settings.Mode == config.PromptCacheModeSub2API {
+			roundIn = roundInputEstimate
+		}
 		totalIn += roundIn
 		totalOut += roundOut
 		// Hold updates until the entire hosted request succeeds. A failed MCP or

@@ -1346,6 +1346,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			payload.HostedSearchTools[name] = true
 		}
 	}
+	payload.usageRequest = openAIUsageRequest(req)
 	return payload
 }
 

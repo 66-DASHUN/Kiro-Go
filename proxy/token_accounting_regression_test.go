@@ -72,7 +72,7 @@ func localUsageJSONRequest(t *testing.T, h *Handler, path string, body map[strin
 	return rec
 }
 
-func TestLocalUsageCountsInjectedThinkingInEveryProtocol(t *testing.T) {
+func TestReferenceUsageExcludesAdapterThinkingPromptInEveryProtocol(t *testing.T) {
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%t", path, stream), func(t *testing.T) {
@@ -87,12 +87,9 @@ func TestLocalUsageCountsInjectedThinkingInEveryProtocol(t *testing.T) {
 				}
 				usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, path, body, nil), stream)
 				input, _, _, _ := localUsageTotals(path, usage)
-				want := estimateApproxTokens("hello") + estimateApproxTokens(ThinkingModePrompt)
-				if path == "/v1/messages" {
-					want += 4
-				}
+				want := meteringTestInput(path, "hello")
 				if input != want {
-					t.Fatalf("injected thinking prompt was omitted: input=%d want=%d", input, want)
+					t.Fatalf("adapter prompt changed request metering: input=%d want=%d", input, want)
 				}
 			})
 		}
@@ -130,10 +127,7 @@ func TestLocalUsageColdWarmCacheWithKeyRatios(t *testing.T) {
 					for call := 0; call < 2; call++ {
 						usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, path, body, &key), stream)
 						input, output, read, write := localUsageTotals(path, usage)
-						expectedInput := 2000
-						if path == "/v1/messages" {
-							expectedInput += 4
-						}
+						expectedInput := meteringTestInput(path, content)
 						if input != expectedInput || output != 1 || read < 0 || write < 0 || read+write > input {
 							t.Fatalf("local input/output/cache total invalid: %v", usage)
 						}
@@ -217,10 +211,7 @@ func TestLocalUsageProtocolsIgnoreContextOccupancy(t *testing.T) {
 					)
 				})
 				content := "Reply with hello."
-				wantInput := estimateApproxTokens(content)
-				if path == "/v1/messages" {
-					wantInput += 4
-				}
+				wantInput := meteringTestInput(path, content)
 				priorWrite := 0
 				for i, answer := range answers {
 					rec := localUsageRequest(t, h, path, stream, content)
@@ -240,65 +231,67 @@ func TestLocalUsageProtocolsIgnoreContextOccupancy(t *testing.T) {
 }
 
 func TestLocalUsageHostedSearchCountsEachRoundAndCachePrefix(t *testing.T) {
-	for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
-		for _, stream := range []bool{false, true} {
-			for _, nativeFirst := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/stream=%t/nativeFirst=%t", path, stream, nativeFirst), func(t *testing.T) {
-					calls, searches := 0, 0
-					firstContent := strings.TrimSpace(strings.Repeat("hello ", 1200))
-					secondContent := ""
-					h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
-						calls++
-						var payload KiroPayload
-						if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	for _, cacheMode := range []string{config.PromptCacheModeUniform, config.PromptCacheModeSub2API} {
+		for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
+			for _, stream := range []bool{false, true} {
+				for _, nativeFirst := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/%s/stream=%t/nativeFirst=%t", cacheMode, path, stream, nativeFirst), func(t *testing.T) {
+						calls, searches := 0, 0
+						firstContent := strings.TrimSpace(strings.Repeat("hello ", 1200))
+						secondContent := ""
+						h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+							calls++
+							var payload KiroPayload
+							if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+								t.Fatal(err)
+							}
+							if calls%2 == 1 {
+								writeFrames(w, awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "search-id", "name": "web_search", "input": `{"query":"test"}`, "stop": true}))
+								if nativeFirst {
+									_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"inputTokens": 1200, "outputTokens": 10}))
+								}
+							} else {
+								secondContent = payload.ConversationState.CurrentMessage.UserInputMessage.Content
+								writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}), meteringFrame(t))
+							}
+						})
+						stubRestTransport(t, func(_ *http.Request) (*http.Response, error) {
+							searches++
+							result := strings.Repeat("new result ", 800) + fmt.Sprint(searches)
+							return jsonResponse(200, `{"results":[{"title":"result","snippet":`+fmt.Sprintf("%q", result)+`}]}`), nil
+						})
+						enabled, mode, ratio := true, cacheMode, 1.0
+						key, err := config.AddApiKey(config.ApiKeyEntry{ID: "hosted-local", Key: "sk-hosted-local", Enabled: true, PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode, PromptCacheEmulationRatio: &ratio})
+						if err != nil {
 							t.Fatal(err)
 						}
-						if calls%2 == 1 {
-							writeFrames(w, awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "search-id", "name": "web_search", "input": `{"query":"test"}`, "stop": true}))
-							if nativeFirst {
-								_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"inputTokens": 1200, "outputTokens": 10}))
-							}
+						if err := config.UpdateSettingsPatch(&enabled, ""); err != nil {
+							t.Fatal(err)
+						}
+						h.pool.Reload()
+						body := map[string]interface{}{"model": "claude-sonnet-4.5", "stream": stream, "store": false, "max_tokens": 256, "tools": []map[string]interface{}{{"type": "web_search"}}}
+						if path == "/v1/responses" {
+							body["input"] = firstContent
 						} else {
-							secondContent = payload.ConversationState.CurrentMessage.UserInputMessage.Content
-							writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}), meteringFrame(t))
+							body["messages"] = []map[string]interface{}{{"role": "user", "content": firstContent}}
+						}
+						for call := 0; call < 2; call++ {
+							usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, path, body, &key), stream)
+							input, output, read, write := localUsageTotals(path, usage)
+							minInput := 2*1200 + estimateApproxTokens(secondContent)
+							minOutput := estimateApproxTokens("hello") + estimateApproxTokens(`{"query":"test"}`)
+							if nativeFirst {
+								minOutput = 11
+							}
+							if input < minInput || output != minOutput {
+								t.Fatalf("hosted rounds lost usage: input=%d want>=%d output=%d want=%d usage=%v", input, minInput, output, minOutput, usage)
+							}
+							if read+write > input || write <= 0 || (call == 1 && read <= 0) {
+								t.Fatalf("changed search results must create new cache, preserve initial prefix read, and bound total: %v", usage)
+							}
 						}
 					})
-					stubRestTransport(t, func(_ *http.Request) (*http.Response, error) {
-						searches++
-						result := strings.Repeat("new result ", 800) + fmt.Sprint(searches)
-						return jsonResponse(200, `{"results":[{"title":"result","snippet":`+fmt.Sprintf("%q", result)+`}]}`), nil
-					})
-					enabled, mode, ratio := true, config.PromptCacheModeUniform, 1.0
-					key, err := config.AddApiKey(config.ApiKeyEntry{ID: "hosted-local", Key: "sk-hosted-local", Enabled: true, PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode, PromptCacheEmulationRatio: &ratio})
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := config.UpdateSettingsPatch(&enabled, ""); err != nil {
-						t.Fatal(err)
-					}
-					h.pool.Reload()
-					body := map[string]interface{}{"model": "claude-sonnet-4.5", "stream": stream, "store": false, "max_tokens": 256, "tools": []map[string]interface{}{{"type": "web_search"}}}
-					if path == "/v1/responses" {
-						body["input"] = firstContent
-					} else {
-						body["messages"] = []map[string]interface{}{{"role": "user", "content": firstContent}}
-					}
-					for call := 0; call < 2; call++ {
-						usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, path, body, &key), stream)
-						input, output, read, write := localUsageTotals(path, usage)
-						minInput := 2*1200 + estimateApproxTokens(secondContent)
-						minOutput := estimateApproxTokens("hello") + estimateApproxTokens("web_search") + estimateApproxTokens(`{"query":"test"}`)
-						if nativeFirst {
-							minOutput = 11
-						}
-						if input < minInput || output != minOutput {
-							t.Fatalf("hosted rounds lost usage: input=%d want>=%d output=%d want=%d usage=%v", input, minInput, output, minOutput, usage)
-						}
-						if read+write > input || write <= 0 || (call == 1 && read <= 0) {
-							t.Fatalf("changed search results must create new cache, preserve initial prefix read, and bound total: %v", usage)
-						}
-					}
-				})
+				}
 			}
 		}
 	}
@@ -317,7 +310,7 @@ func TestLocalUsageToolOutputCountedOnce(t *testing.T) {
 					})
 					usage := runtimeProtocolUsage(t, localUsageRequest(t, h, path, stream, "Read the file."), stream)
 					_, output, _, _ := localUsageTotals(path, usage)
-					want := estimateApproxTokens(text) + estimateApproxTokens("read_file") + estimateApproxTokens(`{"path":"a.go"}`)
+					want := estimateApproxTokens(text + `{"path":"a.go"}`)
 					if output != want {
 						t.Fatalf("tool output duplicated: output=%d want=%d usage=%v", output, want, usage)
 					}
@@ -341,7 +334,7 @@ func TestLocalUsageHostedAndClientToolsCountVisibleResultText(t *testing.T) {
 						}
 						for _, tool := range payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools {
 							name := tool.ToolSpecification.Name
-							toolTokens += estimateApproxTokens(name) + estimateApproxTokens(`{"query":"test"}`)
+							toolTokens += estimateApproxTokens(`{"query":"test"}`)
 							_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": name, "name": name, "input": `{"query":"test"}`, "stop": true}))
 						}
 						if native {

@@ -836,11 +836,10 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
+	actualModel, _ := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
-	effectiveReq := cloneClaudeRequestForThinking(&req, h.claudeNeedsThinkingPrompt(&req, thinking))
 
-	estimatedTokens := estimateClaudeRequestInputTokens(effectiveReq)
+	estimatedTokens := estimateClaudeRequestInputTokens(&req)
 	if estimatedTokens < 1 {
 		estimatedTokens = 1
 	}
@@ -902,7 +901,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	if req.structuredOutput != nil {
 		thinkingResponseOpts.Format = "thinking"
 	}
-	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
+	estimatedInputTokens := estimateClaudeRequestInputTokens(&req)
 	cacheProfile := h.promptCache.BuildClaudeProfileWithSettings(effectiveReq, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyID))
 	apiKeyReservation, err := reserveApiKeyUsage(apiKeyID, apiKeyValue, tokenBudget(estimatedInputTokens))
 	if err != nil {
@@ -1403,7 +1402,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 
 			outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
 			thinkingOutput := rawThinkingBuilder.String()
-			if thinking && thinkingOutput == "" && extractedReasoning != "" {
+			if thinkingOutput == "" && extractedReasoning != "" {
 				thinkingOutput = extractedReasoning
 			}
 			// Native reasoning can arrive even when the caller did not request its
@@ -1425,7 +1424,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				diagnostic.NativeOutputTokens = nativeOutputTokens
 				diagnostic.ReportedInputTokens = inputTokens
 				diagnostic.ReportedOutputTokens = outputTokens
-				diagnostic.InputTokenSource = usageTokenSource(nativeInputTokens)
+				diagnostic.InputTokenSource = "sub2api_reference"
 				diagnostic.OutputTokenSource = usageTokenSource(nativeOutputTokens)
 				diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 				diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
@@ -1646,7 +1645,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 				finalContent = normalizeClaudeStructuredJSONText(finalContent)
 			}
 			rawThinkingContent := thinkingContent
-			if thinking && rawThinkingContent == "" && extractedReasoning != "" {
+			if rawThinkingContent == "" && extractedReasoning != "" {
 				rawThinkingContent = extractedReasoning
 			}
 			usageThinkingContent := rawThinkingContent
@@ -1667,7 +1666,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 				diagnostic.NativeOutputTokens = nativeOutputTokens
 				diagnostic.ReportedInputTokens = inputTokens
 				diagnostic.ReportedOutputTokens = outputTokens
-				diagnostic.InputTokenSource = usageTokenSource(nativeInputTokens)
+				diagnostic.InputTokenSource = "sub2api_reference"
 				diagnostic.OutputTokenSource = usageTokenSource(nativeOutputTokens)
 				diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 				diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
@@ -1794,9 +1793,6 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	req.Model = actualModel
 	thinking = resolveThinkingWithEffort(thinking, req.ReasoningEffort)
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
-	if thinking {
-		estimatedInputTokens += estimateApproxTokens(ThinkingModePrompt)
-	}
 	apiKeyReservation, err := reserveApiKeyUsage(apiKeyID, apiKeyValue, tokenBudget(estimatedInputTokens))
 	if err != nil {
 		recordFinalRequestWithAPIKey(r.Context(), apiKeyID, apiKeyValue, nil, req.Model, 0, 0, 0, false, http.StatusTooManyRequests, err.Error())
@@ -2182,6 +2178,10 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 			}
 
 			outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
+			meteredReasoning := rawReasoningBuilder.String()
+			if meteredReasoning == "" {
+				meteredReasoning = extractedReasoning
+			}
 			reasoningOutput := rawReasoningBuilder.String()
 			if thinking && reasoningOutput == "" && extractedReasoning != "" {
 				reasoningOutput = extractedReasoning
@@ -2189,12 +2189,17 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 			if !thinking {
 				reasoningOutput = ""
 			}
-			estimatedOutputTokens := estimateApproxTokens(outputContent) + estimateApproxTokens(reasoningOutput)
+			var usageTools []KiroToolUse
 			for _, tc := range toolCalls {
-				estimatedOutputTokens += estimateApproxTokens(tc.Function.Name)
-				estimatedOutputTokens += estimateApproxTokens(tc.Function.Arguments)
+				var input map[string]interface{}
+				_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
+				usageTools = append(usageTools, KiroToolUse{Name: tc.Function.Name, Input: input})
 			}
+			estimatedOutputTokens := estimateOpenAIOutputTokens(outputContent, meteredReasoning, usageTools)
 			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			if len(payload.HostedSearchTools) == 0 && config.EffectivePromptCacheSettings(apiKeyIDFromContext(r.Context())).Mode == config.PromptCacheModeSub2API {
+				inputTokens = estimatedInputTokens
+			}
 			cacheDetails := hostedCache
 			if len(payload.HostedSearchTools) == 0 {
 				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)
@@ -2319,14 +2324,21 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, r *http.Request, 
 			}
 
 			finalContent, extractedReasoning := extractThinkingFromContent(content)
+			meteredReasoning := reasoningContent
+			if meteredReasoning == "" {
+				meteredReasoning = extractedReasoning
+			}
 			if thinking && reasoningContent == "" && extractedReasoning != "" {
 				reasoningContent = extractedReasoning
 			} else if !thinking {
 				reasoningContent = ""
 			}
 
-			estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+			estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, meteredReasoning, toolUses)
 			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			if len(payload.HostedSearchTools) == 0 && config.EffectivePromptCacheSettings(apiKeyIDFromContext(r.Context())).Mode == config.PromptCacheModeSub2API {
+				inputTokens = estimatedInputTokens
+			}
 			cacheDetails := hostedCache
 			if len(payload.HostedSearchTools) == 0 {
 				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)

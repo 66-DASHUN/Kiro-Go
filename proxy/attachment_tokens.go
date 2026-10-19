@@ -23,7 +23,7 @@ import (
 
 const (
 	maxAttachmentEstimateBytes = 32 << 20
-	unknownImageInputTokens    = 1536
+	unknownImageInputTokens    = 1600
 	unknownDocumentInputTokens = 1024
 	pdfPageInputTokens         = 2300
 )
@@ -115,7 +115,7 @@ func estimateImageInputTokens(img *KiroImage) int {
 	// edge and <=1.15 megapixels; approximately one token per 750 pixels.
 	width, height := float64(w), float64(h)
 	scale := math.Min(1, math.Min(1568/math.Max(width, height), math.Sqrt(1150000/(width*height))))
-	return max(1, int(math.Ceil(width*height*scale*scale/750)))
+	return max(1, int(math.Ceil(math.Floor(width*scale)*math.Floor(height*scale)/750)))
 }
 
 // Read dimensions only, without decompressing potentially large WebP pixels.

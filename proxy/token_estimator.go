@@ -2,22 +2,18 @@ package proxy
 
 import (
 	"encoding/json"
+	"kiro-proxy/internal/anthropictokenizer"
 	"math"
+	"strings"
 )
 
-// Local protocol framing estimates: a role/boundary pair per message and a
-// pending assistant role/boundary pair. These are counted once, not a usage
-// floor, and are not claimed to be Anthropic's private tokenizer/serialization.
+// Legacy cache boundary weights. Public request metering now uses the
+// reference serialized-message accounting in sub2api_metering.go.
 const claudeMessageFramingTokens = 2
 const claudeGenerationPrefixTokens = 2
 
 func estimateApproxTokens(text string) int {
-	n, err := countLocalTokens(text)
-	if err == nil {
-		return n
-	}
-	// A counting failure must not drop content from the usage estimate.
-	return estimateCharacterTokens(text)
+	return anthropictokenizer.CountTokens(text)
 }
 
 func estimateCharacterTokens(text string) int {
@@ -66,20 +62,7 @@ func estimateClaudeRequestInputTokens(req *ClaudeRequest) int {
 		return 0
 	}
 
-	total := estimateClaudeSystemTokens(req.System) + claudeGenerationPrefixTokens
-	if req.structuredOutput != nil {
-		total += estimateApproxTokens(req.structuredOutput.instruction)
-	}
-
-	for _, msg := range req.Messages {
-		total += estimateClaudeValueTokens(msg.Content) + claudeMessageFramingTokens
-	}
-
-	for _, tool := range req.Tools {
-		total += estimateClaudeToolTokens(tool)
-	}
-
-	return total
+	return referenceRequestInputTokens(req)
 }
 
 func estimateClaudeSystemTokens(system interface{}) int {
@@ -120,15 +103,17 @@ func estimateClaudeToolTokens(tool ClaudeTool) int {
 }
 
 func estimateClaudeOutputTokens(content, thinkingContent string, toolUses []KiroToolUse) int {
-	total := estimateApproxTokens(content)
-	total += estimateApproxTokens(thinkingContent)
-
+	// Sub2API estimates a complete output buffer, not each transport fragment.
+	// Tool names and transport/signature fields are not argument content.
+	var output strings.Builder
+	output.WriteString(thinkingContent)
+	output.WriteString(content)
 	for _, tu := range toolUses {
-		total += estimateApproxTokens(tu.Name)
-		total += estimateJSONTokens(tu.Input)
+		if raw, err := json.Marshal(tu.Input); err == nil {
+			output.Write(raw)
+		}
 	}
-
-	return total
+	return estimateApproxTokens(output.String())
 }
 
 func estimateClaudeValueTokens(v interface{}) int {
@@ -218,24 +203,7 @@ func estimateOpenAIRequestInputTokens(req *OpenAIRequest) int {
 		return 0
 	}
 
-	total := 0
-
-	for _, msg := range req.Messages {
-		total += estimateOpenAIContentTokens(msg.Content)
-		total += estimateApproxTokens(msg.ToolCallID)
-		for _, tc := range msg.ToolCalls {
-			total += estimateApproxTokens(tc.Function.Name)
-			total += estimateApproxTokens(tc.Function.Arguments)
-		}
-	}
-
-	for _, tool := range req.Tools {
-		total += estimateApproxTokens(tool.Function.Name)
-		total += estimateApproxTokens(tool.Function.Description)
-		total += estimateJSONTokens(tool.Function.Parameters)
-	}
-
-	return total
+	return referenceRequestInputTokens(openAIUsageRequest(req))
 }
 
 func estimateOpenAIContentTokens(content interface{}) int {

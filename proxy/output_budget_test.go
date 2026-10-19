@@ -72,7 +72,7 @@ func TestOutputBudgetChunkIndependence(t *testing.T) {
 				cb.OnText(string(runes[start:min(start+chunkRunes, len(runes))]), false)
 			}
 			cb.flushOutput()
-			if !utf8.ValidString(got.String()) || estimateApproxTokens(got.String()) > 1000 {
+			if !utf8.ValidString(got.String()) || estimateBudgetTokens(got.String()) > 1000 {
 				t.Fatalf("invalid or over-budget Unicode output: %q", got.String())
 			}
 			if chunkRunes == 1 {
@@ -129,7 +129,7 @@ func TestOutputBudgetThinkingSignaturesToolsAndNativeUsage(t *testing.T) {
 				if mode == "native" {
 					usage := runtimeProtocolUsage(t, rec, stream)
 					input, output, _, _ := localUsageTotals("/v1/messages", usage)
-					if input != estimateApproxTokens("long answer")+4 || output != 99 {
+					if input != estimateClaudeRequestInputTokens(&ClaudeRequest{Messages: []ClaudeMessage{{Role: "user", Content: "long answer"}}}) || output != 99 {
 						t.Fatalf("public usage must use semantic input while preserving output: %v", usage)
 					}
 				}
@@ -151,7 +151,7 @@ func TestOutputBudgetSharedAcrossSearchRounds(t *testing.T) {
 					}
 				})
 				stub := stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
-				toolCost := estimateApproxTokens("web_search") + estimateApproxTokens(`{"query":"test"}`)
+				toolCost := estimateBudgetTokens("web_search") + estimateBudgetTokens(`{"query":"test"}`)
 				body := map[string]interface{}{"model": "claude-sonnet-4.5", "max_tokens": toolCost + 4, "max_output_tokens": toolCost + 4, "stream": stream, "messages": []map[string]interface{}{{"role": "user", "content": "find current information"}}, "tools": []map[string]interface{}{{"type": "web_search_20250305", "name": "web_search"}}}
 				if path != "/v1/messages" {
 					body["tools"] = []map[string]interface{}{{"type": "web_search_preview"}}
@@ -232,7 +232,7 @@ func TestOutputBudgetStopsSearchBeforePaidFollowup(t *testing.T) {
 				writeFrames(w, webSearchToolUseFrame(t, "s1", "test"), meteringFrame(t))
 			})
 			stub := stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
-			cost := estimateApproxTokens("web_search") + estimateApproxTokens(`{"query":"test"}`)
+			cost := estimateBudgetTokens("web_search") + estimateBudgetTokens(`{"query":"test"}`)
 			body := map[string]interface{}{"model": "claude-sonnet-4.5", "max_tokens": cost, "max_output_tokens": cost, "messages": []map[string]interface{}{{"role": "user", "content": "current information"}}, "tools": []map[string]interface{}{{"type": "web_search_20250305", "name": "web_search"}}}
 			if path != "/v1/messages" {
 				body["tools"] = []map[string]interface{}{{"type": "web_search_preview"}}
@@ -273,7 +273,7 @@ func TestOutputBudgetRestoresDiscardedSearchAttempt(t *testing.T) {
 	})
 	rec := postClaudeMessages(t, h, `{"model":"claude-sonnet-4.5","max_tokens":12,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"current information"}]}`)
 	text, _, _, stop, _ := outputBudgetClaudeContent(t, rec.Body.String(), false)
-	if calls.Load() != 2 || estimateApproxTokens(text) != 12 || strings.Contains(text, "discarded") || stop != "max_tokens" {
+	if calls.Load() != 2 || estimateBudgetTokens(text) != 12 || strings.Contains(text, "discarded") || stop != "max_tokens" {
 		t.Fatalf("discarded attempt consumed returned budget: calls=%d %s", calls.Load(), rec.Body.String())
 	}
 }
@@ -288,7 +288,7 @@ func TestOutputBudgetCompletesBeforeFollowingUpstreamException(t *testing.T) {
 			})
 			rec := localUsageJSONRequest(t, h, "/v1/messages", map[string]interface{}{"model": "claude-sonnet-4.5", "max_tokens": 8, "stream": stream, "messages": []map[string]interface{}{{"role": "user", "content": "long answer"}}}, nil)
 			text, _, _, stop, _ := outputBudgetClaudeContent(t, rec.Body.String(), stream)
-			if calls.Load() != 1 || estimateApproxTokens(text) > 8 || stop != "max_tokens" {
+			if calls.Load() != 1 || estimateBudgetTokens(text) > 8 || stop != "max_tokens" {
 				t.Fatalf("post-limit exception broke local completion: %s", rec.Body.String())
 			}
 		})

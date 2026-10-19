@@ -206,7 +206,7 @@ func TestAttachmentWebPDimensionsAndFallback(t *testing.T) {
 	}
 	for _, value := range []string{"!invalid!", base64.StdEncoding.EncodeToString([]byte("not an image"))} {
 		img.Source.Bytes = value
-		if got := estimateImageInputTokens(img); got != 1536 {
+		if got := estimateImageInputTokens(img); got != 1600 {
 			t.Errorf("unreadable image fallback=%d", got)
 		}
 	}

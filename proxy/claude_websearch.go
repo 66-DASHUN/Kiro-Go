@@ -399,7 +399,6 @@ func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Req
 	outputTokens := estimateWebSearchContentTokens(content)
 	stopReason := "end_turn"
 	if budget != nil {
-		outputTokens = budget.used
 		if budget.stopped {
 			stopReason = "max_tokens"
 		}
@@ -451,7 +450,7 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 	//! Every search round spends budget, so at most maxUses+2 upstream calls run before the final answer.
 	for roundIdx := 0; ; roundIdx++ {
 		if roundIdx > 0 {
-			estimatedInputTokens = estimateClaudeRequestInputTokens(cloneClaudeRequestForThinking(&working, h.claudeNeedsThinkingPrompt(&working, thinking)))
+			estimatedInputTokens = estimateClaudeRequestInputTokens(&working)
 		}
 
 		round, account, err := h.callClaudeRoundWithFailover(ctx, &working, thinking, estimatedInputTokens, apiKeyReservation.apiKeyID())
@@ -574,7 +573,7 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 			diagnostic.ReportedOutputTokens = outputTokens
 			diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 			diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
-			diagnostic.EstimatedReturnedOutputTokens = estimateWebSearchContentTokens(content)
+			diagnostic.EstimatedReturnedOutputTokens = estimateReturnedClaudeBlocks(content)
 			visibleReasoningTokens := 0
 			if thinking && !thinkingOpts.OmitDisplay {
 				visibleReasoningTokens = estimateApproxTokens(round.thinking)
@@ -696,9 +695,7 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 	usageReasoning := reasoning
 	if reasoning == "" {
 		reasoning = extracted
-		if thinking {
-			usageReasoning = extracted
-		}
+		usageReasoning = extracted
 	}
 	if !thinking {
 		reasoning = ""
@@ -716,7 +713,7 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 		if !thinking {
 			diagnostic.SuppressedReasoningTokens += estimateApproxTokens(usageReasoning)
 		}
-		diagnostic.InputTokenSource = usageTokenSource(diagnostic.NativeInputTokens)
+		diagnostic.InputTokenSource = "sub2api_reference"
 		diagnostic.OutputTokenSource = usageTokenSource(diagnostic.NativeOutputTokens)
 		diagnostic.ForwardedMaxOutputTokens = 0
 		if payload.InferenceConfig != nil {
@@ -773,27 +770,17 @@ func appendWebSearchRound(req *ClaudeRequest, round *claudeWebSearchRound, toolU
 	)
 }
 
+// The reference's direct search adapter estimates its rendered summary by
+// UTF-8 bytes / 4; server tool wrappers/results are not model generation.
 func estimateWebSearchContentTokens(content []map[string]interface{}) int {
-	total := 0
+	bytes := 0
 	for _, block := range content {
-		switch block["type"] {
-		case "text":
+		if block["type"] == "text" {
 			text, _ := block["text"].(string)
-			total += estimateApproxTokens(text)
-		case "thinking":
-			text, _ := block["thinking"].(string)
-			total += estimateApproxTokens(text)
-		case "tool_use", "server_tool_use":
-			name, _ := block["name"].(string)
-			total += estimateApproxTokens(name) + estimateJSONTokens(block["input"])
-		case "web_search_tool_result":
-			total += estimateJSONTokens(block["content"])
+			bytes += len(text)
 		}
 	}
-	if total < 1 {
-		return 1
-	}
-	return total
+	return bytes / 4
 }
 
 func webSearchUsage(inputTokens, outputTokens, searches int, cacheUsage promptCacheUsage, includeCache bool) map[string]interface{} {
@@ -917,4 +904,23 @@ func chunkByRunes(s string, size int) []string {
 		chunks = append(chunks, string(runes[i:end]))
 	}
 	return chunks
+}
+
+func estimateReturnedClaudeBlocks(blocks []map[string]interface{}) int {
+	var text, reasoning strings.Builder
+	var tools []KiroToolUse
+	for _, b := range blocks {
+		switch b["type"] {
+		case "text":
+			s, _ := b["text"].(string)
+			text.WriteString(s)
+		case "thinking":
+			s, _ := b["thinking"].(string)
+			reasoning.WriteString(s)
+		case "tool_use":
+			input, _ := b["input"].(map[string]interface{})
+			tools = append(tools, KiroToolUse{Input: input})
+		}
+	}
+	return estimateClaudeOutputTokens(text.String(), reasoning.String(), tools)
 }

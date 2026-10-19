@@ -19,12 +19,12 @@ func TestPromptCacheConfiguredRatioFluctuatesByInput(t *testing.T) {
 		req := &ClaudeRequest{Model: "claude-sonnet-4.5", Messages: []ClaudeMessage{{Role: "user", Content: strings.Repeat("Stable reference record. ", 900) + fmt.Sprint(i)}}}
 		profile := tracker.BuildClaudeProfile(req, 10000)
 		cold := tracker.ComputeWithSettings("account", profile, policy)
-		if cold.CacheReadInputTokens != 0 || cold.CacheCreationInputTokens < 7500 || cold.CacheCreationInputTokens > 8500 {
+		if cold.CacheReadInputTokens != 0 || cold.CacheCreationInputTokens < int(float64(profile.Breakpoints[len(profile.Breakpoints)-1].CumulativeTokens)*.75) || cold.CacheCreationInputTokens > 8500 {
 			t.Fatalf("cold request %d: %+v", i, cold)
 		}
 		tracker.Update("account", profile)
 		warm := tracker.ComputeWithSettings("account", profile, policy)
-		if warm.CacheCreationInputTokens != 0 || warm.CacheReadInputTokens < 7500 || warm.CacheReadInputTokens > 8500 {
+		if warm.CacheCreationInputTokens != 0 || warm.CacheReadInputTokens < int(float64(profile.Breakpoints[len(profile.Breakpoints)-1].CumulativeTokens)*.75) || warm.CacheReadInputTokens > 8500 {
 			t.Fatalf("warm request %d: %+v", i, warm)
 		}
 		if repeat := tracker.ComputeWithSettings("account", profile, policy); repeat != warm {

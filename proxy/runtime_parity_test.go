@@ -55,7 +55,7 @@ func TestRuntimeClaudeDefaultCacheProfileWithoutMarkers(t *testing.T) {
 	if profile == nil {
 		t.Fatal("default profile missing")
 	}
-	if profile.Breakpoints[len(profile.Breakpoints)-1].CumulativeTokens != total-2 {
+	if profile.Breakpoints[len(profile.Breakpoints)-1].CumulativeTokens != estimateApproxTokens(req.Messages[0].Content.(string))+2 {
 		t.Fatalf("profile=%+v", profile)
 	}
 }
@@ -356,8 +356,8 @@ func TestClaudeUsageDoesNotExposeKiroContextAsPublicInput(t *testing.T) {
 				"messages": []map[string]interface{}{{"role": "user", "content": "hello"}},
 			}
 			usage := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, "/v1/messages", body, nil), stream)
-			if got := int(usage["input_tokens"].(float64)); got != estimateApproxTokens("hello")+4 {
-				t.Fatalf("public input=%d, want semantic input=%d; usage=%v", got, estimateApproxTokens("hello")+4, usage)
+			if got := int(usage["input_tokens"].(float64)); got != meteringTestInput("/v1/messages", "hello") {
+				t.Fatalf("public input=%d, want semantic input=%d; usage=%v", got, meteringTestInput("/v1/messages", "hello"), usage)
 			}
 		})
 	}
@@ -384,7 +384,7 @@ func TestRuntimeEveryProtocolPreservesNativeCountersAndEffectiveCachePolicy(t *t
 						}
 						usage := runtimeProtocolUsage(t, rec, stream)
 						if path == "/v1/messages" {
-							expectedInput := float64(estimateApproxTokens(strings.Repeat("stable prefix ", 1500)) + 4)
+							expectedInput := float64(meteringTestInput(path, strings.Repeat("stable prefix ", 1500)))
 							creation, _ := usage["cache_creation_input_tokens"].(float64)
 							cached, _ := usage["cache_read_input_tokens"].(float64)
 							if usage["input_tokens"].(float64)+creation+cached != expectedInput || usage["output_tokens"] != float64(10) {
@@ -628,7 +628,7 @@ func TestRuntimeConcurrentColdRequestsKeepDispatchCacheMiss(t *testing.T) {
 				}
 				expectedInput := float64(10000)
 				if path == "/v1/messages" {
-					expectedInput = float64(estimateApproxTokens(strings.Repeat("stable prefix ", 1500)) + 4)
+					expectedInput = float64(meteringTestInput(path, strings.Repeat("stable prefix ", 1500)))
 				}
 				if creation < expectedInput*.2 || creation > expectedInput*.3 || cached != float64(0) {
 					t.Fatalf("request %d changed dispatch miss after concurrent completion: %v", i, usage)
@@ -654,6 +654,10 @@ func TestRuntimeNativeWebSearchLoopUsesEffectiveCachePolicy(t *testing.T) {
 		Tools:    []ClaudeTool{{Type: "web_search_20250305", Name: "web_search"}},
 	}
 	expectedInput := estimateClaudeRequestInputTokens(semanticReq)
+	profile := h.promptCache.BuildClaudeProfileWithSettings(semanticReq, expectedInput, config.EffectivePromptCacheSettings(key.ID))
+	eligible := profile.Breakpoints[len(profile.Breakpoints)-1].CumulativeTokens
+	expectedCreation := float64(int(float64(eligible) * variedPromptCacheRatio(create, profile)))
+	expectedRead := float64(int(float64(eligible) * variedPromptCacheRatio(read, profile)))
 	for i := 0; i < 2; i++ {
 		body, _ := json.Marshal(map[string]interface{}{"model": "claude-sonnet-4.5", "max_tokens": 64, "messages": []map[string]string{{"role": "user", "content": strings.Repeat("stable prompt ", 1500)}}, "tools": []map[string]string{{"name": "web_search", "type": "web_search_20250305"}}})
 		rec := httptest.NewRecorder()
@@ -665,7 +669,7 @@ func TestRuntimeNativeWebSearchLoopUsesEffectiveCachePolicy(t *testing.T) {
 		usage := runtimeProtocolUsage(t, rec, false)
 		creation, _ := usage["cache_creation_input_tokens"].(float64)
 		cached, _ := usage["cache_read_input_tokens"].(float64)
-		if (i == 0 && (creation < float64(expectedInput)*.2 || creation > float64(expectedInput)*.3 || cached != 0)) || (i == 1 && (cached < float64(expectedInput)*.45 || cached > float64(expectedInput)*.55 || creation != 0)) || usage["input_tokens"].(float64)+creation+cached != float64(expectedInput) {
+		if (i == 0 && (creation != expectedCreation || cached != 0)) || (i == 1 && (cached != expectedRead || creation != 0)) || usage["input_tokens"].(float64)+creation+cached != float64(expectedInput) {
 			t.Fatalf("round %d usage=%v", i, usage)
 		}
 	}

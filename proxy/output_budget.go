@@ -9,8 +9,7 @@ import (
 type outputBudgetContextKey struct{}
 
 // outputBudget limits semantic output, independently of provider billing.
-// The provider's tokenizer is unavailable; use the same local approximation as
-// usage estimation. Signatures, thinking tags and protocol envelopes cost zero.
+// Keep the existing bounded codec independent of billable usage estimation. Signatures, thinking tags and protocol envelopes cost zero.
 type outputBudget struct {
 	limit, used int
 	stopped     bool
@@ -43,7 +42,7 @@ func (b *outputBudget) consume(text string, thinking bool) string {
 	}
 	c := &b.channels[idx]
 	remaining := b.limit - b.used
-	count := func(s string) int { return estimateApproxTokens(c.tail+s) - c.tokens }
+	count := func(s string) int { return estimateBudgetTokens(c.tail+s) - c.tokens }
 	accepted := text
 	if count(text) > remaining {
 		// Token counts need not be monotone at BPE boundaries. Examine every
@@ -60,7 +59,7 @@ func (b *outputBudget) consume(text string, thinking bool) string {
 		b.stopped = true
 		b.truncated = true
 	}
-	newTokens := estimateApproxTokens(c.tail + accepted)
+	newTokens := estimateBudgetTokens(c.tail + accepted)
 	b.used += newTokens - c.tokens
 	c.tail += accepted
 	c.tokens = newTokens
@@ -68,7 +67,7 @@ func (b *outputBudget) consume(text string, thinking bool) string {
 	// chunk exists, earlier chunks can never change as more text arrives.
 	for len(c.tail) > localTokenChunkBytes {
 		end := localTokenChunkEnd(c.tail)
-		c.tokens -= estimateApproxTokens(c.tail[:end])
+		c.tokens -= estimateBudgetTokens(c.tail[:end])
 		c.tail = c.tail[end:]
 	}
 	if b.used >= b.limit {
@@ -93,7 +92,7 @@ func (b *outputBudget) tool(tu KiroToolUse) bool {
 		b.stopped = true
 		return false
 	}
-	cost := estimateApproxTokens(tu.Name) + estimateApproxTokens(string(raw))
+	cost := estimateBudgetTokens(tu.Name) + estimateBudgetTokens(string(raw))
 	if cost > b.limit-b.used {
 		b.stopped = true
 		b.truncated = true

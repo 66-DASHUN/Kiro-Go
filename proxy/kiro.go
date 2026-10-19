@@ -151,6 +151,7 @@ func InitKiroHttpClient(proxyURL string) {
 }
 
 type KiroPayload struct {
+	usageRequest      *ClaudeRequest // Public semantic request for hosted-round metering; never serialized.
 	outputBudget      *outputBudget
 	structuredOutput  *claudeStructuredOutput
 	HostedSearchTools map[string]bool `json:"-"`

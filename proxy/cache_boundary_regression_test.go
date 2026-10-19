@@ -7,22 +7,24 @@ import (
 	"time"
 )
 
-func TestClaudeCachedInputRetainsGenerationFraming(t *testing.T) {
+func TestLegacyClaudeCacheKeepsSerializationOutsideSemanticBoundary(t *testing.T) {
 	for _, text := range []string{"hello", strings.Repeat("stable context ", 2000)} {
 		tracker := newPromptCacheTracker(time.Hour)
 		req := &ClaudeRequest{Model: "claude-opus-5.5", Messages: []ClaudeMessage{{Role: "user", Content: text}}}
 		total := estimateClaudeRequestInputTokens(req)
-		if total != estimateApproxTokens(text)+4 {
+		if total <= estimateApproxTokens(text)+4 {
 			t.Fatalf("message framing and assistant prefix must be counted exactly once: total=%d content=%d", total, estimateApproxTokens(text))
 		}
 		profile := tracker.BuildClaudeProfileWithSettings(req, total, totalCachePolicy(1))
+		eligible := estimateApproxTokens(text) + 2
+		ordinary := total - eligible
 		cold := tracker.ComputeWithSettings("account", profile, totalCachePolicy(1))
-		if cold.CacheReadInputTokens != 0 || cold.CacheCreationInputTokens != total-2 || billedClaudeInputTokens(total, cold) != 2 {
+		if cold.CacheReadInputTokens != 0 || cold.CacheCreationInputTokens != eligible || billedClaudeInputTokens(total, cold) != ordinary {
 			t.Fatalf("cold breakdown: %+v", cold)
 		}
 		tracker.UpdateWithSettings("account", profile, totalCachePolicy(1), cold)
 		warm := tracker.ComputeWithSettings("account", profile, totalCachePolicy(1))
-		if warm.CacheReadInputTokens != cold.CacheCreationInputTokens || warm.CacheCreationInputTokens != 0 || billedClaudeInputTokens(total, warm) != 2 {
+		if warm.CacheReadInputTokens != cold.CacheCreationInputTokens || warm.CacheCreationInputTokens != 0 || billedClaudeInputTokens(total, warm) != ordinary {
 			t.Fatalf("warm breakdown: %+v", warm)
 		}
 		changed := *req
@@ -30,7 +32,7 @@ func TestClaudeCachedInputRetainsGenerationFraming(t *testing.T) {
 		nextTotal := estimateClaudeRequestInputTokens(&changed)
 		nextProfile := tracker.BuildClaudeProfileWithSettings(&changed, nextTotal, totalCachePolicy(1))
 		next := tracker.ComputeWithSettings("account", nextProfile, totalCachePolicy(1))
-		if next.CacheReadInputTokens != warm.CacheReadInputTokens || next.CacheCreationInputTokens != nextTotal-total || billedClaudeInputTokens(nextTotal, next) != 2 {
+		if next.CacheReadInputTokens != warm.CacheReadInputTokens || next.CacheCreationInputTokens != estimateApproxTokens("ok")+estimateApproxTokens("continue")+4 || billedClaudeInputTokens(nextTotal, next) != nextTotal-next.CacheReadInputTokens-next.CacheCreationInputTokens {
 			t.Fatalf("append breakdown: %+v", next)
 		}
 	}

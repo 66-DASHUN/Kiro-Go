@@ -69,9 +69,6 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	prepared.OpenAIRequest.Model = actualModel
 	thinking = resolveThinkingWithEffort(thinking, prepared.OpenAIRequest.ReasoningEffort)
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&prepared.OpenAIRequest)
-	if thinking {
-		estimatedInputTokens += estimateApproxTokens(ThinkingModePrompt)
-	}
 	kiroPayload := OpenAIToKiro(&prepared.OpenAIRequest, thinking)
 	h.applyReasoningEffort(kiroPayload, prepared.OpenAIRequest.Model, prepared.OpenAIRequest.ReasoningEffort)
 	apiKeyReservation, err := reserveApiKeyUsage(apiKeyID, apiKeyValue, tokenBudget(estimatedInputTokens))
@@ -200,13 +197,20 @@ func (h *Handler) handleOpenAIResponsesNonStream(ctx context.Context, w http.Res
 			}
 
 			finalContent, extractedReasoning := extractThinkingFromContent(content)
+			meteredReasoning := reasoningContent
+			if meteredReasoning == "" {
+				meteredReasoning = extractedReasoning
+			}
 			if thinking && reasoningContent == "" && extractedReasoning != "" {
 				reasoningContent = extractedReasoning
 			} else if !thinking {
 				reasoningContent = ""
 			}
-			estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+			estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, meteredReasoning, toolUses)
 			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			if len(payload.HostedSearchTools) == 0 && config.EffectivePromptCacheSettings(apiKeyIDFromContext(ctx)).Mode == config.PromptCacheModeSub2API {
+				inputTokens = estimatedInputTokens
+			}
 			cacheDetails := hostedCache
 			if len(payload.HostedSearchTools) == 0 {
 				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)
@@ -462,8 +466,14 @@ func (h *Handler) handleOpenAIResponsesStream(ctx context.Context, w http.Respon
 				emitReasoningDelta(text)
 			}
 
+			var observedText, observedReasoning strings.Builder
 			callback := &KiroStreamCallback{
 				OnText: func(text string, isThinking bool) {
+					if isThinking {
+						observedReasoning.WriteString(text)
+					} else {
+						observedText.WriteString(text)
+					}
 					if text == "" {
 						return
 					}
@@ -556,8 +566,16 @@ func (h *Handler) handleOpenAIResponsesStream(ctx context.Context, w http.Respon
 			if !thinking {
 				reasoningContent = ""
 			}
-			estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+			meteredText, inlineReasoning := extractThinkingFromContent(observedText.String())
+			meteredReasoning := observedReasoning.String()
+			if meteredReasoning == "" {
+				meteredReasoning = inlineReasoning
+			}
+			estimatedOutputTokens := estimateOpenAIOutputTokens(meteredText, meteredReasoning, toolUses)
 			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+			if len(payload.HostedSearchTools) == 0 && config.EffectivePromptCacheSettings(apiKeyIDFromContext(ctx)).Mode == config.PromptCacheModeSub2API {
+				inputTokens = estimatedInputTokens
+			}
 			cacheDetails := hostedCache
 			if len(payload.HostedSearchTools) == 0 {
 				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)

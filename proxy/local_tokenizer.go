@@ -63,3 +63,12 @@ func localTokenChunkEnd(text string) int {
 	}
 	return end
 }
+
+// Output length control stays independent from the metering policy.
+func estimateBudgetTokens(text string) int {
+	n, err := countLocalTokens(text)
+	if err == nil {
+		return n
+	}
+	return estimateCharacterTokens(text)
+}

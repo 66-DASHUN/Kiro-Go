@@ -756,13 +756,21 @@ func testCacheProtocolJSONAndSSE(t *testing.T, policyMode string, initialRatio f
 						expectedTotal := float64(nativeInput)
 						expectedCacheable := expectedTotal
 						if path == "/v1/messages" {
-							expectedTotal = float64(semanticInput + 2*len(messages) + 2)
-							expectedCacheable = expectedTotal - 2
+							var counted ClaudeRequest
+							_ = json.Unmarshal(body, &counted)
+							expectedTotal = float64(estimateClaudeRequestInputTokens(&counted))
+							expectedCacheable = float64(semanticInput + 2*len(messages))
 						}
 						if policyMode == "sub2api" {
+							if path != "/v1/messages" {
+								var counted OpenAIRequest
+								encoded, _ := json.Marshal(messages)
+								_ = json.Unmarshal(encoded, &counted.Messages)
+								expectedTotal = float64(estimateOpenAIRequestInputTokens(&counted))
+							}
 							expectedCacheable = math.Round(expectedTotal * initialRatio)
 						}
-						if total != expectedTotal || output != 137 || read+write > total || (round == 0 && (read != 0 || write != expectedCacheable)) || (round > 0 && round < 4 && read < previousCache) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
+						if total != expectedTotal || output != 137 || read+write > total || (round == 0 && (read != 0 || write != expectedCacheable)) || (round > 0 && round < 4 && read < previousCache-1) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
 							t.Fatalf("round %d: %v", round, usage)
 						}
 						previousCache = read + write

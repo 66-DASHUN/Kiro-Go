@@ -25,7 +25,7 @@ func TestLocalTokenizerTextFormats(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := estimateApproxTokens(text); got != want || got <= 0 {
+		if got := estimateBudgetTokens(text); got != want || got <= 0 {
 			t.Errorf("format count: got %d, want %d", got, want)
 		}
 	}
@@ -57,7 +57,7 @@ func TestLocalTokenizerLongInputKeepsEveryRune(t *testing.T) {
 			t.Fatalf("long input count=%d err=%v", n, err)
 		}
 	}
-	if n := estimateApproxTokens(strings.TrimSpace(strings.Repeat("hello ", 2000))); n != 2000 {
+	if n := estimateBudgetTokens(strings.TrimSpace(strings.Repeat("hello ", 2000))); n != 2000 {
 		t.Fatalf("chunked word tokens=%d, want 2000", n)
 	}
 }
@@ -70,7 +70,7 @@ func TestLocalTokenizerConcurrentCounts(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 10; j++ {
-				if got := estimateApproxTokens(text); got != 1000 {
+				if got := estimateBudgetTokens(text); got != 1000 {
 					t.Errorf("concurrent count=%d, want 1000", got)
 				}
 			}

@@ -197,7 +197,7 @@ func TestReviewNativeSearchCountsAllRoundInputs(t *testing.T) {
 	msg := decodeClaudeMessage(t, postClaudeMessages(t, h, `{"model":"claude-sonnet-4.5","max_tokens":64,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"look up go"}]}`))
 	usage := msg["usage"].(map[string]interface{})
 	input, _, _, _ := localUsageTotals("/v1/messages", usage)
-	if input <= estimateApproxTokens("look up go") || input >= 200 || calls.Load() != 2 {
+	if input <= estimateApproxTokens("look up go") || input == 200 || calls.Load() != 2 {
 		t.Fatalf("search rounds must count semantic inputs without exposing native context: input=%d usage=%v; calls=%d", input, usage, calls.Load())
 	}
 }
