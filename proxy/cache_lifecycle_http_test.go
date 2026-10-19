@@ -18,7 +18,7 @@ func TestLifecycleHTTPProtocols(t *testing.T) {
 				h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": 99999, "outputTokens": 137}))
 				})
-				mode, enabled, ratio := "prefix_lifecycle", true, .9
+				mode, enabled, ratio := "prefix_lifecycle", true, 1.0
 				if err := config.UpdateSettingsPatch(&enabled, ""); err != nil {
 					t.Fatal(err)
 				}
@@ -113,6 +113,51 @@ func TestLifecycleHTTPProtocols(t *testing.T) {
 	}
 }
 
+func TestLifecycleHTTPColdAdmissionSettings(t *testing.T) {
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", path, stream), func(t *testing.T) {
+				h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": 99999, "outputTokens": 137}))
+				})
+				body := map[string]interface{}{"model": "claude-sonnet-4.5", "max_tokens": 256, "stream": stream, "store": false}
+				messages := []map[string]interface{}{{"role": "user", "content": "short prefix for admission"}}
+				if path == "/v1/responses" {
+					body["input"] = messages
+				} else {
+					body["messages"] = messages
+				}
+				previous := 0
+				for _, ratio := range []float64{0, 1, .9} {
+					if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", ratio, 1, 1); err != nil {
+						t.Fatal(err)
+					}
+					u := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, path, body, nil), stream)
+					total, output, read, write := localUsageTotals(path, u)
+					if total <= 0 || total >= 99999 || output != 137 {
+						t.Fatalf("metering changed: %v", u)
+					}
+					switch ratio {
+					case 0:
+						if read != 0 || write != 0 {
+							t.Fatalf("0%% cold admission did not reach %s: %v", path, u)
+						}
+					case 1:
+						if read != 0 || write != total-claudeGenerationPrefixTokens {
+							t.Fatalf("whole cold write: %v", u)
+						}
+						previous = write
+					case .9:
+						if read != previous || write != 0 {
+							t.Fatalf("90%% scaled a genuine warm read: %v", u)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestLifecycleHTTPFailureDoesNotWarm(t *testing.T) {
 	fail := true
 	h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
@@ -152,7 +197,7 @@ func TestLifecycleHTTPExplicitBoundary(t *testing.T) {
 	for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
 		t.Run(path, func(t *testing.T) {
 			h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) { writeKiroTextResponse(t, w, "ok") })
-			if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", .9, .9, .9); err != nil {
+			if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", 1, 1, 1); err != nil {
 				t.Fatal(err)
 			}
 			messages := []interface{}{map[string]interface{}{"role": "user", "content": []interface{}{
@@ -195,7 +240,7 @@ func TestLifecycleHostedFailureDoesNotWarm(t *testing.T) {
 		}
 		writeKiroTextResponse(t, w, "Go release found.")
 	})
-	if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", .9, .9, .9); err != nil {
+	if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", 1, 1, 1); err != nil {
 		t.Fatal(err)
 	}
 	stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
@@ -234,7 +279,7 @@ func TestLifecycleStructuredFailureDoesNotWarm(t *testing.T) {
 		for _, hosted := range []bool{false, true} {
 			t.Run(fmt.Sprintf("stream=%v/hosted=%v", stream, hosted), func(t *testing.T) {
 				h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) { writeKiroTextResponse(t, w, "not json") })
-				if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", .9, .9, .9); err != nil {
+				if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", 1, 1, 1); err != nil {
 					t.Fatal(err)
 				}
 				tools := ""
@@ -273,7 +318,7 @@ func TestLifecycleOpenAIHostedRounds(t *testing.T) {
 						writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"inputTokens": 88888, "outputTokens": 11, "stopReason": "end_turn"}))
 					}
 				})
-				if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", .9, .9, .9); err != nil {
+				if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", 1, 1, 1); err != nil {
 					t.Fatal(err)
 				}
 				stubMCPWebSearch(t, http.StatusOK, mcpOneResult)

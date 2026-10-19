@@ -2,12 +2,41 @@ package proxy
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"kiro-proxy/config"
+	"math"
 	"time"
 )
 
-const lifecycleCacheRuleVersion = "prefix-lifecycle-v1"
+const lifecycleCacheRuleVersion = "prefix-lifecycle-v2"
+
+// Independent content/scope/attempt samples vary the cold admission probability
+// and decide whether to store the whole prefix. A fresh attempt permits retries;
+// the threshold never scales token buckets or applies to an existing read.
+func lifecycleAdmission(ratio float64, scope string, fingerprint [32]byte, attempt uint64) (float64, bool) {
+	if ratio <= 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
+		return 0, false
+	}
+	if ratio >= 1 {
+		return 1, true
+	}
+	sample := func(domain string) float64 {
+		h := sha256.New()
+		writeHashChunk(h, domain)
+		writeHashChunk(h, scope)
+		h.Write(fingerprint[:])
+		var nonce [8]byte
+		binary.BigEndian.PutUint64(nonce[:], attempt)
+		h.Write(nonce[:])
+		// Exactly [0,1), using 53 bits representable by float64.
+		return float64(binary.BigEndian.Uint64(h.Sum(nil)[:8])>>11) / (1 << 53)
+	}
+	lower := math.Max(0, ratio-promptCacheRatioVariation)
+	upper := math.Min(1, ratio+promptCacheRatioVariation)
+	effective := lower + (upper-lower)*sample("lifecycle-admission-threshold-v1")
+	return effective, sample("lifecycle-admission-choice-v1") < effective
+}
 
 type lifecycleReadCheckpoint struct {
 	fingerprint [32]byte
@@ -178,10 +207,12 @@ func (t *promptCacheTracker) computeLifecycleUsage(account string, p *promptCach
 		return u
 	}
 	u.finalCacheable = p.Breakpoints[len(p.Breakpoints)-1].CumulativeTokens
+	u.totalRatio = s.Ratio
 	u.lifecycleReads = &lifecycleReadSnapshot{}
 	t.mu.Lock()
 	t.pruneExpiredLocked(u.startedAt)
-	entries := t.entriesByAccount[lifecycleScope(account, p, s)]
+	scope := lifecycleScope(account, p, s)
+	entries := t.entriesByAccount[scope]
 	for _, bp := range p.LookupCandidates {
 		if bp.CumulativeTokens > u.finalCacheable || bp.CumulativeTokens <= u.finalMatched {
 			continue
@@ -194,8 +225,18 @@ func (t *promptCacheTracker) computeLifecycleUsage(account string, p *promptCach
 		u.matchedFingerprint, u.matchedTTL = bp.Fingerprint, e.TTL
 		u.lifecycleReads.checkpoints = append(u.lifecycleReads.checkpoints, lifecycleReadCheckpoint{bp.Fingerprint, e.PrefixTokens, e.TTL})
 	}
+	if u.finalMatched == 0 {
+		t.lifecycleAdmissionSeq++
+		u.cacheAdmissionChecked = true
+		last := p.Breakpoints[len(p.Breakpoints)-1]
+		u.totalRatio, u.cacheWriteAdmitted = lifecycleAdmission(s.Ratio, scope, last.Fingerprint, t.lifecycleAdmissionSeq)
+	}
 	t.mu.Unlock()
 	u.CacheReadInputTokens = u.finalMatched
+	if u.cacheAdmissionChecked && !u.cacheWriteAdmitted {
+		u.limitation = "cache_admission_miss"
+		return u
+	}
 	u.CacheCreationInputTokens = u.finalCacheable - u.finalMatched
 	u.CacheCreation5mInputTokens, u.CacheCreation1hInputTokens = computePromptCacheTTLBreakdownLimited(p, u.finalMatched, u.CacheCreationInputTokens)
 	return u

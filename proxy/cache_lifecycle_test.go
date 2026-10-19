@@ -43,7 +43,7 @@ func TestLifecycleOpenAIToolDefinitionsInvalidatePrefix(t *testing.T) {
 }
 
 func lifecyclePolicy() config.PromptCacheSettings {
-	return config.PromptCacheSettings{Enabled: true, Mode: "prefix_lifecycle", Ratio: .9}
+	return config.PromptCacheSettings{Enabled: true, Mode: "prefix_lifecycle", Ratio: 1}
 }
 
 func TestLifecycleColdRepeatAppendAndStableCount(t *testing.T) {
@@ -74,7 +74,7 @@ func TestLifecycleColdRepeatAppendAndStableCount(t *testing.T) {
 	}
 	settings.Ratio = 0
 	if got := tracker.ComputeWithSettings("account", next, settings); got.CacheReadInputTokens != appended.CacheReadInputTokens || got.CacheCreationInputTokens != appended.CacheCreationInputTokens {
-		t.Fatal("inactive ratio changed content lifecycle")
+		t.Fatal("cold admission target changed an existing read/suffix lifecycle")
 	}
 	tracker.UpdateWithSettings("account", next, settings, appended)
 	if got := tracker.ComputeWithSettings("account", next, settings); got.CacheReadInputTokens != appended.CacheReadInputTokens+appended.CacheCreationInputTokens || got.CacheCreationInputTokens != 0 {

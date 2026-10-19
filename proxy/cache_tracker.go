@@ -97,12 +97,13 @@ type promptCacheEntry struct {
 }
 
 type promptCacheTracker struct {
-	exactTracker     *refcache.Tracker
-	mu               sync.Mutex
-	entriesByAccount map[string]map[[32]byte]promptCacheEntry
-	maxSupportedTTL  time.Duration
-	diagnostics      []promptCacheDiagnostic
-	diagnosticSeq    uint64
+	exactTracker          *refcache.Tracker
+	mu                    sync.Mutex
+	entriesByAccount      map[string]map[[32]byte]promptCacheEntry
+	maxSupportedTTL       time.Duration
+	diagnostics           []promptCacheDiagnostic
+	diagnosticSeq         uint64
+	lifecycleAdmissionSeq uint64 // guarded by mu; one decision per cold dispatch
 }
 
 func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {

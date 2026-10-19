@@ -1732,7 +1732,7 @@
     const effective = effectiveApiKeyCacheSettings(entry);
     const scope = t(hasApiKeyCacheOverride(entry) ? 'apiKeys.cacheIndependent' : 'apiKeys.cacheInherited');
     const policy = !effective.enabled ? t('apiKeys.cacheDisabled') : effective.mode === 'prefix_lifecycle'
-      ? t('apiKeys.cacheLifecycle') : effective.mode === 'prefix_total'
+      ? t('apiKeys.cacheLifecycle', ratioToPercent(effective.ratio)) : effective.mode === 'prefix_total'
       ? t('apiKeys.cacheTotal', ratioToPercent(effective.ratio)) : effective.mode === 'prefix'
       ? t('apiKeys.cachePrefix', ratioToPercent(effective.ratio)) : (effective.mode === 'uniform' || effective.mode === 'sub2api')
       ? t('apiKeys.cacheUniform', ratioToPercent(effective.ratio))
@@ -1752,9 +1752,9 @@
     const independent = $(prefix + 'Mode').value === 'independent';
     const totalMode = ['prefix_total', 'sub2api'].includes($(prefix + 'Mode').value);
     const ratioLabel = document.querySelector('label[for="' + prefix + 'Ratio"]');
-    ratioLabel.dataset.i18n = $(prefix + 'Mode').value === 'sub2api' ? 'settings.sub2apiCacheRatio' : totalMode ? 'settings.totalCacheRatio' : 'settings.promptCacheRatio';
+    ratioLabel.dataset.i18n = lifecycle ? 'settings.lifecycleCacheRatio' : $(prefix + 'Mode').value === 'sub2api' ? 'settings.sub2apiCacheRatio' : totalMode ? 'settings.totalCacheRatio' : 'settings.promptCacheRatio';
     ratioLabel.textContent = t(ratioLabel.dataset.i18n);
-    $(prefix + 'Ratio').closest('.form-group').hidden = lifecycle;
+    $(prefix + 'Ratio').closest('.form-group').hidden = false;
     $(prefix + 'CreationRatio').closest('.form-group').hidden = totalMode || lifecycle;
     $(prefix + 'ReadRatio').closest('.form-group').hidden = totalMode || lifecycle;
     const help = $(prefix + 'Help');
@@ -1762,7 +1762,7 @@
     help.textContent = t(help.dataset.i18n);
     $(prefix + 'Enabled').disabled = inherited;
     $(prefix + 'Mode').disabled = inherited;
-    $(prefix + 'Ratio').disabled = inherited || independent || lifecycle;
+    $(prefix + 'Ratio').disabled = inherited || independent;
     $(prefix + 'CreationRatio').disabled = inherited || !independent;
     $(prefix + 'ReadRatio').disabled = inherited || !independent;
     refreshCustomSelects($(prefix + 'Mode').parentElement);
@@ -1798,7 +1798,7 @@
       const headers = ['cacheDiagnosticId', 'cacheDiagnosticTime', 'cacheDiagnosticTotal', 'cacheDiagnosticPrefix', 'cacheDiagnosticMatched', 'cacheDiagnosticMatchedShare', 'cacheDiagnosticNewRatio', 'cacheDiagnosticActual', 'cacheDiagnosticRead', 'cacheDiagnosticWrite', 'cacheDiagnosticOrdinary', 'cacheDiagnosticTTL', 'cacheDiagnosticReason'];
       container.innerHTML = '<table><thead><tr>' + headers.map(key => '<th>' + escapeHtml(t('settings.' + key)) + '</th>').join('') + '</tr></thead><tbody>' + records.map(row => '<tr>' +
         cell(row.id) + cell(new Date(row.time).toLocaleTimeString()) + cell(row.total) + cell(row.cacheable) + cell(row.matched) + cell(row.matchedShare ?? 0) +
-        cell(row.rule.startsWith('prefix-lifecycle-') ? '—' : percent(row.ratio, 1)) + cell(percent(row.budget, row.total)) +
+        cell(row.rule === 'prefix-lifecycle-v1' ? '—' : percent(row.ratio, 1)) + cell(percent(row.budget, row.total)) +
         cell(row.read + ' (' + percent(row.read, row.total) + ')') + cell(row.write + ' (' + percent(row.write, row.total) + ')') +
         cell(row.ordinary) + cell(row.write5m + ' / ' + row.write1h) +
         cell(t('settings.cacheReason.' + (row.limitation || 'eligible')) + ' · ' + row.rule) + '</tr>').join('') + '</tbody></table>';
