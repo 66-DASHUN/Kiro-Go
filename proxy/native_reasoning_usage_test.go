@@ -1,12 +1,49 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"kiro-proxy/logger"
 	"net/http"
 	"strings"
 	"testing"
 )
+
+func TestClaudeHostedSearchReasoningDiagnosticRespectsDisplay(t *testing.T) {
+	for _, display := range []string{"omitted", "summarized"} {
+		t.Run(display, func(t *testing.T) {
+			var logs bytes.Buffer
+			level := logger.GetLevel()
+			logger.SetOutput(&logs)
+			logger.SetLevel(logger.LevelInfo)
+			t.Cleanup(func() { logger.ResetOutput(); logger.SetLevel(level) })
+			const reasoning = "Observed native reasoning before the answer."
+			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+				writeFrames(w, awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": reasoning}), awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"signature": "sig"}), awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}), meteringFrame(t))
+			})
+			body := map[string]interface{}{"model": "claude-opus-5.5", "max_tokens": 1024, "thinking": map[string]interface{}{"type": "adaptive", "display": display}, "messages": []map[string]interface{}{{"role": "user", "content": "Reply hello."}}, "tools": []ClaudeTool{nativeWebSearchTool()}}
+			localUsageJSONRequest(t, h, "/v1/messages", body, nil)
+			line := strings.SplitN(strings.SplitN(logs.String(), "[UsageDiag] ", 2)[1], "\n", 2)[0]
+			var d usageDiagnostic
+			if err := json.Unmarshal([]byte(line), &d); err != nil {
+				t.Fatal(err)
+			}
+			if d.Route != "websearch_loop" {
+				t.Fatalf("wrong route: %s", d.Route)
+			}
+			wantHidden, wantShown := 0, estimateClaudeOutputTokens("hello", reasoning, nil)
+			if display == "omitted" {
+				wantHidden = estimateApproxTokens(reasoning)
+				wantShown = estimateApproxTokens("hello")
+			}
+			if d.SuppressedReasoningTokens != wantHidden || d.EstimatedReturnedOutputTokens != wantShown {
+				t.Fatalf("display=%s hidden=%d/%d returned=%d/%d", display, d.SuppressedReasoningTokens, wantHidden, d.EstimatedReturnedOutputTokens, wantShown)
+			}
+		})
+	}
+}
 
 func TestClaudeUnrequestedNativeReasoningIsCountedButNotDisplayed(t *testing.T) {
 	const reasoning = "Native reasoning observed before the tool call."

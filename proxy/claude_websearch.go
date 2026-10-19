@@ -575,6 +575,12 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 			diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 			diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
 			diagnostic.EstimatedReturnedOutputTokens = estimateWebSearchContentTokens(content)
+			visibleReasoningTokens := 0
+			if thinking && !thinkingOpts.OmitDisplay {
+				visibleReasoningTokens = estimateApproxTokens(round.thinking)
+			}
+			// Intermediate rounds and omitted final reasoning are not presented.
+			diagnostic.SuppressedReasoningTokens = max(0, diagnostic.ObservedReasoningTokens-visibleReasoningTokens)
 			diagnostic.ReturnedOutputBytes = claudeBlocksByteLength(content)
 			diagnostic.ResponseStopReason = stopReason
 			if budget != nil {
@@ -773,6 +779,9 @@ func estimateWebSearchContentTokens(content []map[string]interface{}) int {
 		switch block["type"] {
 		case "text":
 			text, _ := block["text"].(string)
+			total += estimateApproxTokens(text)
+		case "thinking":
+			text, _ := block["thinking"].(string)
 			total += estimateApproxTokens(text)
 		case "tool_use", "server_tool_use":
 			name, _ := block["name"].(string)
