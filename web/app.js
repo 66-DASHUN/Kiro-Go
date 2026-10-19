@@ -1692,7 +1692,7 @@
     return (clampRatio(value) * 100).toFixed(1).replace(/\.0$/, '');
   }
   function normalizePromptCacheSettings(source) {
-    const mode = ['sub2api', 'prefix_total', 'prefix', 'uniform', 'independent'].includes(source.promptCacheEmulationMode) ? source.promptCacheEmulationMode : 'sub2api';
+    const mode = ['prefix_lifecycle', 'sub2api', 'prefix_total', 'prefix', 'uniform', 'independent'].includes(source.promptCacheEmulationMode) ? source.promptCacheEmulationMode : 'sub2api';
     const ratio = clampRatio(source.promptCacheEmulationRatio, (mode === 'sub2api' || mode === 'prefix' || mode === 'prefix_total') ? 0.95 : 1);
     return {
       enabled: source.promptCacheEmulationEnabled !== false, mode, ratio,
@@ -1707,7 +1707,7 @@
   }
   function rawApiKeyCacheSettings(entry) {
     const inherited = promptCacheSettings;
-    const mode = entry && ['sub2api', 'prefix_total', 'prefix', 'uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
+    const mode = entry && ['prefix_lifecycle', 'sub2api', 'prefix_total', 'prefix', 'uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
     const ratio = clampRatio(entry && entry.promptCacheEmulationRatio, inherited.ratio);
     return {
       enabled: entry && entry.promptCacheEmulationEnabled != null ? entry.promptCacheEmulationEnabled : inherited.enabled,
@@ -1731,7 +1731,8 @@
   function apiKeyCacheSummary(entry) {
     const effective = effectiveApiKeyCacheSettings(entry);
     const scope = t(hasApiKeyCacheOverride(entry) ? 'apiKeys.cacheIndependent' : 'apiKeys.cacheInherited');
-    const policy = !effective.enabled ? t('apiKeys.cacheDisabled') : effective.mode === 'prefix_total'
+    const policy = !effective.enabled ? t('apiKeys.cacheDisabled') : effective.mode === 'prefix_lifecycle'
+      ? t('apiKeys.cacheLifecycle') : effective.mode === 'prefix_total'
       ? t('apiKeys.cacheTotal', ratioToPercent(effective.ratio)) : effective.mode === 'prefix'
       ? t('apiKeys.cachePrefix', ratioToPercent(effective.ratio)) : (effective.mode === 'uniform' || effective.mode === 'sub2api')
       ? t('apiKeys.cacheUniform', ratioToPercent(effective.ratio))
@@ -1747,23 +1748,28 @@
     syncCacheForm(prefix, false);
   }
   function syncCacheForm(prefix, inherited) {
+    const lifecycle = $(prefix + 'Mode').value === 'prefix_lifecycle';
     const independent = $(prefix + 'Mode').value === 'independent';
     const totalMode = ['prefix_total', 'sub2api'].includes($(prefix + 'Mode').value);
     const ratioLabel = document.querySelector('label[for="' + prefix + 'Ratio"]');
     ratioLabel.dataset.i18n = $(prefix + 'Mode').value === 'sub2api' ? 'settings.sub2apiCacheRatio' : totalMode ? 'settings.totalCacheRatio' : 'settings.promptCacheRatio';
     ratioLabel.textContent = t(ratioLabel.dataset.i18n);
-    $(prefix + 'CreationRatio').closest('.form-group').hidden = totalMode;
-    $(prefix + 'ReadRatio').closest('.form-group').hidden = totalMode;
+    $(prefix + 'Ratio').closest('.form-group').hidden = lifecycle;
+    $(prefix + 'CreationRatio').closest('.form-group').hidden = totalMode || lifecycle;
+    $(prefix + 'ReadRatio').closest('.form-group').hidden = totalMode || lifecycle;
+    const help = $(prefix + 'Help');
+    help.dataset.i18n = lifecycle ? 'settings.lifecycleCacheHint' : prefix === 'apiKeyCache' ? 'apiKeys.cacheRatioHint' : 'settings.promptCacheRatioHint';
+    help.textContent = t(help.dataset.i18n);
     $(prefix + 'Enabled').disabled = inherited;
     $(prefix + 'Mode').disabled = inherited;
-    $(prefix + 'Ratio').disabled = inherited || independent;
+    $(prefix + 'Ratio').disabled = inherited || independent || lifecycle;
     $(prefix + 'CreationRatio').disabled = inherited || !independent;
     $(prefix + 'ReadRatio').disabled = inherited || !independent;
     refreshCustomSelects($(prefix + 'Mode').parentElement);
   }
   function cacheFormValues(prefix) {
     const selected = $(prefix + 'Mode').value;
-    const mode = ['sub2api', 'prefix_total', 'prefix', 'uniform', 'independent'].includes(selected) ? selected : 'sub2api';
+    const mode = ['prefix_lifecycle', 'sub2api', 'prefix_total', 'prefix', 'uniform', 'independent'].includes(selected) ? selected : 'sub2api';
     const readRatio = field => {
       const raw = $(prefix + field).value.trim();
       const percent = Number(raw);
@@ -1792,7 +1798,7 @@
       const headers = ['cacheDiagnosticId', 'cacheDiagnosticTime', 'cacheDiagnosticTotal', 'cacheDiagnosticPrefix', 'cacheDiagnosticMatched', 'cacheDiagnosticMatchedShare', 'cacheDiagnosticNewRatio', 'cacheDiagnosticActual', 'cacheDiagnosticRead', 'cacheDiagnosticWrite', 'cacheDiagnosticOrdinary', 'cacheDiagnosticTTL', 'cacheDiagnosticReason'];
       container.innerHTML = '<table><thead><tr>' + headers.map(key => '<th>' + escapeHtml(t('settings.' + key)) + '</th>').join('') + '</tr></thead><tbody>' + records.map(row => '<tr>' +
         cell(row.id) + cell(new Date(row.time).toLocaleTimeString()) + cell(row.total) + cell(row.cacheable) + cell(row.matched) + cell(row.matchedShare ?? 0) +
-        cell(percent(row.ratio, 1)) + cell(percent(row.budget, row.total)) +
+        cell(row.rule.startsWith('prefix-lifecycle-') ? '—' : percent(row.ratio, 1)) + cell(percent(row.budget, row.total)) +
         cell(row.read + ' (' + percent(row.read, row.total) + ')') + cell(row.write + ' (' + percent(row.write, row.total) + ')') +
         cell(row.ordinary) + cell(row.write5m + ' / ' + row.write1h) +
         cell(t('settings.cacheReason.' + (row.limitation || 'eligible')) + ' · ' + row.rule) + '</tr>').join('') + '</tbody></table>';

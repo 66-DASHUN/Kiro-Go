@@ -27,6 +27,8 @@ const (
 )
 
 type promptCacheUsage struct {
+	lifecycle      bool
+	lifecycleReads *lifecycleReadSnapshot
 	exactPlan      *refcache.Plan
 	exactInput     *int
 	referenceMode  bool
@@ -65,6 +67,7 @@ type promptCacheBreakpoint struct {
 }
 
 type promptCacheProfile struct {
+	lifecycle        bool
 	exactProfile     *refcache.Profile
 	referenceMode    bool
 	Breakpoints      []promptCacheBreakpoint
@@ -119,6 +122,9 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 }
 
 func (t *promptCacheTracker) BuildClaudeProfileWithSettings(req *ClaudeRequest, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
+	if settings.Mode == config.PromptCacheModeLifecycle {
+		return buildLifecycleProfile(req)
+	}
 	if settings.Mode == config.PromptCacheModeSub2API {
 		if req == nil {
 			return nil
@@ -264,6 +270,12 @@ func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInput
 }
 
 func (t *promptCacheTracker) BuildOpenAIProfileWithSettings(payload *KiroPayload, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
+	if settings.Mode == config.PromptCacheModeLifecycle {
+		if payload == nil {
+			return nil
+		}
+		return buildLifecycleProfile(payload.lifecycleRequest)
+	}
 	if settings.Mode == config.PromptCacheModeSub2API {
 		if payload == nil || payload.exactMeter == nil {
 			return nil
@@ -373,6 +385,9 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 }
 
 func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *promptCacheProfile, settings config.PromptCacheSettings) promptCacheUsage {
+	if settings.Mode == config.PromptCacheModeLifecycle {
+		return t.computeLifecycleUsage(accountID, profile, settings)
+	}
 	if settings.Mode == config.PromptCacheModeSub2API {
 		return t.computeExactCacheUsage(accountID, profile, settings)
 	}
@@ -490,6 +505,9 @@ func promptCacheVariationUnit(profile *promptCacheProfile) float64 {
 
 // Cache estimates are scaled into native upstream input token space at completion.
 func cacheProfileWithInputTokens(profile *promptCacheProfile, inputTokens int) *promptCacheProfile {
+	if profile != nil && profile.lifecycle {
+		return profile
+	}
 	if profile != nil && profile.exactProfile != nil {
 		return profile
 	}
@@ -976,6 +994,9 @@ func maxInt(a, b int) int {
 
 // Completion scales the dispatch snapshot without querying cache entries again.
 func scalePromptCacheUsage(usage promptCacheUsage, profile *promptCacheProfile, inputTokens int) promptCacheUsage {
+	if usage.lifecycle {
+		return usage
+	}
 	if usage.exactPlan != nil || (profile != nil && profile.exactProfile != nil) {
 		return usage
 	}

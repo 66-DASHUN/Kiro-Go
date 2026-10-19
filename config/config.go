@@ -126,6 +126,7 @@ type AccountPatch struct {
 }
 
 type PromptCacheSettings struct {
+	APIKeyID      string  `json:"-"` // Internal cache scope; never a credential.
 	Enabled       bool    `json:"promptCacheEmulationEnabled"`
 	Mode          string  `json:"promptCacheEmulationMode"`
 	Ratio         float64 `json:"promptCacheEmulationRatio"`
@@ -134,6 +135,7 @@ type PromptCacheSettings struct {
 }
 
 const (
+	PromptCacheModeLifecycle   = "prefix_lifecycle"
 	PromptCacheModeSub2API     = "sub2api"
 	PromptCacheModePrefixTotal = "prefix_total"
 	PromptCacheModePrefix      = "prefix"
@@ -150,8 +152,8 @@ func ValidatePromptCacheRatio(r float64) error {
 	return nil
 }
 func ValidatePromptCacheSettings(s PromptCacheSettings) error {
-	if s.Mode != PromptCacheModeSub2API && s.Mode != PromptCacheModePrefixTotal && s.Mode != PromptCacheModePrefix && s.Mode != promptCacheModeUniform && s.Mode != promptCacheModeIndependent {
-		return fmt.Errorf("prompt cache mode must be %q, %q, %q, %q or %q, got %q", PromptCacheModeSub2API, PromptCacheModePrefixTotal, PromptCacheModePrefix, promptCacheModeUniform, promptCacheModeIndependent, s.Mode)
+	if s.Mode != PromptCacheModeLifecycle && s.Mode != PromptCacheModeSub2API && s.Mode != PromptCacheModePrefixTotal && s.Mode != PromptCacheModePrefix && s.Mode != promptCacheModeUniform && s.Mode != promptCacheModeIndependent {
+		return fmt.Errorf("prompt cache mode must be %q, %q, %q, %q, %q or %q, got %q", PromptCacheModeLifecycle, PromptCacheModeSub2API, PromptCacheModePrefixTotal, PromptCacheModePrefix, promptCacheModeUniform, promptCacheModeIndependent, s.Mode)
 	}
 	for n, v := range map[string]float64{"ratio": s.Ratio, "creation ratio": s.CreationRatio, "read ratio": s.ReadRatio} {
 		if err := ValidatePromptCacheRatio(v); err != nil {

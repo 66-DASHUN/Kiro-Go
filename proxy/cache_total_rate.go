@@ -237,6 +237,10 @@ func (t *promptCacheTracker) UpdateWithSettings(accountID string, profile *promp
 	if t == nil || !settings.Enabled {
 		return
 	}
+	if settings.Mode == config.PromptCacheModeLifecycle {
+		t.updateLifecycle(accountID, profile, settings, usage)
+		return
+	}
 	if settings.Mode == config.PromptCacheModeSub2API {
 		t.recordTotalCacheDiagnostic(profile, usage)
 		// Exact plans commit on upstream HTTP success, before reading the body.
@@ -325,7 +329,7 @@ type promptCacheDiagnostic struct {
 }
 
 func (t *promptCacheTracker) recordTotalCacheDiagnostic(profile *promptCacheProfile, usage promptCacheUsage) {
-	if (!usage.totalCacheRate && !usage.referenceMode) || profile == nil {
+	if (!usage.lifecycle && !usage.totalCacheRate && !usage.referenceMode) || profile == nil {
 		return
 	}
 	now := time.Now()
@@ -334,6 +338,9 @@ func (t *promptCacheTracker) recordTotalCacheDiagnostic(profile *promptCacheProf
 	t.pruneDiagnosticsLocked(now)
 	t.diagnosticSeq++
 	rule := totalCacheRuleVersion
+	if usage.lifecycle {
+		rule = lifecycleCacheRuleVersion
+	}
 	if usage.referenceMode {
 		rule = sub2APICacheRuleVersion
 	}

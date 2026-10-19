@@ -447,6 +447,7 @@
                 <div class="form-group">
                   <label for="apiKeyCacheMode" data-i18n="apiKeys.cacheMode"></label>
                   <select id="apiKeyCacheMode">
+                    <option value="prefix_lifecycle" data-i18n="apiKeys.cacheModeLifecycle"></option>
                     <option value="sub2api" data-i18n="apiKeys.cacheModeSub2API"></option>
                     <option value="prefix_total" data-i18n="apiKeys.cacheModePrefixTotal"></option>
                     <option value="prefix" data-i18n="apiKeys.cacheModePrefix"></option>
@@ -475,7 +476,7 @@
                   <div class="cache-input-suffix"><input type="number" id="apiKeyCacheReadRatio" min="0" max="100" step="0.1" value="100" /><span>%</span></div>
                 </div>
               </div>
-              <p class="help-block" data-i18n="apiKeys.cacheRatioHint"></p>
+              <p id="apiKeyCacheHelp" class="help-block" data-i18n="apiKeys.cacheRatioHint"></p>
             </div>
             <div class="api-key-editor-actions">
               <button class="btn btn-primary" id="createApiKeyBtn" type="button" data-i18n="settings.createApiKey"></button>
@@ -497,6 +498,7 @@
           <div class="form-group">
             <label for="promptCacheMode" data-i18n="settings.promptCacheMode"></label>
             <select id="promptCacheMode">
+              <option value="prefix_lifecycle" data-i18n="settings.promptCacheModeLifecycle"></option>
               <option value="sub2api" data-i18n="settings.promptCacheModeSub2API"></option>
               <option value="prefix_total" data-i18n="settings.promptCacheModePrefixTotal"></option>
               <option value="prefix" data-i18n="settings.promptCacheModePrefix"></option>
@@ -519,7 +521,7 @@
               <div class="cache-input-suffix"><input type="number" id="promptCacheReadRatio" min="0" max="100" step="0.1" value="100" /><span>%</span></div>
             </div>
           </div>
-          <p class="help-block" data-i18n="settings.promptCacheRatioHint"></p>
+          <p id="promptCacheHelp" class="help-block" data-i18n="settings.promptCacheRatioHint"></p>
           <button class="btn btn-primary" id="savePromptCacheBtn" type="button" data-i18n="settings.savePromptCache"></button>
           <p class="help-block" data-i18n="settings.cacheDiagnosticsHint"></p>
           <button class="btn" id="refreshCacheDiagnosticsBtn" type="button" data-i18n="settings.refreshCacheDiagnostics"></button>

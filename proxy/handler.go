@@ -840,7 +840,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	actualModel, _ := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
 
-	estimatedTokens := estimateClaudeRequestInputTokens(&req)
+	estimatedTokens := estimateClaudeInputWithSettings(&req, config.EffectivePromptCacheSettings(apiKeyIDFromContext(r.Context())))
 	if meter, err := newExactRequestMeter(r.Context(), config.EffectivePromptCacheSettings(apiKeyIDFromContext(r.Context())), "anthropic", publicBody, req.Model, false, false, 0); err == nil && meter != nil {
 		estimatedTokens = meter.EstimatedInput
 	}
@@ -911,11 +911,14 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		h.sendClaudeError(w, 400, "invalid_request_error", err.Error())
 		return
 	}
-	estimatedInputTokens := estimateClaudeRequestInputTokens(&req)
+	estimatedInputTokens := estimateClaudeInputWithSettings(&req, config.EffectivePromptCacheSettings(apiKeyID))
 	if exactMeter != nil {
 		estimatedInputTokens = exactMeter.EstimatedInput
 	}
 	cacheProfile := h.promptCache.BuildClaudeProfileWithSettings(effectiveReq, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyID))
+	if config.EffectivePromptCacheSettings(apiKeyID).Mode == config.PromptCacheModeLifecycle {
+		cacheProfile = buildLifecycleProfile(&req)
+	}
 	if exactMeter != nil {
 		cacheProfile = buildExactCacheProfile("anthropic", publicBody, req.Model, estimatedInputTokens)
 	}
@@ -1450,6 +1453,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				diagnostic.ReportedInputTokens = inputTokens
 				diagnostic.ReportedOutputTokens = outputTokens
 				diagnostic.InputTokenSource = "sub2api_reference"
+				if cacheSettings.Mode == config.PromptCacheModeLifecycle {
+					diagnostic.InputTokenSource = "prefix_lifecycle_local"
+				}
 				diagnostic.OutputTokenSource = usageTokenSource(nativeOutputTokens)
 				diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 				diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
@@ -1697,6 +1703,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 				diagnostic.ReportedInputTokens = inputTokens
 				diagnostic.ReportedOutputTokens = outputTokens
 				diagnostic.InputTokenSource = "sub2api_reference"
+				if cacheSettings.Mode == config.PromptCacheModeLifecycle {
+					diagnostic.InputTokenSource = "prefix_lifecycle_local"
+				}
 				diagnostic.OutputTokenSource = usageTokenSource(nativeOutputTokens)
 				diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 				diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
@@ -1829,7 +1838,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		h.sendOpenAIError(w, 400, "invalid_request_error", err.Error())
 		return
 	}
-	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
+	estimatedInputTokens := estimateOpenAIInputWithSettings(&req, config.EffectivePromptCacheSettings(apiKeyID))
 	if exactMeter != nil {
 		estimatedInputTokens = exactMeter.EstimatedInput
 	}
@@ -1841,6 +1850,9 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
+	if config.EffectivePromptCacheSettings(apiKeyID).Mode == config.PromptCacheModeLifecycle {
+		kiroPayload.lifecycleRequest = lifecycleOpenAIRequest(&req)
+	}
 	kiroPayload.exactMeter = exactMeter
 	h.applyReasoningEffort(kiroPayload, req.Model, req.ReasoningEffort)
 

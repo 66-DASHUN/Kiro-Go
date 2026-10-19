@@ -92,6 +92,9 @@ func EffectivePromptCacheSettings(apiKeyID string) PromptCacheSettings {
 		settings.CreationRatio = 1
 		settings.ReadRatio = settings.Ratio
 	}
+	if settings.Mode == PromptCacheModeLifecycle {
+		settings.APIKeyID = apiKeyID
+	}
 	return settings
 }
 

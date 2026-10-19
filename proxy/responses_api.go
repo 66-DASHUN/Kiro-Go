@@ -89,11 +89,14 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		}
 		exactMeter.EstimatedInput = effective.EstimatedInput
 	}
-	estimatedInputTokens := estimateOpenAIRequestInputTokens(&prepared.OpenAIRequest)
+	estimatedInputTokens := estimateOpenAIInputWithSettings(&prepared.OpenAIRequest, config.EffectivePromptCacheSettings(apiKeyID))
 	if exactMeter != nil {
 		estimatedInputTokens = exactMeter.EstimatedInput
 	}
 	kiroPayload := OpenAIToKiro(&prepared.OpenAIRequest, thinking)
+	if config.EffectivePromptCacheSettings(apiKeyID).Mode == config.PromptCacheModeLifecycle {
+		kiroPayload.lifecycleRequest = lifecycleOpenAIRequest(&prepared.OpenAIRequest)
+	}
 	kiroPayload.exactMeter = exactMeter
 	h.applyReasoningEffort(kiroPayload, prepared.OpenAIRequest.Model, prepared.OpenAIRequest.ReasoningEffort)
 	apiKeyReservation, err := reserveApiKeyUsage(apiKeyID, apiKeyValue, tokenBudget(estimatedInputTokens))

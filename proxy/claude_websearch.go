@@ -38,6 +38,7 @@ const (
 
 type claudeWebSearchRound struct {
 	cacheUsage         promptCacheUsage
+	commitCache        func()
 	text               string
 	thinking           string
 	thinkingBlocks     []ClaudeContentBlock
@@ -654,11 +655,12 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 	var credits float64
 	var lastAccount *config.Account
 	cacheUsage := promptCacheUsage{}
+	var pendingCacheCommits []func()
 
 	//! Every search round spends budget, so at most maxUses+2 upstream calls run before the final answer.
 	for roundIdx := 0; ; roundIdx++ {
 		if roundIdx > 0 && exactSearch == nil {
-			estimatedInputTokens = estimateClaudeRequestInputTokens(&working)
+			estimatedInputTokens = estimateClaudeInputWithSettings(&working, cacheSettings)
 		}
 
 		round, account, err := h.callClaudeRoundWithFailover(ctx, &working, thinking, estimatedInputTokens, apiKeyReservation.apiKeyID())
@@ -678,6 +680,9 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 			recordFinalRequestForApiKey(r.Context(), apiKeyReservation, lastAccount, req.Model, 0, 0, 0, false, status, message)
 			h.sendClaudeError(w, status, "api_error", message)
 			return
+		}
+		if round.commitCache != nil {
+			pendingCacheCommits = append(pendingCacheCommits, round.commitCache)
 		}
 		if exactSearch != nil {
 			credits, outputTokens, inputTokens, cacheUsage = round.credits, round.outputTokens, round.inputTokens, round.cacheUsage
@@ -779,6 +784,9 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 			return
 		}
 
+		for _, commit := range pendingCacheCommits {
+			commit()
+		}
 		stopReason := mapClaudeStopReason(round.stopReason, len(clientUses))
 		updateRequestUsageDiagnostic(r.Context(), func(diagnostic *usageDiagnostic) {
 			diagnostic.ReportedInputTokens = inputTokens
@@ -814,6 +822,11 @@ func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRe
 	h.applyClaudeInferenceOptions(payload, req, thinking)
 	cacheSettings := config.EffectivePromptCacheSettings(apiKeyID)
 	cacheProfile := h.promptCache.BuildClaudeProfileWithSettings(cloneClaudeRequestForThinking(req, h.claudeNeedsThinkingPrompt(req, thinking)), estimatedInputTokens, cacheSettings)
+	if cacheSettings.Mode == config.PromptCacheModeLifecycle {
+		cacheProfile = buildLifecycleProfile(req)
+		estimatedInputTokens = cacheProfile.TotalInputTokens
+		payload.lifecycleRequest = req
+	}
 	exactSearch, _ := ctx.Value(exactHostedSearchStateContextKey{}).(*exactHostedSearchState)
 	if exactSearch == nil && cacheSettings.Mode == config.PromptCacheModeSub2API {
 		body, err := json.Marshal(req)
@@ -866,7 +879,14 @@ func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRe
 					round.cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, round.inputTokens)
 				}
 				if cacheSettings.Enabled && exactSearch == nil {
-					h.promptCache.UpdateWithSettings(account.ID, cacheProfileWithInputTokens(cacheProfile, round.inputTokens), cacheSettings, round.cacheUsage)
+					profile := cacheProfileWithInputTokens(cacheProfile, round.inputTokens)
+					if cacheSettings.Mode == config.PromptCacheModeLifecycle {
+						// Later tool rounds or final schema validation can still fail.
+						usage, accountID := round.cacheUsage, account.ID
+						round.commitCache = func() { h.promptCache.UpdateWithSettings(accountID, profile, cacheSettings, usage) }
+					} else {
+						h.promptCache.UpdateWithSettings(account.ID, profile, cacheSettings, round.cacheUsage)
+					}
 				}
 				h.rememberAccount(payload, account)
 				return round, account, nil
@@ -959,6 +979,9 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 			diagnostic.SuppressedReasoningTokens += estimateApproxTokens(usageReasoning)
 		}
 		diagnostic.InputTokenSource = "sub2api_reference"
+		if payload.lifecycleRequest != nil {
+			diagnostic.InputTokenSource = "prefix_lifecycle_local"
+		}
 		diagnostic.OutputTokenSource = usageTokenSource(diagnostic.NativeOutputTokens)
 		diagnostic.ForwardedMaxOutputTokens = 0
 		if payload.InferenceConfig != nil {

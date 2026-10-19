@@ -108,6 +108,9 @@ func buildWebSearchFollowupPayload(base *KiroPayload, toolUses []KiroToolUse, re
 	if base.usageRequest != nil {
 		next.usageRequest = appendHostedUsageRound(base.usageRequest, toolUses, results)
 	}
+	if base.lifecycleRequest != nil {
+		next.lifecycleRequest = appendHostedUsageRound(base.lifecycleRequest, toolUses, results)
+	}
 	current := base.ConversationState.CurrentMessage.UserInputMessage
 	historyUser := current
 	if current.UserInputMessageContext != nil {
@@ -405,6 +408,9 @@ func callKiroWithHostedSearch(ctx context.Context, account *config.Account, payl
 				roundInputEstimate = referenceRequestInputTokens(next.usageRequest)
 			}
 		}
+		if next.lifecycleRequest != nil {
+			roundInputEstimate = buildLifecycleProfile(next.lifecycleRequest).TotalInputTokens
+		}
 		var cacheSnapshot openAICacheSnapshot
 		var initialCache promptCacheUsage
 		if exactSearch != nil {
@@ -455,6 +461,9 @@ func callKiroWithHostedSearch(ctx context.Context, account *config.Account, payl
 			totalCache = &OpenAITokenDetails{CachedTokens: finalCache.CacheReadInputTokens, CacheWriteTokens: finalCache.CacheCreationInputTokens, exactReference: true}
 		} else {
 			roundIn, roundOut = finalizeUsageTokens(roundIn, roundOut, roundInputEstimate, estimateOpenAIOutputTokens(text, reasoning, tools))
+			if next.lifecycleRequest != nil {
+				roundIn = roundInputEstimate
+			}
 			totalIn += roundIn
 			totalOut += roundOut
 			totalCredits += roundCredits

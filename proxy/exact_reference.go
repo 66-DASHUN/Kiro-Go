@@ -93,6 +93,10 @@ func exactClaudeUsage(payload *KiroPayload, old promptCacheUsage) (int, int, pro
 }
 
 func finalizePayloadUsage(payload *KiroPayload, input, output, estimatedInput, estimatedOutput int) (int, int) {
+	if payload != nil && payload.lifecycleRequest != nil && len(payload.HostedSearchTools) == 0 {
+		_, output = finalizeUsageTokens(input, output, estimatedInput, estimatedOutput)
+		return buildLifecycleProfile(payload.lifecycleRequest).TotalInputTokens, output
+	}
 	if payload != nil && payload.exactMeter != nil {
 		// Hosted loops retain the final round's exact converted counts themselves.
 		if len(payload.HostedSearchTools) > 0 {

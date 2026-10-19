@@ -441,7 +441,13 @@ func responsesContentPartToOpenAI(part interface{}) interface{} {
 	partType, _ := obj["type"].(string)
 	switch partType {
 	case "input_text", "output_text":
-		return map[string]interface{}{"type": "text", "text": responseTextFromItem(obj)}
+		text := map[string]interface{}{"type": "text", "text": responseTextFromItem(obj)}
+		// Retain cache metadata for consumers of the normalized request. Kiro's
+		// payload translator and the pinned reference meter ignore this field.
+		if cc, ok := obj["cache_control"]; ok {
+			text["cache_control"] = cc
+		}
+		return text
 	case "refusal":
 		return map[string]interface{}{"type": "text", "text": responseTextFromItem(obj)}
 	default:
