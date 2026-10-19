@@ -103,7 +103,7 @@ func TestClaudeDoesNotInventThinkingSignature(t *testing.T) {
 	}
 }
 
-func TestClaudeStreamMessageDeltaUsageIsOutputOnly(t *testing.T) {
+func TestClaudeStreamMessageDeltaUsageMatchesReference(t *testing.T) {
 	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeKiroTextResponse(t, w, "ok")
 	})
@@ -119,8 +119,8 @@ func TestClaudeStreamMessageDeltaUsageIsOutputOnly(t *testing.T) {
 		if !ok {
 			t.Fatalf("message_delta usage missing: %#v", frame.Data)
 		}
-		if len(usage) != 1 || usage["output_tokens"] == nil {
-			t.Fatalf("message_delta must contain only output_tokens: %#v", usage)
+		if len(usage) != 2 || usage["output_tokens"] == nil {
+			t.Fatalf("message_delta must contain reference input_tokens and output_tokens: %#v", usage)
 		}
 		return
 	}

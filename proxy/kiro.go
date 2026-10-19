@@ -151,7 +151,8 @@ func InitKiroHttpClient(proxyURL string) {
 }
 
 type KiroPayload struct {
-	usageRequest      *ClaudeRequest // Public semantic request for hosted-round metering; never serialized.
+	exactMeter        *exactRequestMeter // Reference usage observer; never serialized.
+	usageRequest      *ClaudeRequest     // Public semantic request for hosted-round metering; never serialized.
 	outputBudget      *outputBudget
 	structuredOutput  *claudeStructuredOutput
 	HostedSearchTools map[string]bool `json:"-"`
@@ -354,7 +355,9 @@ func CallKiroAPIContext(ctx context.Context, account *config.Account, payload *K
 	if budget == nil && payload.InferenceConfig != nil {
 		budget = newOutputBudget(payload.InferenceConfig.MaxTokens)
 	}
-	callback = wrapOutputBudget(callback, budget)
+	if payload.exactMeter == nil {
+		callback = wrapOutputBudget(callback, budget)
+	}
 	if callback != nil && callback.OnToolUse != nil && len(payload.ToolNameMap) > 0 {
 		originalOnToolUse := callback.OnToolUse
 		nameMap := payload.ToolNameMap
@@ -469,7 +472,15 @@ endpointLoop:
 				continue endpointLoop
 			}
 
-			emitted, err := parseEventStreamTrackedContext(ctx, resp.Body, callback)
+			var emitted bool
+			if payload.exactMeter != nil {
+				if payload.exactMeter.Commit != nil {
+					payload.exactMeter.Commit()
+				}
+				emitted, err = parseExactEventStreamContext(ctx, resp.Body, payload, callback)
+			} else {
+				emitted, err = parseEventStreamTrackedContext(ctx, resp.Body, callback)
+			}
 			resp.Body.Close()
 			if err == nil {
 				return nil

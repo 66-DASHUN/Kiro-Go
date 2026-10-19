@@ -12,7 +12,7 @@ import (
 )
 
 func TestStructuredOutputConstraintSurvivesPromptFilters(t *testing.T) {
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload KiroPayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
@@ -32,8 +32,8 @@ func TestStructuredOutputConstraintSurvivesPromptFilters(t *testing.T) {
 	}
 }
 
-func TestStructuredOutputFailureAccountsOnceAndDoesNotCommitCache(t *testing.T) {
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+func TestLegacyStructuredOutputFailureAccountsOnceAndDoesNotCommitCache(t *testing.T) {
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "not json"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"inputTokens": 100, "outputTokens": 3, "stopReason": "end_turn"}), awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": .25}))
 	})
 	key, err := config.AddApiKey(config.ApiKeyEntry{ID: "structured-key", Key: "sk-structured-local", Enabled: true})
@@ -92,7 +92,7 @@ func TestClaudeStructuredOutputJSONAndSSE(t *testing.T) {
 		for _, search := range []bool{false, true} {
 			t.Run(fmt.Sprintf("stream=%v/search=%v", stream, search), func(t *testing.T) {
 				var calls atomic.Int32
-				h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 					calls.Add(1)
 					var payload KiroPayload
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -152,7 +152,7 @@ func TestClaudeStructuredOutputJSONAndSSE(t *testing.T) {
 func TestClaudeStructuredOutputNormalizesJSONCodeFence(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 				writeKiroTextResponse(t, w, "```json\n{\"answer\":42}\n```")
 			})
 			body := fmt.Sprintf(`{"model":"claude-sonnet-4.5","max_tokens":128,"stream":%v,%s,"messages":[{"role":"user","content":"answer"}]}`, stream, structuredFixture)
@@ -194,7 +194,7 @@ func TestClaudeStructuredOutputRejectsInvalidResponsesWithoutRetry(t *testing.T)
 		for _, answer := range []string{`not json`, `{"answer":"42"}`, `{"answer":42,"extra":true}`, `{}`, `{"answer":42} {}`} {
 			t.Run(fmt.Sprintf("%v/%s", stream, answer), func(t *testing.T) {
 				var calls atomic.Int32
-				h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) { calls.Add(1); writeKiroTextResponse(t, w, answer) })
+				h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) { calls.Add(1); writeKiroTextResponse(t, w, answer) })
 				body := fmt.Sprintf(`{"model":"claude-sonnet-4.5","max_tokens":2048,"stream":%v,%s,"messages":[{"role":"user","content":"answer"}]}`, stream, structuredFixture)
 				r := postClaudeMessages(t, h, body)
 				if r.Code != http.StatusBadGateway || calls.Load() != 1 || strings.Contains(r.Body.String(), "message_start") {
@@ -212,7 +212,7 @@ func TestClaudeStructuredOutputRejectsInvalidRequestBeforeUpstream(t *testing.T)
 		`{"type":"json_schema","schema":{"$ref":"file:///etc/passwd"}}`,
 	} {
 		t.Run(format, func(t *testing.T) {
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 				t.Error("invalid schema reached upstream")
 				writeKiroTextResponse(t, w, "ok")
 			})

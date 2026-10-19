@@ -32,6 +32,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
 	}
+	publicBody := append([]byte(nil), body...)
 	body = inlineRemoteImages(r.Context(), body)
 
 	var req OpenAIResponsesRequest
@@ -68,8 +69,32 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	actualModel, thinking := ParseModelAndThinking(prepared.OpenAIRequest.Model, thinkingCfg.Suffix)
 	prepared.OpenAIRequest.Model = actualModel
 	thinking = resolveThinkingWithEffort(thinking, prepared.OpenAIRequest.ReasoningEffort)
+	exactMeter, err := newExactRequestMeter(r.Context(), config.EffectivePromptCacheSettings(apiKeyID), "responses", publicBody, actualModel, prepared.OpenAIRequest.Stream, thinking, prepared.OpenAIRequest.MaxTokens)
+	if err != nil {
+		h.sendOpenAIError(w, 400, "invalid_request_error", err.Error())
+		return
+	}
+	// Stored Responses history is a local extension; count the actual reconstructed
+	// request through the reference converter, keeping the ingress cache namespace.
+	if exactMeter != nil && len(previousMessages) > 0 {
+		effectiveBody, marshalErr := json.Marshal(prepared.OpenAIRequest)
+		if marshalErr != nil {
+			h.sendOpenAIError(w, 400, "invalid_request_error", marshalErr.Error())
+			return
+		}
+		effective, countErr := newExactRequestMeter(r.Context(), config.EffectivePromptCacheSettings(apiKeyID), "chat_completions", effectiveBody, actualModel, prepared.OpenAIRequest.Stream, thinking, prepared.OpenAIRequest.MaxTokens)
+		if countErr != nil {
+			h.sendOpenAIError(w, 400, "invalid_request_error", countErr.Error())
+			return
+		}
+		exactMeter.EstimatedInput = effective.EstimatedInput
+	}
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&prepared.OpenAIRequest)
+	if exactMeter != nil {
+		estimatedInputTokens = exactMeter.EstimatedInput
+	}
 	kiroPayload := OpenAIToKiro(&prepared.OpenAIRequest, thinking)
+	kiroPayload.exactMeter = exactMeter
 	h.applyReasoningEffort(kiroPayload, prepared.OpenAIRequest.Model, prepared.OpenAIRequest.ReasoningEffort)
 	apiKeyReservation, err := reserveApiKeyUsage(apiKeyID, apiKeyValue, tokenBudget(estimatedInputTokens))
 	if err != nil {
@@ -207,10 +232,8 @@ func (h *Handler) handleOpenAIResponsesNonStream(ctx context.Context, w http.Res
 				reasoningContent = ""
 			}
 			estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, meteredReasoning, toolUses)
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
-			if len(payload.HostedSearchTools) == 0 && config.EffectivePromptCacheSettings(apiKeyIDFromContext(ctx)).Mode == config.PromptCacheModeSub2API {
-				inputTokens = estimatedInputTokens
-			}
+			inputTokens, outputTokens = finalizePayloadUsage(payload, inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+
 			cacheDetails := hostedCache
 			if len(payload.HostedSearchTools) == 0 {
 				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)
@@ -572,10 +595,8 @@ func (h *Handler) handleOpenAIResponsesStream(ctx context.Context, w http.Respon
 				meteredReasoning = inlineReasoning
 			}
 			estimatedOutputTokens := estimateOpenAIOutputTokens(meteredText, meteredReasoning, toolUses)
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
-			if len(payload.HostedSearchTools) == 0 && config.EffectivePromptCacheSettings(apiKeyIDFromContext(ctx)).Mode == config.PromptCacheModeSub2API {
-				inputTokens = estimatedInputTokens
-			}
+			inputTokens, outputTokens = finalizePayloadUsage(payload, inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+
 			cacheDetails := hostedCache
 			if len(payload.HostedSearchTools) == 0 {
 				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)

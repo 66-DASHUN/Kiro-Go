@@ -1,0 +1,82 @@
+{
+  "requests": [
+    {
+      "request": {
+        "messages": [
+          {
+            "content": "Hello",
+            "role": "user"
+          }
+        ]
+      },
+      "tokens": 12
+    },
+    {
+      "request": {
+        "messages": [
+          {
+            "content": "你好，请输出 JSON。",
+            "role": "user"
+          }
+        ],
+        "system": "You are helpful.",
+        "tools": [
+          {
+            "description": "Find a record",
+            "input_schema": {
+              "type": "object"
+            },
+            "name": "lookup"
+          }
+        ]
+      },
+      "tokens": 168
+    },
+    {
+      "request": {
+        "messages": [
+          {
+            "content": [
+              {
+                "cache_control": {
+                  "ttl": "1h",
+                  "type": "ephemeral"
+                },
+                "text": "A < B & C",
+                "type": "text"
+              }
+            ],
+            "role": "user"
+          },
+          {
+            "content": [
+              {
+                "id": "tool_123",
+                "input": {
+                  "path": "a.go"
+                },
+                "name": "read",
+                "type": "tool_use"
+              }
+            ],
+            "role": "assistant"
+          },
+          {
+            "content": [
+              {
+                "content": "contents",
+                "is_error": true,
+                "tool_use_id": "tool_123",
+                "type": "tool_result"
+              }
+            ],
+            "role": "user"
+          }
+        ]
+      },
+      "tokens": 97
+    }
+  ],
+  "revision": "1cd5141b8b978ef2f5121b9805885706991e5000",
+  "algorithm": "original official with initialization fallback"
+}

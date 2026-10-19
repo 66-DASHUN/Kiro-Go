@@ -20,7 +20,7 @@ func TestClaudeHostedSearchReasoningDiagnosticRespectsDisplay(t *testing.T) {
 			logger.SetLevel(logger.LevelInfo)
 			t.Cleanup(func() { logger.ResetOutput(); logger.SetLevel(level) })
 			const reasoning = "Observed native reasoning before the answer."
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 				writeFrames(w, awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": reasoning}), awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"signature": "sig"}), awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}), meteringFrame(t))
 			})
 			body := map[string]interface{}{"model": "claude-opus-5.5", "max_tokens": 1024, "thinking": map[string]interface{}{"type": "adaptive", "display": display}, "messages": []map[string]interface{}{{"role": "user", "content": "Reply hello."}}, "tools": []ClaudeTool{nativeWebSearchTool()}}
@@ -52,7 +52,7 @@ func TestClaudeUnrequestedNativeReasoningIsCountedButNotDisplayed(t *testing.T) 
 		for _, mode := range []string{"omitted", "disabled", "adaptive-omitted"} {
 			for _, nativeUsage := range []bool{false, true} {
 				t.Run(fmt.Sprintf("stream=%t/mode=%s/native=%t", stream, mode, nativeUsage), func(t *testing.T) {
-					h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+					h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 						frames := [][]byte{
 							awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": reasoning}),
 							awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"signature": signature}),
@@ -93,7 +93,7 @@ func TestClaudeUnrequestedNativeReasoningIsCountedButNotDisplayed(t *testing.T) 
 
 func TestClaudeHostedRoundCountsUnrequestedNativeReasoning(t *testing.T) {
 	const reasoning = "Observed native reasoning before a search."
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeFrames(w,
 			awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": reasoning}),
 			awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"signature": "signature"}),

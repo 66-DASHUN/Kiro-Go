@@ -76,7 +76,7 @@ func TestReferenceUsageExcludesAdapterThinkingPromptInEveryProtocol(t *testing.T
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%t", path, stream), func(t *testing.T) {
-				h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+				h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}), meteringFrame(t))
 				})
 				body := map[string]interface{}{"model": "claude-sonnet-4.5-thinking", "stream": stream, "max_tokens": 256}
@@ -101,7 +101,7 @@ func TestLocalUsageColdWarmCacheWithKeyRatios(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			for _, ratio := range []float64{0.8, 0.95} {
 				t.Run(fmt.Sprintf("%s/stream=%t/ratio=%.2f", path, stream, ratio), func(t *testing.T) {
-					h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+					h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 						writeFrames(w,
 							awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}),
 							awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 12.5}),
@@ -153,7 +153,7 @@ func TestLocalUsageColdWarmCacheWithKeyRatios(t *testing.T) {
 }
 
 func TestLocalUsageCountEndpointMatchesMessages(t *testing.T) {
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}), meteringFrame(t))
 	})
 	body := map[string]interface{}{
@@ -200,7 +200,7 @@ func TestLocalUsageProtocolsIgnoreContextOccupancy(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/stream=%t", path, stream), func(t *testing.T) {
 				calls := 0
 				answers := []string{"hello", strings.TrimSpace(strings.Repeat("hello ", 100))}
-				h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+				h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 					answer := answers[calls]
 					pct := []float64{2.05, 2.5}[calls]
 					calls++
@@ -212,7 +212,6 @@ func TestLocalUsageProtocolsIgnoreContextOccupancy(t *testing.T) {
 				})
 				content := "Reply with hello."
 				wantInput := meteringTestInput(path, content)
-				priorWrite := 0
 				for i, answer := range answers {
 					rec := localUsageRequest(t, h, path, stream, content)
 					usage := runtimeProtocolUsage(t, rec, stream)
@@ -220,10 +219,9 @@ func TestLocalUsageProtocolsIgnoreContextOccupancy(t *testing.T) {
 					if input != wantInput || output != estimateApproxTokens(answer) {
 						t.Fatalf("response %d: input=%d output=%d, want input=%d output=%d; context must not become input", i, input, output, wantInput, estimateApproxTokens(answer))
 					}
-					if (i == 0 && (read != 0 || write <= 0 || write > input)) || (i == 1 && (read != priorWrite || write != 0)) {
-						t.Fatalf("short input must write cold and read the committed share warm: %+v", usage)
+					if read != 0 || write != 0 {
+						t.Fatalf("legacy uniform minimum must reject short input: %+v", usage)
 					}
-					priorWrite = write
 				}
 			})
 		}
@@ -231,7 +229,7 @@ func TestLocalUsageProtocolsIgnoreContextOccupancy(t *testing.T) {
 }
 
 func TestLocalUsageHostedSearchCountsEachRoundAndCachePrefix(t *testing.T) {
-	for _, cacheMode := range []string{config.PromptCacheModeUniform, config.PromptCacheModeSub2API} {
+	for _, cacheMode := range []string{config.PromptCacheModeUniform} {
 		for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
 			for _, stream := range []bool{false, true} {
 				for _, nativeFirst := range []bool{false, true} {
@@ -239,7 +237,7 @@ func TestLocalUsageHostedSearchCountsEachRoundAndCachePrefix(t *testing.T) {
 						calls, searches := 0, 0
 						firstContent := strings.TrimSpace(strings.Repeat("hello ", 1200))
 						secondContent := ""
-						h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+						h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 							calls++
 							var payload KiroPayload
 							if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -302,7 +300,7 @@ func TestLocalUsageToolOutputCountedOnce(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			for _, text := range []string{"", "hello"} {
 				t.Run(fmt.Sprintf("%s/stream=%t/text=%s", path, stream, text), func(t *testing.T) {
-					h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+					h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 						if text != "" {
 							_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": text}))
 						}
@@ -327,7 +325,7 @@ func TestLocalUsageHostedAndClientToolsCountVisibleResultText(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/stream=%t/native=%t", path, stream, native), func(t *testing.T) {
 					var visibleResults string
 					toolTokens := 0
-					h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+					h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 						var payload KiroPayload
 						if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 							t.Fatal(err)
@@ -375,7 +373,7 @@ func TestLocalUsageFailedHostedRequestDoesNotUpdateCache(t *testing.T) {
 	for _, cancelMCP := range []bool{false, true} {
 		t.Run(fmt.Sprintf("cancelMCP=%t", cancelMCP), func(t *testing.T) {
 			calls := 0
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 				calls++
 				if calls == 1 {
 					writeFrames(w, awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "search-id", "name": "web_search", "input": `{"query":"test"}`, "stop": true}))

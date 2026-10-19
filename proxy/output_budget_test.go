@@ -88,7 +88,7 @@ func TestOutputBudgetThinkingSignaturesToolsAndNativeUsage(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		for _, mode := range []string{"thinking", "inline", "tool", "structured", "native"} {
 			t.Run(fmt.Sprintf("%v/%s", stream, mode), func(t *testing.T) {
-				h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+				h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 					if mode == "native" {
 						writeFrames(w, awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 0.25, "tokenUsage": map[string]interface{}{"inputTokens": 123, "outputTokens": 99}}))
 					}
@@ -143,7 +143,7 @@ func TestOutputBudgetSharedAcrossSearchRounds(t *testing.T) {
 		for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 			t.Run(fmt.Sprintf("%s/%v", path, stream), func(t *testing.T) {
 				var calls atomic.Int32
-				h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+				h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 					if calls.Add(1) == 1 {
 						writeFrames(w, webSearchToolUseFrame(t, "s1", "test"), meteringFrame(t))
 					} else {
@@ -174,7 +174,7 @@ func TestOutputBudgetSharedAcrossSearchRounds(t *testing.T) {
 }
 
 func TestOutputBudgetClientCancellationIsStillCancellation(t *testing.T) {
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) { writeKiroTextResponse(t, w, "answer") })
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) { writeKiroTextResponse(t, w, "answer") })
 	_ = h
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -186,7 +186,7 @@ func TestOutputBudgetClientCancellationIsStillCancellation(t *testing.T) {
 }
 
 func TestOutputBudgetCancellationDuringEmissionWins(t *testing.T) {
-	newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+	newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 		writeKiroTextResponse(t, w, strings.Repeat("hello ", 100))
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -227,7 +227,7 @@ func TestOutputBudgetStopsSearchBeforePaidFollowup(t *testing.T) {
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 		t.Run(path, func(t *testing.T) {
 			var calls atomic.Int32
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 				calls.Add(1)
 				writeFrames(w, webSearchToolUseFrame(t, "s1", "test"), meteringFrame(t))
 			})
@@ -251,7 +251,7 @@ func TestOutputBudgetStopsSearchBeforePaidFollowup(t *testing.T) {
 func TestOutputBudgetDirectSearchCapsGeneratedOutput(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {
-			h := newStreamTestHandler(t, func(http.ResponseWriter, *http.Request) { t.Error("direct search called model") })
+			h := newLegacyMeteringTestHandler(t, func(http.ResponseWriter, *http.Request) { t.Error("direct search called model") })
 			stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
 			rec := postClaudeMessages(t, h, fmt.Sprintf(`{"model":"claude-sonnet-4.5","max_tokens":8,"stream":%v,"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"Perform a web search for the query: go release"}]}`, stream))
 			text, thinking, _, stop, tools := outputBudgetClaudeContent(t, rec.Body.String(), stream)
@@ -264,7 +264,7 @@ func TestOutputBudgetDirectSearchCapsGeneratedOutput(t *testing.T) {
 
 func TestOutputBudgetRestoresDiscardedSearchAttempt(t *testing.T) {
 	var calls atomic.Int32
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 		if calls.Add(1) == 1 {
 			writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "discarded discarded discarded discarded"}))
 			return
@@ -282,7 +282,7 @@ func TestOutputBudgetCompletesBeforeFollowingUpstreamException(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {
 			var calls atomic.Int32
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 				calls.Add(1)
 				writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": strings.Repeat("hello ", 15)}), awsEventStreamFrameWithHeaders(t, map[string]string{":message-type": "exception", ":exception-type": "ThrottlingException"}, map[string]interface{}{"message": "after output limit"}))
 			})
@@ -298,7 +298,7 @@ func TestOutputBudgetCompletesBeforeFollowingUpstreamException(t *testing.T) {
 func TestOutputBudgetPreservesOnlyObservedMetering(t *testing.T) {
 	for _, observed := range []bool{false, true} {
 		t.Run(fmt.Sprint(observed), func(t *testing.T) {
-			newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 				meter := awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 0.25, "tokenUsage": map[string]interface{}{"inputTokens": 123, "outputTokens": 99}})
 				content := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": strings.Repeat("hello ", 100)})
 				if observed {
@@ -331,7 +331,7 @@ func TestOutputBudgetEnforcesReturnedText(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {
 			var calls atomic.Int32
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
 				var payload KiroPayload
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {

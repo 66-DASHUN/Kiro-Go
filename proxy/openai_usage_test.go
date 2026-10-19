@@ -33,7 +33,7 @@ func TestCacheEstimatesReachChatAndResponsesUsage(t *testing.T) {
 	for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
 		for _, stream := range []bool{false, true} {
 			t.Run(path+map[bool]string{false: "/json", true: "/sse"}[stream], func(t *testing.T) {
-				h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), meteringFrame(t))
 				})
 				messages := []map[string]interface{}{{"role": "user", "content": strings.Repeat("stable prefix ", 1000)}, {"role": "assistant", "content": "understood"}, {"role": "user", "content": "next"}}

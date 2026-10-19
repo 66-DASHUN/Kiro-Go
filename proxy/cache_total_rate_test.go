@@ -669,9 +669,7 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 }
 
 func TestSub2APICacheProtocolJSONAndSSE(t *testing.T) {
-	for _, ratio := range []float64{.9, 1} {
-		t.Run(fmt.Sprint(ratio), func(t *testing.T) { testCacheProtocolJSONAndSSE(t, "sub2api", ratio) })
-	}
+	testExactReferenceHTTPMatrix(t)
 }
 
 func testCacheProtocolJSONAndSSE(t *testing.T, policyMode string, initialRatio float64) {

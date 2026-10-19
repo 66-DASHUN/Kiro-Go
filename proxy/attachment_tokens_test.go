@@ -67,7 +67,7 @@ func TestAttachmentImageDimensionsNotEntropy(t *testing.T) {
 }
 
 func TestAttachmentCountEndpointAndInferenceParity(t *testing.T) {
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) { writeKiroTextResponse(t, w, "hello") })
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) { writeKiroTextResponse(t, w, "hello") })
 	srv, _ := newRemoteImageServer(t, true)
 	inputs := []interface{}{
 		[]interface{}{map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "url", "url": srv.URL + "/img.png"}}},

@@ -53,43 +53,9 @@ func fetchRemoteImage(ctx context.Context, raw string) (string, string, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
 		return "", "", fmt.Errorf("image URL must be a public HTTP or HTTPS URL without credentials")
 	}
-	//! Every dial (redirects included) is pinned to addresses checked here, so a
-	//! hostname cannot re-resolve to an internal address after the check.
-	transport := &http.Transport{TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, err
-		}
-		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		if err != nil {
-			return nil, fmt.Errorf("image host lookup failed")
-		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("image host has no address")
-		}
-		for _, ip := range ips {
-			if !remoteImageAddrAllowed(ip) {
-				return nil, fmt.Errorf("image URL resolves to a non-public address")
-			}
-		}
-		d := net.Dialer{Timeout: 10 * time.Second}
-		var last error
-		for _, ip := range ips {
-			conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-			if err == nil {
-				return conn, nil
-			}
-			last = err
-		}
-		return nil, last
-	}}
+	transport := newGuardedRemoteImageTransport()
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 || (req.URL.Scheme != "http" && req.URL.Scheme != "https") || req.URL.User != nil {
-			return fmt.Errorf("unsupported image redirect")
-		}
-		return nil
-	}}
+	client := &http.Client{Transport: transport, CheckRedirect: checkRemoteImageRedirect}
 	req, err := http.NewRequestWithContext(ctx, "GET", raw, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid image URL")
@@ -117,6 +83,39 @@ func fetchRemoteImage(ctx context.Context, raw string) (string, string, error) {
 		return "", "", fmt.Errorf("URL did not return a supported PNG, JPEG, GIF or WebP image")
 	}
 	return base64.StdEncoding.EncodeToString(data), media, nil
+}
+
+func newGuardedRemoteImageTransport() *http.Transport {
+	// Every dial, redirects included, pins the connection to checked IPs.
+	// Proxy is intentionally nil: environment proxies must not bypass the dial.
+	return &http.Transport{TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		if err != nil {
+			return nil, fmt.Errorf("image host lookup failed")
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("image host has no address")
+		}
+		for _, ip := range ips {
+			if !remoteImageAddrAllowed(ip) {
+				return nil, fmt.Errorf("image URL resolves to a non-public address")
+			}
+		}
+		d := net.Dialer{Timeout: 10 * time.Second}
+		var last error
+		for _, ip := range ips {
+			conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			last = err
+		}
+		return nil, last
+	}}
 }
 
 // inlineRemoteImages downloads http(s) image URLs in recognized image blocks

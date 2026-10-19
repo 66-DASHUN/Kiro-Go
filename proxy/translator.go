@@ -183,6 +183,7 @@ type ClaudeCacheCreationUsage struct {
 }
 
 type ClaudeUsage struct {
+	exactReference           bool
 	InputTokens              int                       `json:"input_tokens"`
 	OutputTokens             int                       `json:"output_tokens"`
 	CacheCreationInputTokens int                       `json:"cache_creation_input_tokens,omitempty"`
@@ -200,6 +201,9 @@ func (usage ClaudeUsage) MarshalJSON() ([]byte, error) {
 	if usage.CacheCreation != nil {
 		cache.CacheCreation5mInputTokens = usage.CacheCreation.Ephemeral5mInputTokens
 		cache.CacheCreation1hInputTokens = usage.CacheCreation.Ephemeral1hInputTokens
+	}
+	if usage.exactReference {
+		return json.Marshal(exactClaudeUsageMap(usage.InputTokens, usage.OutputTokens, cache))
 	}
 	includeCache := usage.CacheCreation != nil || usage.CacheCreationInputTokens != 0 || usage.CacheReadInputTokens != 0
 	// ClaudeUsage already stores ordinary (uncached) input, whereas the common

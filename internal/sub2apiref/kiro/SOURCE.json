@@ -1,0 +1,44 @@
+{
+  "license": "LGPL-3.0",
+  "files": [
+    {
+      "vendored_sha256": "2083947e47a85340fa6581151b367b839f597d47c5501ffa65acd6aadd02f741",
+      "source": "backend/internal/pkg/kiro/translator.go",
+      "file": "translator.go",
+      "source_sha256": "3c1e3b52bc059963a62f045c9722299f0daa5ee236037c7828e51c7c9ff571ce"
+    },
+    {
+      "vendored_sha256": "d9bfde4a6de6c4a145b18f445b922f3f6b3ebc9aa6f16ed6c2a2a37f7e9ce7bf",
+      "source": "backend/internal/pkg/kiro/image_tokens.go",
+      "file": "image_tokens.go",
+      "source_sha256": "d9bfde4a6de6c4a145b18f445b922f3f6b3ebc9aa6f16ed6c2a2a37f7e9ce7bf"
+    },
+    {
+      "vendored_sha256": "5a98e2d7c1f29fbac23ae85fa05f054684d001ee9da02f7673755a9884bd0e6d",
+      "source": "backend/internal/pkg/kiro/models.go",
+      "file": "models.go",
+      "source_sha256": "5a98e2d7c1f29fbac23ae85fa05f054684d001ee9da02f7673755a9884bd0e6d"
+    },
+    {
+      "vendored_sha256": "eb2bb25cdc1a556692b9a149963d87a80f681567f8439586340a63e4d2acbc71",
+      "source": "backend/internal/pkg/kiro/kiro_truncation_safety.go",
+      "file": "kiro_truncation_safety.go",
+      "source_sha256": "eb2bb25cdc1a556692b9a149963d87a80f681567f8439586340a63e4d2acbc71"
+    },
+    {
+      "vendored_sha256": "3d82c8da3602e2efa152d7a6d3ae296e0afd7b589aca25a58c5dd9d41034d3d8",
+      "source": "backend/internal/pkg/kiro/websearch.go",
+      "file": "websearch.go",
+      "source_sha256": "3d82c8da3602e2efa152d7a6d3ae296e0afd7b589aca25a58c5dd9d41034d3d8"
+    },
+    {
+      "source": "backend/internal/pkg/kiro/websearch_stream.go",
+      "file": "websearch_stream.go",
+      "source_sha256": "1e26a5689afac8898120896aa3280e1c6d8e2609bc975250d7e6ae8f2f44cc01",
+      "vendored_sha256": "1e26a5689afac8898120896aa3280e1c6d8e2609bc975250d7e6ae8f2f44cc01"
+    }
+  ],
+  "transformation": "Only translator.go tokenizer import path rewritten to kiro-proxy/internal/sub2apiref/anthropictokenizer",
+  "repository": "https://github.com/nianzs/sub2api",
+  "revision": "1cd5141b8b978ef2f5121b9805885706991e5000"
+}

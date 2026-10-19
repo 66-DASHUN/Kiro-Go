@@ -1,0 +1,166 @@
+{
+  "repository": "https://github.com/nianzs/sub2api",
+  "revision": "1cd5141b8b978ef2f5121b9805885706991e5000",
+  "files": [
+    {
+      "source": "backend/internal/pkg/apicompat/anthropic_to_responses.go",
+      "sha256": "88c8e7c36d2d282947e4705bc233727a061cd3db3b3fbf5238814d817f49bde8",
+      "target": "internal/sub2apiref/apicompat/anthropic_to_responses.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/anthropic_to_responses_response.go",
+      "sha256": "6564eb33812a9b322798fe2d5a242a6f315979224c8443525cf63bb3f9ad2769",
+      "target": "internal/sub2apiref/apicompat/anthropic_to_responses_response.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/chatcompletions_anthropic_bridge.go",
+      "sha256": "de337a429142a36d8a60eb39d84c448b4a1772a72696eed7017b2a4578de558c",
+      "target": "internal/sub2apiref/apicompat/chatcompletions_anthropic_bridge.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/chatcompletions_responses_bridge.go",
+      "sha256": "6867beba396842f6f0ce72a07a1fc7b4ef6078b42d6bbaef9bfd939bd4eb34a7",
+      "target": "internal/sub2apiref/apicompat/chatcompletions_responses_bridge.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/chatcompletions_to_responses.go",
+      "sha256": "ec94b954d896f9de37e9ff72b08db50838eb320746a5840b78d9a45b0540029e",
+      "target": "internal/sub2apiref/apicompat/chatcompletions_to_responses.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_client_tools.go",
+      "sha256": "93ed8c1b0fe03c05ffa6737a81e868566c6f8b35945f01fe02416465e20816a4",
+      "target": "internal/sub2apiref/apicompat/responses_client_tools.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_compaction.go",
+      "sha256": "4bf3b7ff6db1247b9f6c22972b121fc80f296ad1e55616d313f9534cdcdb75be",
+      "target": "internal/sub2apiref/apicompat/responses_compaction.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_namespace.go",
+      "sha256": "774b11581034f7e6ae57eac0bab7a3b1eea8a06b20881eda9f59a7a047ea4c7d",
+      "target": "internal/sub2apiref/apicompat/responses_namespace.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_stream_event_wire.go",
+      "sha256": "331848c1dcd6b9b6016153defa6417300ca243906f5192fc1fd6f2c5598e3b23",
+      "target": "internal/sub2apiref/apicompat/responses_stream_event_wire.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_tool_output_media.go",
+      "sha256": "116b956f0c9fb6454ae96c6e093e15a94793d07b3631b0deb621a586c8b22e3e",
+      "target": "internal/sub2apiref/apicompat/responses_tool_output_media.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_tool_search_discoveries.go",
+      "sha256": "f42c74bc5f1686710590761501419e7f36b82d5dda8e1745cd4b71b899c2b04e",
+      "target": "internal/sub2apiref/apicompat/responses_tool_search_discoveries.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_to_anthropic.go",
+      "sha256": "02f9cc5aa6f9cde9ff4477e5380db63ec58c10263cbf85149b1717e8f5474cdd",
+      "target": "internal/sub2apiref/apicompat/responses_to_anthropic.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_to_anthropic_request.go",
+      "sha256": "df6f105daed359894ec9b22b2498857eb537ccb72070a85dcc8a294ac2cbe4ae",
+      "target": "internal/sub2apiref/apicompat/responses_to_anthropic_request.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_to_anthropic_tool_schema.go",
+      "sha256": "e25dd9569eaebfb7f7f3abf7dd24d359eb677312057ccc1e17c8f1a10dd69940",
+      "target": "internal/sub2apiref/apicompat/responses_to_anthropic_tool_schema.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/responses_to_chatcompletions.go",
+      "sha256": "9c216530247bb30c6d89388f56dfecbc21fbca0b4ad9674ec462a562eeb0f085",
+      "target": "internal/sub2apiref/apicompat/responses_to_chatcompletions.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/response_format.go",
+      "sha256": "9857340bb0538c214c07ded1ee89817d0973dcbb1ac45bb1828e5693ed7463f5",
+      "target": "internal/sub2apiref/apicompat/response_format.go"
+    },
+    {
+      "source": "backend/internal/pkg/apicompat/types.go",
+      "sha256": "d2a079f14858c041e4c0f0deebbb9e12edb5cf18f090c1c169cef9cc5c08b89a",
+      "target": "internal/sub2apiref/apicompat/types.go"
+    },
+    {
+      "source": "backend/internal/pkg/claude/constants.go",
+      "sha256": "f2e93850990ef2addce056eb9a3e4cdb1b8f3e49a75a2e9389b281278a58b508",
+      "target": "internal/sub2apiref/claude/constants.go"
+    },
+    {
+      "source": "backend/internal/pkg/claude/effort_catalog.go",
+      "sha256": "ac0c7df1d3afed3023ef786d9122c771f07e0e21739d5252f99c23cee9b52c86",
+      "target": "internal/sub2apiref/claude/effort_catalog.go"
+    },
+    {
+      "source": "backend/internal/pkg/openai/constants.go",
+      "sha256": "420ea6f3185e2c13867ae4b4a7b61d14f436038bdc0a51b3b45f37ca1575a5c5",
+      "target": "internal/sub2apiref/openai/model_helpers.go"
+    },
+    {
+      "source": "backend/internal/pkg/openai/constants.go",
+      "sha256": "420ea6f3185e2c13867ae4b4a7b61d14f436038bdc0a51b3b45f37ca1575a5c5",
+      "target": "internal/sub2apiref/openai/reference/constants.go.txt"
+    },
+    {
+      "source": "backend/internal/service/kiro_cache_emulation.go",
+      "sha256": "b575f1005de4609d1f50d088afe9d56cb9d77b18c672596a6400b885773d3cb6",
+      "target": "internal/sub2apiref/cache/reference/kiro_cache_emulation.go.txt"
+    },
+    {
+      "source": "backend/internal/service/kiro_cache_emulation.go",
+      "sha256": "b575f1005de4609d1f50d088afe9d56cb9d77b18c672596a6400b885773d3cb6",
+      "target": "internal/sub2apiref/cache/kiro_cache_emulation.go"
+    },
+    {
+      "source": "backend/internal/service/gateway_forward_as_responses.go",
+      "sha256": "12d4b7089f73295e020e37e3a27ddbe7bc8272d90cf016ba86ece033d3aa6822",
+      "target": "internal/sub2apiref/cache/reference/gateway_forward_as_responses.go.txt"
+    },
+    {
+      "source": "backend/internal/service/gateway_claude_oauth_body.go",
+      "sha256": "8049ef0ff8cfbe02c0ec5be3b3ef24e965d2352b27e7b6b049a3589f1ab0e4a5",
+      "target": "internal/sub2apiref/cache/reference/gateway_claude_oauth_body.go.txt"
+    },
+    {
+      "source": "backend/internal/service/kiro_runtime.go",
+      "sha256": "472d28dabba9f00c275c9c231b1dc7af70ec544a4ae2d18048a89ee685f385f2",
+      "target": "internal/sub2apiref/cache/reference/kiro_runtime.go.txt"
+    },
+    {
+      "source": "backend/internal/service/openai_responses_ingress_compat.go",
+      "sha256": "4dfe6e7b36f66ef84b3d1c57060c29c37a7528a0fe0d83e1b6f290d28d500744",
+      "target": "internal/sub2apiref/cache/responses_legacy.go"
+    },
+    {
+      "source": "backend/internal/service/kiro_cache_emulation_test.go",
+      "sha256": "22ab03a2cd368f3a5f4649baf7c796b7ef8229878f95b9826fc94209fc211685",
+      "target": "internal/sub2apiref/cache/reference_fixtures_test.go"
+    },
+    {
+      "source": "backend/internal/service/openai_json_decode.go",
+      "sha256": "592b4a1f21684985547927fbefab4e7194883ff835f13d305b74a8dfb117c488",
+      "target": "internal/sub2apiref/cache/json_helpers.go"
+    },
+    {
+      "source": "backend/internal/service/openai_gateway_upstream_errors.go",
+      "sha256": "4fc30bbc5bdee1a180ff7d0a63d7faebb23ec8e5029690e3f1af894be580948f",
+      "target": "internal/sub2apiref/cache/json_helpers.go"
+    },
+    {
+      "source": "backend/internal/service/gateway_service.go",
+      "sha256": "c24857d2c030ad532cd73248cf69d9e41b7b2bd244291afe3dd4ff8211f2c16c",
+      "target": "internal/sub2apiref/cache/json_helpers.go"
+    },
+    {
+      "source": "backend/internal/service/openai_images.go",
+      "sha256": "a097942fb147d14de3197a1833342c11448fcbbf66a8d0d3defa2f0b63954d4a",
+      "target": "internal/sub2apiref/cache/json_helpers.go"
+    }
+  ]
+}

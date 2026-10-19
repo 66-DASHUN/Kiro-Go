@@ -821,6 +821,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ClaudeRequest
+	publicBody := append([]byte(nil), body...)
 	body = inlineRemoteImages(r.Context(), body)
 	if err := json.Unmarshal(body, &req); err != nil {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON")
@@ -840,6 +841,9 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	req.Model = actualModel
 
 	estimatedTokens := estimateClaudeRequestInputTokens(&req)
+	if meter, err := newExactRequestMeter(r.Context(), config.EffectivePromptCacheSettings(apiKeyIDFromContext(r.Context())), "anthropic", publicBody, req.Model, false, false, 0); err == nil && meter != nil {
+		estimatedTokens = meter.EstimatedInput
+	}
 	if estimatedTokens < 1 {
 		estimatedTokens = 1
 	}
@@ -869,6 +873,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		h.sendClaudeError(w, 400, "invalid_request_error", "Failed to read request body")
 		return
 	}
+	publicBody := append([]byte(nil), body...)
 	body = inlineRemoteImages(r.Context(), body)
 
 	var req ClaudeRequest
@@ -901,8 +906,19 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	if req.structuredOutput != nil {
 		thinkingResponseOpts.Format = "thinking"
 	}
+	exactMeter, err := newExactRequestMeter(r.Context(), config.EffectivePromptCacheSettings(apiKeyID), "anthropic", publicBody, req.Model, req.Stream, thinking, req.MaxTokens)
+	if err != nil {
+		h.sendClaudeError(w, 400, "invalid_request_error", err.Error())
+		return
+	}
 	estimatedInputTokens := estimateClaudeRequestInputTokens(&req)
+	if exactMeter != nil {
+		estimatedInputTokens = exactMeter.EstimatedInput
+	}
 	cacheProfile := h.promptCache.BuildClaudeProfileWithSettings(effectiveReq, estimatedInputTokens, config.EffectivePromptCacheSettings(apiKeyID))
+	if exactMeter != nil {
+		cacheProfile = buildExactCacheProfile("anthropic", publicBody, req.Model, estimatedInputTokens)
+	}
 	apiKeyReservation, err := reserveApiKeyUsage(apiKeyID, apiKeyValue, tokenBudget(estimatedInputTokens))
 	if err != nil {
 		recordFinalRequestWithAPIKey(r.Context(), apiKeyID, apiKeyValue, nil, req.Model, 0, 0, 0, false, http.StatusTooManyRequests, err.Error())
@@ -923,6 +939,9 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		PromptFilterChangedSystem:     filterChangedSystem,
 	})
 
+	if exactMeter != nil {
+		r = r.WithContext(withExactHostedSearchMeter(r.Context(), exactMeter))
+	}
 	switch mode, query := claudeWebSearchModeFor(&req); mode {
 	case claudeWebSearchDirect:
 		updateRequestUsageDiagnostic(r.Context(), func(diagnostic *usageDiagnostic) {
@@ -941,6 +960,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	kiroPayload := ClaudeToKiro(&req, h.claudeNeedsThinkingPrompt(&req, thinking))
 	h.applyClaudeInferenceOptions(kiroPayload, &req, thinking)
 	kiroPayload.structuredOutput = req.structuredOutput
+	kiroPayload.exactMeter = exactMeter
 	forwardedMaxOutputTokens := 0
 	if kiroPayload.InferenceConfig != nil {
 		forwardedMaxOutputTokens = kiroPayload.InferenceConfig.MaxTokens
@@ -997,7 +1017,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				"model":         model,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
-				"usage":         buildClaudeUsageMap(startInputTokens, 0, messageStartUsage, cacheSettings.Enabled),
+				"usage":         exactOrLegacyStartUsage(payload, startInputTokens, messageStartUsage, cacheSettings.Enabled),
 			},
 		})
 		messageStarted = true
@@ -1031,6 +1051,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				break
 			}
 			cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, cacheSettings)
+			bindExactCache(payload, cacheUsage)
 			messageStartUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, startInputTokens)
 
 			var inputTokens, outputTokens int
@@ -1417,6 +1438,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 			inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
 			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
 			cacheProfile = cacheProfileWithInputTokens(cacheProfile, inputTokens)
+			if in, out, u, ok := exactClaudeUsage(payload, cacheUsage); ok {
+				inputTokens, outputTokens, cacheUsage = in, out, u
+				providerInputTokens = in
+			}
 			stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
 			updateRequestUsageDiagnostic(r.Context(), func(diagnostic *usageDiagnostic) {
 				diagnostic.KiroRounds = 1
@@ -1453,7 +1478,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 					"stop_reason":   stopReason,
 					"stop_sequence": nil,
 				},
-				"usage": buildClaudeMessageDeltaUsage(outputTokens),
+				"usage": exactClaudeDeltaUsage(payload, inputTokens, outputTokens, cacheUsage),
 			})
 
 			h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
@@ -1581,6 +1606,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 				break
 			}
 			cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, cacheSettings)
+			bindExactCache(payload, cacheUsage)
 
 			var content string
 			var thinkingContent string
@@ -1659,6 +1685,10 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
 			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
 			cacheProfile = cacheProfileWithInputTokens(cacheProfile, inputTokens)
+			if in, out, u, ok := exactClaudeUsage(payload, cacheUsage); ok {
+				inputTokens, outputTokens, cacheUsage = in, out, u
+				providerInputTokens = in
+			}
 			stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
 			updateRequestUsageDiagnostic(r.Context(), func(diagnostic *usageDiagnostic) {
 				diagnostic.KiroRounds = 1
@@ -1731,6 +1761,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 					Ephemeral1hInputTokens: cacheUsage.CacheCreation1hInputTokens,
 				}
 			}
+			applyExactClaudePresentation(payload, resp)
 			h.writeClaudeBufferedResponse(w, resp, payload.structuredOutput != nil && payload.structuredOutput.stream)
 			return
 		}
@@ -1774,6 +1805,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Failed to read request body")
 		return
 	}
+	publicBody := append([]byte(nil), body...)
 	body = inlineRemoteImages(r.Context(), body)
 
 	var req OpenAIRequest
@@ -1792,7 +1824,15 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
 	thinking = resolveThinkingWithEffort(thinking, req.ReasoningEffort)
+	exactMeter, err := newExactRequestMeter(r.Context(), config.EffectivePromptCacheSettings(apiKeyID), "chat_completions", publicBody, req.Model, req.Stream, thinking, req.MaxTokens)
+	if err != nil {
+		h.sendOpenAIError(w, 400, "invalid_request_error", err.Error())
+		return
+	}
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
+	if exactMeter != nil {
+		estimatedInputTokens = exactMeter.EstimatedInput
+	}
 	apiKeyReservation, err := reserveApiKeyUsage(apiKeyID, apiKeyValue, tokenBudget(estimatedInputTokens))
 	if err != nil {
 		recordFinalRequestWithAPIKey(r.Context(), apiKeyID, apiKeyValue, nil, req.Model, 0, 0, 0, false, http.StatusTooManyRequests, err.Error())
@@ -1801,6 +1841,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
+	kiroPayload.exactMeter = exactMeter
 	h.applyReasoningEffort(kiroPayload, req.Model, req.ReasoningEffort)
 
 	if req.Stream {
@@ -2196,10 +2237,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 				usageTools = append(usageTools, KiroToolUse{Name: tc.Function.Name, Input: input})
 			}
 			estimatedOutputTokens := estimateOpenAIOutputTokens(outputContent, meteredReasoning, usageTools)
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
-			if len(payload.HostedSearchTools) == 0 && config.EffectivePromptCacheSettings(apiKeyIDFromContext(r.Context())).Mode == config.PromptCacheModeSub2API {
-				inputTokens = estimatedInputTokens
-			}
+			inputTokens, outputTokens = finalizePayloadUsage(payload, inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+
 			cacheDetails := hostedCache
 			if len(payload.HostedSearchTools) == 0 {
 				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)
@@ -2335,10 +2374,8 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, r *http.Request, 
 			}
 
 			estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, meteredReasoning, toolUses)
-			inputTokens, outputTokens = finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
-			if len(payload.HostedSearchTools) == 0 && config.EffectivePromptCacheSettings(apiKeyIDFromContext(r.Context())).Mode == config.PromptCacheModeSub2API {
-				inputTokens = estimatedInputTokens
-			}
+			inputTokens, outputTokens = finalizePayloadUsage(payload, inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
+
 			cacheDetails := hostedCache
 			if len(payload.HostedSearchTools) == 0 {
 				cacheDetails = finishOpenAICacheUsage(h.promptCache, account.ID, cacheSnapshot, inputTokens)

@@ -6,6 +6,7 @@ import "kiro-proxy/config"
 // understand. CachedTokens and CacheWriteTokens are subsets of the top-level
 // input/prompt token count.
 type OpenAITokenDetails struct {
+	exactReference   bool
 	CachedTokens     int  `json:"cached_tokens"`
 	CacheWriteTokens int  `json:"cache_write_tokens"`
 	Estimated        bool `json:"estimated"`
@@ -37,6 +38,13 @@ func resolveOpenAICacheUsageWithSettings(tracker *promptCacheTracker, accountID 
 }
 
 func addResponsesCacheUsage(response map[string]interface{}, details *OpenAITokenDetails) {
+	if details != nil && details.exactReference {
+		if values, ok := response["usage"].(map[string]int); ok {
+			response["usage"] = exactResponsesUsage(values["input_tokens"], values["output_tokens"], details)
+		}
+		return
+	}
+
 	if details == nil {
 		return
 	}
@@ -53,6 +61,10 @@ func addResponsesCacheUsage(response map[string]interface{}, details *OpenAIToke
 }
 
 func buildOpenAIUsage(inputTokens, outputTokens int, details *OpenAITokenDetails) map[string]interface{} {
+	if details != nil && details.exactReference {
+		return exactChatUsage(inputTokens, outputTokens, details)
+	}
+
 	usage := map[string]interface{}{
 		"prompt_tokens":     inputTokens,
 		"completion_tokens": outputTokens,
@@ -67,6 +79,7 @@ func buildOpenAIUsage(inputTokens, outputTokens int, details *OpenAITokenDetails
 // Dispatch and completion are split so concurrent cold requests cannot turn
 // into cache hits merely because another identical request completed first.
 type openAICacheSnapshot struct {
+	meter    *exactRequestMeter
 	profile  *promptCacheProfile
 	usage    promptCacheUsage
 	settings config.PromptCacheSettings
@@ -74,13 +87,29 @@ type openAICacheSnapshot struct {
 
 func beginOpenAICacheUsage(tracker *promptCacheTracker, accountID string, payload *KiroPayload, inputTokens int, settings config.PromptCacheSettings) openAICacheSnapshot {
 	if tracker == nil || !settings.Enabled {
-		return openAICacheSnapshot{}
+		bindExactCache(payload, promptCacheUsage{})
+		return openAICacheSnapshot{meter: payload.exactMeter}
 	}
 	profile := tracker.BuildOpenAIProfileWithSettings(payload, inputTokens, settings)
-	return openAICacheSnapshot{profile: profile, usage: tracker.ComputeWithSettings(accountID, profile, settings), settings: settings}
+	usage := tracker.ComputeWithSettings(accountID, profile, settings)
+	bindExactCache(payload, usage)
+	return openAICacheSnapshot{meter: payload.exactMeter, profile: profile, usage: usage, settings: settings}
 }
 
 func finishOpenAICacheUsage(tracker *promptCacheTracker, accountID string, snapshot openAICacheSnapshot, inputTokens int) *OpenAITokenDetails {
+	if snapshot.meter != nil && snapshot.meter.ConvertedUsage != nil {
+		v := snapshot.meter.ConvertedUsage
+		d := &OpenAITokenDetails{CacheWriteTokens: v.CacheCreationInputTokens, exactReference: true}
+		if v.InputTokensDetails != nil {
+			d.CachedTokens = v.InputTokensDetails.CachedTokens
+		}
+		return d
+	}
+	if snapshot.meter != nil && snapshot.meter.Result != nil {
+		v := snapshot.meter.Result.Usage
+		return &OpenAITokenDetails{CachedTokens: v.CacheReadInputTokens, CacheWriteTokens: v.CacheCreationInputTokens, exactReference: true}
+	}
+
 	if tracker == nil || snapshot.profile == nil || !snapshot.settings.Enabled {
 		return nil
 	}

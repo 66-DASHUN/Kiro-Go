@@ -79,7 +79,7 @@ func TestSub2APIMeteringObservedReasoningParity(t *testing.T) {
 			for _, enabled := range []bool{false, true} {
 				for _, native := range []bool{false, true} {
 					t.Run(fmt.Sprintf("%s/%t/%t/%t", path, stream, enabled, native), func(t *testing.T) {
-						h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+						h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 							if native {
 								writeFrames(w, awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "I should carefully verify the result."}), awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}))
 							} else {
@@ -126,7 +126,7 @@ func TestSub2APIMeteringOpenAIMultimodalNormalization(t *testing.T) {
 func TestSub2APIMeteringClaudeHostedInlineReasoning(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 				writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "<thinking>I should carefully verify the result.</thinking>hello"}), meteringFrame(t))
 			})
 			body := map[string]interface{}{"model": "claude-sonnet-4.5", "stream": stream, "max_tokens": 256, "thinking": map[string]string{"type": "disabled"}, "messages": []map[string]string{{"role": "user", "content": "Hello"}}, "tools": []ClaudeTool{nativeWebSearchTool()}}

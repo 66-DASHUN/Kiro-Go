@@ -239,7 +239,7 @@ func (t *promptCacheTracker) UpdateWithSettings(accountID string, profile *promp
 	}
 	if settings.Mode == config.PromptCacheModeSub2API {
 		t.recordTotalCacheDiagnostic(profile, usage)
-		t.Update(accountID, profile)
+		// Exact plans commit on upstream HTTP success, before reading the body.
 		return
 	}
 	if settings.Mode != config.PromptCacheModePrefixTotal {

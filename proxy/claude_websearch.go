@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"kiro-proxy/config"
+	refcache "kiro-proxy/internal/sub2apiref/cache"
 
 	"github.com/google/uuid"
 )
@@ -48,6 +49,132 @@ type claudeWebSearchRound struct {
 	credits            float64
 	stopReason         string
 	streamDiag         streamDiagnostic
+}
+
+type exactHostedSearchMeterContextKey struct{}
+type exactHostedSearchStateContextKey struct{}
+type directWebSearchCacheContextKey struct{}
+
+func withExactHostedSearchMeter(ctx context.Context, meter *exactRequestMeter) context.Context {
+	if meter == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, exactHostedSearchMeterContextKey{}, meter)
+}
+
+// The dedicated reference search path holds the original estimate and cache
+// plan across all iterations. JSON uses final usage; dedicated SSE suppresses
+// every inner message usage event and exposes only the original start usage.
+type exactHostedSearchState struct {
+	meter      *exactRequestMeter
+	finalMeter *exactRequestMeter
+	direct     bool
+	profile    *promptCacheProfile
+	accounts   map[string]*exactHostedSearchAccount
+	startUsage promptCacheUsage
+}
+
+type exactHostedSearchAccount struct {
+	usage  promptCacheUsage
+	commit func()
+}
+
+func newExactHostedSearchState(meter *exactRequestMeter) *exactHostedSearchState {
+	if meter == nil {
+		return nil
+	}
+	return &exactHostedSearchState{meter: meter,
+		profile:  buildExactCacheProfile(meter.Protocol, meter.Body, meter.Model, meter.EstimatedInput),
+		accounts: make(map[string]*exactHostedSearchAccount)}
+}
+
+func (s *exactHostedSearchState) prepare(payload *KiroPayload, tracker *promptCacheTracker, account string, settings config.PromptCacheSettings) promptCacheUsage {
+	meter := *s.meter
+	meter.HostedSearch = true
+	meter.Result = nil
+	payload.exactMeter = &meter
+	payload.outputBudget = nil
+	entry := s.accounts[account]
+	if entry == nil {
+		usage := tracker.ComputeWithSettings(account, s.profile, settings)
+		bindExactCache(payload, usage)
+		entry = &exactHostedSearchAccount{usage: usage, commit: meter.Commit}
+		s.accounts[account] = entry
+	} else {
+		bindExactCache(payload, entry.usage)
+	}
+	// The original bind's once is shared across every round and retry.
+	meter.Commit = entry.commit
+	s.startUsage = entry.usage
+	return entry.usage
+}
+
+func exactHostedRoundUsage(payload *KiroPayload, initial promptCacheUsage) (int, int, promptCacheUsage, bool) {
+	if payload != nil && exactDedicatedHostedStream(payload.exactMeter) {
+		usage := initial
+		ordinary := payload.exactMeter.EstimatedInput
+		if initial.exactPlan != nil && initial.exactPlan.Usage() != nil {
+			ordinary = initial.exactPlan.Usage().InputTokens
+		} else if initial.exactInput != nil {
+			ordinary = *initial.exactInput
+		}
+		usage.exactInput = &ordinary
+		// Outer message_start has no nested TTL fields.
+		usage.CacheCreation5mInputTokens, usage.CacheCreation1hInputTokens = 0, 0
+		return ordinary + usage.CacheReadInputTokens + usage.CacheCreationInputTokens, 0, usage, true
+	}
+	input, output, usage, ok := exactClaudeUsage(payload, initial)
+	if !ok {
+		return input, output, usage, false
+	}
+	if payload.exactMeter.Protocol != "anthropic" && payload.exactMeter.ConvertedUsage != nil {
+		v := payload.exactMeter.ConvertedUsage
+		usage.CacheCreationInputTokens = v.CacheCreationInputTokens
+		usage.CacheReadInputTokens = 0
+		if v.InputTokensDetails != nil {
+			usage.CacheReadInputTokens = v.InputTokensDetails.CachedTokens
+		}
+		ordinary := v.InputTokens - usage.CacheReadInputTokens - usage.CacheCreationInputTokens
+		usage.exactInput = &ordinary
+		input, output = v.InputTokens, v.OutputTokens
+	}
+	if payload.exactMeter.Stream || payload.exactMeter.Protocol != "anthropic" {
+		// The reference stream parser receives an empty context, so its final
+		// delta has ordinary input only. The surrounding Anthropic/OpenAI
+		// collector retains initial message_start cache fields when absent.
+		if usage.CacheReadInputTokens == 0 {
+			usage.CacheReadInputTokens = initial.CacheReadInputTokens
+		}
+		if usage.CacheCreationInputTokens == 0 {
+			usage.CacheCreationInputTokens = initial.CacheCreationInputTokens
+			usage.CacheCreation5mInputTokens = initial.CacheCreation5mInputTokens
+			usage.CacheCreation1hInputTokens = initial.CacheCreation1hInputTokens
+		}
+		input = *usage.exactInput + usage.CacheReadInputTokens + usage.CacheCreationInputTokens
+	}
+	return input, output, usage, true
+}
+
+func exactDedicatedHostedStream(meter *exactRequestMeter) bool {
+	if meter == nil || (!meter.Stream && meter.Protocol == "anthropic") {
+		return false
+	}
+	body, err := refcache.AnthropicBodyForModel(meter.Protocol, meter.Body, meter.Model)
+	if err != nil {
+		return false
+	}
+	var request struct {
+		Tools []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if json.Unmarshal(body, &request) != nil || len(request.Tools) != 1 {
+		return false
+	}
+	tool := request.Tools[0]
+	return strings.HasPrefix(tool.Type, "web_search") || tool.Type == "google_search" ||
+		tool.Name == "web_search" || tool.Name == "google_search" || tool.Name == "web_search_20250305"
 }
 
 type webSearchOutcome struct {
@@ -248,6 +375,20 @@ func generateWebSearchSummary(query string, results []WebSearchResult) string {
 	return b.String()
 }
 
+// Exact buildTextSummary from reference gateway_websearch_emulation.go; only
+// the local search-result type and function name differ.
+func exactWebSearchSummary(query string, results []WebSearchResult) string {
+	if len(results) == 0 {
+		return "No search results found for: " + query
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Here are the search results for \"%s\":\n\n", query)
+	for i, r := range results {
+		fmt.Fprintf(&sb, "%d. **%s**\n   %s\n   %s\n\n", i+1, r.Title, r.URL, r.Snippet)
+	}
+	return sb.String()
+}
+
 func webSearchOutcomeToolResultText(outcome webSearchOutcome) string {
 	if outcome.errorCode != "" {
 		return "web_search failed (" + outcome.errorCode + "): " + outcome.errorText
@@ -309,6 +450,9 @@ func (h *Handler) searchWebWithFailover(ctx context.Context, model, query string
 			recordAttemptError(account, model, 0, err)
 			continue
 		}
+		if prepare, ok := ctx.Value(directWebSearchCacheContextKey{}).(func(*config.Account)); ok {
+			prepare(account)
+		}
 		results, err := performKiroWebSearch(ctx, account, query)
 		if err == nil {
 			return results, account, nil
@@ -350,6 +494,25 @@ func (h *Handler) runWebSearches(ctx context.Context, model string, toolUses []K
 
 func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Request, model, query string, estimatedInputTokens int, apiKeyReservation *apiKeyUsageReservation, stream bool, maxTokens int) {
 	defer apiKeyReservation.release()
+	settings := config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID())
+	meter, _ := r.Context().Value(exactHostedSearchMeterContextKey{}).(*exactRequestMeter)
+	cacheUsage := promptCacheUsage{}
+	if meter != nil {
+		estimatedInputTokens = meter.EstimatedInput
+		profile := buildExactCacheProfile(meter.Protocol, meter.Body, meter.Model, meter.EstimatedInput)
+		// The generic direct-search reference commits before invoking its search
+		// provider, including when that provider subsequently fails.
+		r = r.WithContext(context.WithValue(r.Context(), directWebSearchCacheContextKey{}, func(account *config.Account) {
+			cacheUsage = h.promptCache.ComputeWithSettings(account.ID, profile, settings)
+			if cacheUsage.exactPlan != nil {
+				cacheUsage.exactPlan.Commit()
+				if u := cacheUsage.exactPlan.Usage(); u != nil {
+					ordinary := u.InputTokens
+					cacheUsage.exactInput = &ordinary
+				}
+			}
+		}))
+	}
 
 	results, account, err := h.searchWebWithFailover(r.Context(), model, query)
 	if err != nil {
@@ -369,7 +532,13 @@ func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Req
 	content := []map[string]interface{}{{"type": "text", "text": fmt.Sprintf("I'll search for %q.", query)}}
 	content = append(content, webSearchPresentationBlocks(webSearchOutcome{query: query, results: results})...)
 	content = append(content, map[string]interface{}{"type": "text", "text": generateWebSearchSummary(query, results)})
+	if meter != nil {
+		content = append(webSearchPresentationBlocks(webSearchOutcome{query: query, results: results}), map[string]interface{}{"type": "text", "text": exactWebSearchSummary(query, results)})
+	}
 	budget := newOutputBudget(maxTokens)
+	if meter != nil {
+		budget = nil
+	}
 	if budget != nil {
 		limited := make([]map[string]interface{}, 0, len(content))
 		admittedTools := make(map[string]bool)
@@ -397,6 +566,9 @@ func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Req
 
 	inputTokens := estimatedInputTokens
 	outputTokens := estimateWebSearchContentTokens(content)
+	if meter != nil {
+		outputTokens = len(exactWebSearchSummary(query, results)) / 4
+	}
 	stopReason := "end_turn"
 	if budget != nil {
 		if budget.stopped {
@@ -405,6 +577,11 @@ func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Req
 	}
 	updateRequestUsageDiagnostic(r.Context(), func(diagnostic *usageDiagnostic) {
 		diagnostic.CacheUsageSource = "not_applicable"
+		if meter != nil {
+			diagnostic.CacheUsageSource = "sub2api_reference"
+			diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
+			diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
+		}
 		diagnostic.NativeInputTokens = 0
 		diagnostic.NativeOutputTokens = 0
 		diagnostic.ReportedInputTokens = inputTokens
@@ -425,13 +602,44 @@ func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Req
 	getObserveStore().RecordSuccess(account.ID, model, inputTokens, outputTokens, 0)
 	recordFinalRequestForApiKey(r.Context(), apiKeyReservation, account, model, inputTokens, outputTokens, 0, true, 200, "")
 
-	h.writeClaudeWebSearchResponse(w, stream, model, content, stopReason, inputTokens, outputTokens, 1, promptCacheUsage{}, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()).Enabled)
+	var exactState *exactHostedSearchState
+	if meter != nil {
+		exactState = &exactHostedSearchState{meter: meter, direct: true, startUsage: cacheUsage}
+	}
+	h.writeClaudeWebSearchResponse(w, stream, model, content, stopReason, inputTokens, outputTokens, 1, cacheUsage, settings.Enabled, exactState)
 }
 
 func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request, req *ClaudeRequest, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, apiKeyReservation *apiKeyUsageReservation) {
 	defer apiKeyReservation.release()
 	ctx := r.Context()
+	cacheSettings := config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID())
+	meter, _ := ctx.Value(exactHostedSearchMeterContextKey{}).(*exactRequestMeter)
+	if meter != nil {
+		copy := *meter
+		copy.Stream = req.Stream
+		meter = &copy
+	}
+	if meter == nil && cacheSettings.Mode == config.PromptCacheModeSub2API {
+		body, err := json.Marshal(req)
+		if err != nil {
+			h.sendClaudeError(w, 400, "invalid_request_error", err.Error())
+			return
+		}
+		meter, err = newExactRequestMeter(ctx, cacheSettings, "anthropic", body, req.Model, req.Stream, thinking, req.MaxTokens)
+		if err != nil {
+			h.sendClaudeError(w, 400, "invalid_request_error", err.Error())
+			return
+		}
+	}
+	exactSearch := newExactHostedSearchState(meter)
+	if exactSearch != nil {
+		ctx = context.WithValue(ctx, exactHostedSearchStateContextKey{}, exactSearch)
+		estimatedInputTokens = meter.EstimatedInput
+	}
 	budget := newOutputBudget(req.MaxTokens)
+	if exactSearch != nil {
+		budget = nil
+	}
 	if budget != nil {
 		ctx = context.WithValue(ctx, outputBudgetContextKey{}, budget)
 	}
@@ -449,7 +657,7 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 
 	//! Every search round spends budget, so at most maxUses+2 upstream calls run before the final answer.
 	for roundIdx := 0; ; roundIdx++ {
-		if roundIdx > 0 {
+		if roundIdx > 0 && exactSearch == nil {
 			estimatedInputTokens = estimateClaudeRequestInputTokens(&working)
 		}
 
@@ -471,13 +679,17 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 			h.sendClaudeError(w, status, "api_error", message)
 			return
 		}
-		credits += round.credits
-		outputTokens += round.outputTokens
-		inputTokens += round.inputTokens
-		cacheUsage.CacheCreationInputTokens += round.cacheUsage.CacheCreationInputTokens
-		cacheUsage.CacheReadInputTokens += round.cacheUsage.CacheReadInputTokens
-		cacheUsage.CacheCreation5mInputTokens += round.cacheUsage.CacheCreation5mInputTokens
-		cacheUsage.CacheCreation1hInputTokens += round.cacheUsage.CacheCreation1hInputTokens
+		if exactSearch != nil {
+			credits, outputTokens, inputTokens, cacheUsage = round.credits, round.outputTokens, round.inputTokens, round.cacheUsage
+		} else {
+			credits += round.credits
+			outputTokens += round.outputTokens
+			inputTokens += round.inputTokens
+			cacheUsage.CacheCreationInputTokens += round.cacheUsage.CacheCreationInputTokens
+			cacheUsage.CacheReadInputTokens += round.cacheUsage.CacheReadInputTokens
+			cacheUsage.CacheCreation5mInputTokens += round.cacheUsage.CacheCreation5mInputTokens
+			cacheUsage.CacheCreation1hInputTokens += round.cacheUsage.CacheCreation1hInputTokens
+		}
 		getObserveStore().RecordSuccess(account.ID, req.Model, round.inputTokens, round.outputTokens, round.credits)
 		h.pool.RecordSuccess(account.ID)
 		roundInputForStats := round.nativeInputTokens
@@ -592,7 +804,7 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 		recordFinalRequestForApiKey(r.Context(), apiKeyReservation, lastAccount, req.Model, inputTokens, outputTokens, credits, true, 200, "")
 
-		h.writeClaudeWebSearchResponse(w, req.Stream, req.Model, content, stopReason, inputTokens, outputTokens, searches, cacheUsage, config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID()).Enabled)
+		h.writeClaudeWebSearchResponse(w, req.Stream, req.Model, content, stopReason, inputTokens, outputTokens, searches, cacheUsage, cacheSettings.Enabled, exactSearch)
 		return
 	}
 }
@@ -602,6 +814,22 @@ func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRe
 	h.applyClaudeInferenceOptions(payload, req, thinking)
 	cacheSettings := config.EffectivePromptCacheSettings(apiKeyID)
 	cacheProfile := h.promptCache.BuildClaudeProfileWithSettings(cloneClaudeRequestForThinking(req, h.claudeNeedsThinkingPrompt(req, thinking)), estimatedInputTokens, cacheSettings)
+	exactSearch, _ := ctx.Value(exactHostedSearchStateContextKey{}).(*exactHostedSearchState)
+	if exactSearch == nil && cacheSettings.Mode == config.PromptCacheModeSub2API {
+		body, err := json.Marshal(req)
+		if err != nil {
+			return nil, nil, err
+		}
+		meter, err := newExactRequestMeter(ctx, cacheSettings, "anthropic", body, req.Model, req.Stream, thinking, req.MaxTokens)
+		if err != nil {
+			return nil, nil, err
+		}
+		exactSearch = newExactHostedSearchState(meter)
+	}
+	if exactSearch != nil {
+		cacheProfile = exactSearch.profile
+		estimatedInputTokens = exactSearch.meter.EstimatedInput
+	}
 	excluded := make(map[string]bool)
 	var lastErr error
 	var lastAccount *config.Account
@@ -615,7 +843,12 @@ func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRe
 		}
 		for accountAttempt := 0; accountAttempt < retryPlan.maxPerAccount && totalAttempts < retryPlan.maxPerRequest; accountAttempt++ {
 			totalAttempts++
-			cacheUsage := h.promptCache.ComputeWithSettings(account.ID, cacheProfile, cacheSettings)
+			var cacheUsage promptCacheUsage
+			if exactSearch != nil {
+				cacheUsage = exactSearch.prepare(payload, h.promptCache, account.ID, cacheSettings)
+			} else {
+				cacheUsage = h.promptCache.ComputeWithSettings(account.ID, cacheProfile, cacheSettings)
+			}
 			budget, _ := ctx.Value(outputBudgetContextKey{}).(*outputBudget)
 			var before outputBudget
 			if budget != nil {
@@ -623,8 +856,16 @@ func (h *Handler) callClaudeRoundWithFailover(ctx context.Context, req *ClaudeRe
 			}
 			round, err := h.callClaudeRound(ctx, account, payload, req.Model, thinking, estimatedInputTokens)
 			if err == nil {
-				round.cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, round.inputTokens)
-				if cacheSettings.Enabled {
+				if exactSearch != nil {
+					round.inputTokens, round.outputTokens, round.cacheUsage, _ = exactHostedRoundUsage(payload, cacheUsage)
+					if exactDedicatedHostedStream(payload.exactMeter) {
+						round.credits = 0
+					}
+					exactSearch.finalMeter = payload.exactMeter
+				} else {
+					round.cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, round.inputTokens)
+				}
+				if cacheSettings.Enabled && exactSearch == nil {
 					h.promptCache.UpdateWithSettings(account.ID, cacheProfileWithInputTokens(cacheProfile, round.inputTokens), cacheSettings, round.cacheUsage)
 				}
 				h.rememberAccount(payload, account)
@@ -701,8 +942,12 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 		reasoning = ""
 	}
 	nativeInputTokens, nativeOutputTokens := inputTokens, outputTokens
-	providerInputTokens, providerOutputTokens := finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimateClaudeOutputTokens(text, usageReasoning, toolUses))
-	inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
+	if payload.exactMeter == nil {
+		providerInputTokens, providerOutputTokens := finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimateClaudeOutputTokens(text, usageReasoning, toolUses))
+		inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
+	} else if payload.exactMeter.Result != nil {
+		stopReason = payload.exactMeter.Result.StopReason
+	}
 	updateRequestUsageDiagnostic(ctx, func(diagnostic *usageDiagnostic) {
 		diagnostic.TranslatedInputEstimate += estimateKiroPayloadInputTokens(payload)
 		diagnostic.KiroRounds++
@@ -789,9 +1034,27 @@ func webSearchUsage(inputTokens, outputTokens, searches int, cacheUsage promptCa
 	return usage
 }
 
-func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream bool, model string, content []map[string]interface{}, stopReason string, inputTokens, outputTokens, searches int, cacheUsage promptCacheUsage, includeCache bool) {
+func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream bool, model string, content []map[string]interface{}, stopReason string, inputTokens, outputTokens, searches int, cacheUsage promptCacheUsage, includeCache bool, exactSearchStates ...*exactHostedSearchState) {
 	msgID := "msg_" + uuid.New().String()
 	if !stream {
+		responseUsage := webSearchUsage(inputTokens, outputTokens, searches, cacheUsage, includeCache)
+		if len(exactSearchStates) > 0 && exactSearchStates[0] != nil {
+			state := exactSearchStates[0]
+			if state.direct {
+				responseUsage = map[string]interface{}{"input_tokens": billedClaudeInputTokens(inputTokens, cacheUsage), "output_tokens": outputTokens}
+				if cacheUsage.exactPlan != nil && cacheUsage.exactPlan.Usage() != nil {
+					responseUsage["cache_creation_input_tokens"] = cacheUsage.CacheCreationInputTokens
+					responseUsage["cache_read_input_tokens"] = cacheUsage.CacheReadInputTokens
+				}
+			} else if meter := state.finalMeter; meter != nil && meter.Result != nil {
+				var reference struct {
+					Usage map[string]interface{} `json:"usage"`
+				}
+				if json.Unmarshal(meter.Result.ResponseBody, &reference) == nil && reference.Usage != nil {
+					responseUsage = reference.Usage
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":            msgID,
@@ -801,7 +1064,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 			"content":       content,
 			"stop_reason":   stopReason,
 			"stop_sequence": nil,
-			"usage":         webSearchUsage(inputTokens, outputTokens, searches, cacheUsage, includeCache),
+			"usage":         responseUsage,
 		})
 		return
 	}
@@ -814,6 +1077,45 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	startUsage := webSearchUsage(inputTokens, 0, searches, cacheUsage, includeCache)
+	deltaUsage := buildClaudeMessageDeltaUsage(outputTokens)
+	if len(exactSearchStates) > 0 && exactSearchStates[0] != nil {
+		state := exactSearchStates[0]
+		startUsage = map[string]interface{}{"input_tokens": state.meter.EstimatedInput, "output_tokens": 0}
+		if state.startUsage.exactPlan != nil {
+			if initial := state.startUsage.exactPlan.Usage(); initial != nil {
+				startUsage["input_tokens"] = initial.InputTokens
+				startUsage["cache_creation_input_tokens"] = initial.CacheCreationInputTokens
+				startUsage["cache_read_input_tokens"] = initial.CacheReadInputTokens
+			}
+		}
+		if state.direct {
+			startUsage["cache_creation_input_tokens"] = cacheUsage.CacheCreationInputTokens
+			startUsage["cache_read_input_tokens"] = cacheUsage.CacheReadInputTokens
+		} else {
+			deltaUsage = map[string]interface{}{"input_tokens": billedClaudeInputTokens(inputTokens, cacheUsage), "output_tokens": outputTokens}
+		}
+		if meter := state.finalMeter; meter != nil && meter.Result != nil {
+			u := meter.Result.Usage
+			if u.KiroCredits > 0 {
+				deltaUsage["_sub2api_kiro_credits"] = u.KiroCredits
+			}
+			if u.CacheReadInputTokens > 0 {
+				deltaUsage["cache_read_input_tokens"] = u.CacheReadInputTokens
+			}
+			if u.CacheCreationInputTokens > 0 {
+				deltaUsage["cache_creation_input_tokens"] = u.CacheCreationInputTokens
+			}
+			if u.CacheCreation5mInputTokens > 0 || u.CacheCreation1hInputTokens > 0 {
+				deltaUsage["cache_creation"] = map[string]int{"ephemeral_5m_input_tokens": u.CacheCreation5mInputTokens, "ephemeral_1h_input_tokens": u.CacheCreation1hInputTokens}
+			}
+		}
+		if !state.direct && exactDedicatedHostedStream(state.meter) {
+			// Original AdjustSSEChunk suppresses all inner message usage, even
+			// the final round. Keep valid closing frames as a transport extension.
+			deltaUsage = map[string]interface{}{"output_tokens": 0}
+		}
+	}
 
 	h.sendSSE(w, flusher, "message_start", map[string]interface{}{
 		"type": "message_start",
@@ -825,7 +1127,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 			"content":       []interface{}{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,
-			"usage":         webSearchUsage(inputTokens, 0, searches, cacheUsage, includeCache),
+			"usage":         startUsage,
 		},
 	})
 	for index, block := range content {
@@ -834,7 +1136,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
-		"usage": buildClaudeMessageDeltaUsage(outputTokens),
+		"usage": deltaUsage,
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 }

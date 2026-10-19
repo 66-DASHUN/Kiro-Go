@@ -10,6 +10,8 @@ import (
 	"kiro-proxy/config"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"sort"
 	"testing"
 	"time"
@@ -213,6 +215,17 @@ func TestBuildKiroTransportUsesExplicitProxyURL(t *testing.T) {
 }
 
 func TestBuildKiroTransportFallsBackToEnvironmentProxy(t *testing.T) {
+	// net/http caches environment proxy resolution on first use. The reference
+	// image estimator may use the default transport before this test runs.
+	if os.Getenv("KIRO_TEST_ENV_PROXY_CHILD") != "1" {
+		command := exec.Command(os.Args[0], "-test.run=^TestBuildKiroTransportFallsBackToEnvironmentProxy$")
+		command.Env = append(os.Environ(), "KIRO_TEST_ENV_PROXY_CHILD=1")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("isolated proxy check: %v\n%s", err, output)
+		}
+		return
+	}
+
 	t.Setenv("HTTPS_PROXY", "http://env-proxy.local:2323")
 	t.Setenv("NO_PROXY", "")
 	t.Setenv("no_proxy", "")

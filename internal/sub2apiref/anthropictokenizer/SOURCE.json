@@ -1,0 +1,11 @@
+{
+  "revision": "1cd5141b8b978ef2f5121b9805885706991e5000",
+  "source": "nianzs/sub2api/backend/internal/pkg/anthropictokenizer",
+  "unchanged_sha256": {
+    "tokenizer.go": "c9bc11262087a989dc05fabe6e61193e7db08618f42e89b34804c00d0b190d89",
+    "algorithm.go": "20b58b0769e179e10c79093c9794cb3f2317b6037f3d37972c861ffb87e57c50",
+    "estimators.go": "2a80770659b45f82c7d00133c3b590d6b509cc66a6d320b080ba50129e3ae878",
+    "claude.json": "d47f40bcb7ae04464255267b631e65280cd35a17c48b7ac23dd92a3b5ef0f414",
+    "NOTICE.md": "9224fc99176ea77d056a3498d77bb863b4fb638dcc3221e98d4b3b2be6428c71"
+  }
+}

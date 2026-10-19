@@ -194,8 +194,13 @@ func (h *Handler) writeClaudeBufferedResponse(w http.ResponseWriter, response *C
 		json.Unmarshal(raw, &content)
 		h.sendWebSearchContentBlock(w, flusher, index, content)
 	}
+	deltaUsage := buildClaudeMessageDeltaUsage(response.Usage.OutputTokens)
+	if response.Usage.exactReference {
+		encoded, _ := json.Marshal(response.Usage)
+		_ = json.Unmarshal(encoded, &deltaUsage)
+	}
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
-		"type": "message_delta", "delta": map[string]interface{}{"stop_reason": response.StopReason, "stop_sequence": response.StopSequence}, "usage": buildClaudeMessageDeltaUsage(response.Usage.OutputTokens),
+		"type": "message_delta", "delta": map[string]interface{}{"stop_reason": response.StopReason, "stop_sequence": response.StopSequence}, "usage": deltaUsage,
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 }

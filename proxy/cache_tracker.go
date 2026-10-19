@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"kiro-proxy/config"
+	refcache "kiro-proxy/internal/sub2apiref/cache"
 	"math"
 	"sort"
 	"strconv"
@@ -26,6 +27,8 @@ const (
 )
 
 type promptCacheUsage struct {
+	exactPlan      *refcache.Plan
+	exactInput     *int
 	referenceMode  bool
 	totalCacheRate bool
 	totalRatio     float64
@@ -62,6 +65,7 @@ type promptCacheBreakpoint struct {
 }
 
 type promptCacheProfile struct {
+	exactProfile     *refcache.Profile
 	referenceMode    bool
 	Breakpoints      []promptCacheBreakpoint
 	LookupCandidates []promptCacheBreakpoint
@@ -90,6 +94,7 @@ type promptCacheEntry struct {
 }
 
 type promptCacheTracker struct {
+	exactTracker     *refcache.Tracker
 	mu               sync.Mutex
 	entriesByAccount map[string]map[[32]byte]promptCacheEntry
 	maxSupportedTTL  time.Duration
@@ -104,6 +109,7 @@ func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
 	maxTTL = normalizePromptCacheTTL(maxTTL)
 	return &promptCacheTracker{
 		entriesByAccount: make(map[string]map[[32]byte]promptCacheEntry),
+		exactTracker:     refcache.NewTracker(),
 		maxSupportedTTL:  maxTTL,
 	}
 }
@@ -113,6 +119,13 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 }
 
 func (t *promptCacheTracker) BuildClaudeProfileWithSettings(req *ClaudeRequest, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
+	if settings.Mode == config.PromptCacheModeSub2API {
+		if req == nil {
+			return nil
+		}
+		body, _ := json.Marshal(req)
+		return buildExactCacheProfile("anthropic", body, req.Model, totalInputTokens)
+	}
 	totalMode := settings.Mode == config.PromptCacheModePrefixTotal
 	referenceMode := settings.Mode == config.PromptCacheModeSub2API
 	if (totalMode || referenceMode) && req != nil {
@@ -251,6 +264,13 @@ func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInput
 }
 
 func (t *promptCacheTracker) BuildOpenAIProfileWithSettings(payload *KiroPayload, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
+	if settings.Mode == config.PromptCacheModeSub2API {
+		if payload == nil || payload.exactMeter == nil {
+			return nil
+		}
+		m := payload.exactMeter
+		return buildExactCacheProfile(m.Protocol, m.Body, m.Model, totalInputTokens)
+	}
 	profile := t.buildOpenAIProfile(payload, totalInputTokens, settings.Mode == config.PromptCacheModePrefixTotal || settings.Mode == config.PromptCacheModeSub2API)
 	if profile != nil {
 		profile.referenceMode = settings.Mode == config.PromptCacheModeSub2API
@@ -354,7 +374,7 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 
 func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *promptCacheProfile, settings config.PromptCacheSettings) promptCacheUsage {
 	if settings.Mode == config.PromptCacheModeSub2API {
-		return t.computeSub2APICacheUsage(accountID, profile, settings)
+		return t.computeExactCacheUsage(accountID, profile, settings)
 	}
 	if settings.Mode == config.PromptCacheModePrefixTotal {
 		return t.computeTotalCacheUsage(accountID, profile, settings)
@@ -470,6 +490,9 @@ func promptCacheVariationUnit(profile *promptCacheProfile) float64 {
 
 // Cache estimates are scaled into native upstream input token space at completion.
 func cacheProfileWithInputTokens(profile *promptCacheProfile, inputTokens int) *promptCacheProfile {
+	if profile != nil && profile.exactProfile != nil {
+		return profile
+	}
 	if profile == nil || inputTokens <= 0 || profile.TotalInputTokens <= 0 {
 		return profile
 	}
@@ -829,6 +852,9 @@ func computePromptCacheTTLBreakdownLimited(profile *promptCacheProfile, matchedT
 }
 
 func billedClaudeInputTokens(inputTokens int, usage promptCacheUsage) int {
+	if usage.exactInput != nil {
+		return *usage.exactInput
+	}
 	return maxInt(inputTokens-usage.CacheCreationInputTokens-usage.CacheReadInputTokens, 0)
 }
 
@@ -950,8 +976,11 @@ func maxInt(a, b int) int {
 
 // Completion scales the dispatch snapshot without querying cache entries again.
 func scalePromptCacheUsage(usage promptCacheUsage, profile *promptCacheProfile, inputTokens int) promptCacheUsage {
+	if usage.exactPlan != nil || (profile != nil && profile.exactProfile != nil) {
+		return usage
+	}
 	if usage.referenceMode {
-		return scaleSub2APICacheUsage(usage, profile, inputTokens)
+		return usage
 	}
 	if usage.totalCacheRate && inputTokens <= 0 && profile != nil {
 		zero := *profile

@@ -621,3 +621,14 @@ func TestIssueInlineThinkingOnlyTurnIsRetriedOnEveryEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// Retain regression coverage for explicitly selectable legacy modes. Exact
+// Sub2API behavior has independent raw-upstream HTTP oracle tests.
+func newLegacyMeteringTestHandler(t *testing.T, upstream http.HandlerFunc) *Handler {
+	t.Helper()
+	h := newStreamTestHandler(t, upstream)
+	if err := config.UpdatePromptCacheSettings(true, config.PromptCacheModeUniform, .95, .95, .95); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}

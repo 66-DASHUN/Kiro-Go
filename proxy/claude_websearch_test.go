@@ -316,7 +316,7 @@ func webSearchRequests(msg map[string]interface{}) float64 {
 }
 
 func TestClaudeDirectWebSearchSkipsModel(t *testing.T) {
-	h := newStreamTestHandler(t, func(http.ResponseWriter, *http.Request) {
+	h := newLegacyMeteringTestHandler(t, func(http.ResponseWriter, *http.Request) {
 		t.Error("direct web search must not call the model")
 	})
 	stub := stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
@@ -365,7 +365,7 @@ func TestClaudeDirectWebSearchFailureReturnsError(t *testing.T) {
 }
 
 func TestClaudeDirectWebSearchStreamsServerToolBlocks(t *testing.T) {
-	h := newStreamTestHandler(t, func(http.ResponseWriter, *http.Request) {
+	h := newLegacyMeteringTestHandler(t, func(http.ResponseWriter, *http.Request) {
 		t.Error("direct web search must not call the model")
 	})
 	stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
@@ -416,7 +416,7 @@ func TestClaudeDirectWebSearchStreamsServerToolBlocks(t *testing.T) {
 
 func TestClaudeWebSearchLoopFeedsResultsBackToModel(t *testing.T) {
 	var upstreamCalls atomic.Int32
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload KiroPayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Errorf("decode payload: %v", err)
@@ -479,7 +479,7 @@ func TestClaudeWebSearchLoopReturnsClientToolUse(t *testing.T) {
 
 func TestClaudeWebSearchLoopStopsAtMaxUses(t *testing.T) {
 	var upstreamCalls atomic.Int32
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 		//! A model that never stops searching must still end after max_uses+2 rounds.
 		upstreamCalls.Add(1)
 		writeFrames(w, webSearchToolUseFrame(t, "toolu_ws", "again"), meteringFrame(t))

@@ -342,7 +342,7 @@ func runtimeProtocolUsage(t *testing.T, rec *httptest.ResponseRecorder, stream b
 func TestClaudeUsageDoesNotExposeKiroContextAsPublicInput(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
 				writeFrames(w,
 					awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}),
 					awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"inputTokens": 12000, "outputTokens": 1, "stopReason": "end_turn"}),
@@ -368,7 +368,7 @@ func TestRuntimeEveryProtocolPreservesNativeCountersAndEffectiveCachePolicy(t *t
 		for _, stream := range []bool{false, true} {
 			for _, enabled := range []bool{false, true} {
 				t.Run(path+fmt.Sprint(stream, enabled), func(t *testing.T) {
-					h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+					h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 						writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": 10000, "outputTokens": 10}))
 					})
 					create, read, mode := 0.25, 0.5, "independent"
@@ -431,7 +431,7 @@ func TestRuntimeEveryProtocolRejectsAccountsBoundToAnotherKey(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			t.Run(path+fmt.Sprint(stream), func(t *testing.T) {
 				upstreamCalls := 0
-				h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 					upstreamCalls++
 					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), meteringFrame(t))
 				})
@@ -590,7 +590,7 @@ func TestRuntimeConcurrentColdRequestsKeepDispatchCacheMiss(t *testing.T) {
 			firstEntered := make(chan struct{})
 			releaseFirst := make(chan struct{})
 			var calls atomic.Int32
-			h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 				if calls.Add(1) == 1 {
 					close(firstEntered)
 					<-releaseFirst
@@ -639,7 +639,7 @@ func TestRuntimeConcurrentColdRequestsKeepDispatchCacheMiss(t *testing.T) {
 }
 
 func TestRuntimeNativeWebSearchLoopUsesEffectiveCachePolicy(t *testing.T) {
-	h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": 10000, "outputTokens": 10}))
 	})
 	create, read, mode := 0.25, 0.5, "independent"
