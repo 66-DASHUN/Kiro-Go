@@ -7,10 +7,10 @@ func TestPrefixDefaultAndLegacySettings(t *testing.T) {
 	if err := Init(path); err != nil {
 		t.Fatal(err)
 	}
-	if got := EffectivePromptCacheSettings(""); got.Mode != "prefix_total" || got.Ratio != .95 {
+	if got := EffectivePromptCacheSettings(""); got.Mode != "sub2api" || got.Ratio != .95 {
 		t.Fatalf("new default is not total cache rate: %+v", got)
 	}
-	for _, mode := range []string{"prefix", "uniform", "independent"} {
+	for _, mode := range []string{"sub2api", "prefix_total", "prefix", "uniform", "independent"} {
 		if err := UpdatePromptCacheSettings(true, mode, .8, .3, .4); err != nil {
 			t.Fatal(err)
 		}
@@ -52,7 +52,7 @@ func TestPrefixPerKeyPolicyPersists(t *testing.T) {
 	if err := ClearPromptCacheOverrides(key.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got := EffectivePromptCacheSettings(key.ID); got.Mode != "prefix_total" || got.Ratio != .95 {
+	if got := EffectivePromptCacheSettings(key.ID); got.Mode != "sub2api" || got.Ratio != .95 {
 		t.Fatalf("inheritance lost: %+v", got)
 	}
 }

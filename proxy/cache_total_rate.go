@@ -237,6 +237,11 @@ func (t *promptCacheTracker) UpdateWithSettings(accountID string, profile *promp
 	if t == nil || !settings.Enabled {
 		return
 	}
+	if settings.Mode == config.PromptCacheModeSub2API {
+		t.recordTotalCacheDiagnostic(profile, usage)
+		t.Update(accountID, profile)
+		return
+	}
 	if settings.Mode != config.PromptCacheModePrefixTotal {
 		t.Update(accountID, profile)
 		return
@@ -320,7 +325,7 @@ type promptCacheDiagnostic struct {
 }
 
 func (t *promptCacheTracker) recordTotalCacheDiagnostic(profile *promptCacheProfile, usage promptCacheUsage) {
-	if !usage.totalCacheRate || profile == nil {
+	if (!usage.totalCacheRate && !usage.referenceMode) || profile == nil {
 		return
 	}
 	now := time.Now()
@@ -328,7 +333,11 @@ func (t *promptCacheTracker) recordTotalCacheDiagnostic(profile *promptCacheProf
 	defer t.mu.Unlock()
 	t.pruneDiagnosticsLocked(now)
 	t.diagnosticSeq++
-	t.diagnostics = append(t.diagnostics, promptCacheDiagnostic{ID: fmt.Sprintf("cache-%d", t.diagnosticSeq), Time: now, Rule: totalCacheRuleVersion, Total: profile.TotalInputTokens, Cacheable: usage.finalCacheable, Matched: usage.finalMatched, MatchedShare: usage.matchedCachedTokens, MatchedTTLSeconds: int(usage.matchedTTL / time.Second), MatchedPrefixTokens: usage.matchedPrefixTokens, Ratio: usage.totalRatio, Budget: usage.CacheReadInputTokens + usage.CacheCreationInputTokens, Read: usage.CacheReadInputTokens, Write: usage.CacheCreationInputTokens, Ordinary: billedClaudeInputTokens(profile.TotalInputTokens, usage), Write5m: usage.CacheCreation5mInputTokens, Write1h: usage.CacheCreation1hInputTokens, Limitation: usage.limitation})
+	rule := totalCacheRuleVersion
+	if usage.referenceMode {
+		rule = sub2APICacheRuleVersion
+	}
+	t.diagnostics = append(t.diagnostics, promptCacheDiagnostic{ID: fmt.Sprintf("cache-%d", t.diagnosticSeq), Time: now, Rule: rule, Total: profile.TotalInputTokens, Cacheable: usage.finalCacheable, Matched: usage.finalMatched, MatchedShare: usage.matchedCachedTokens, MatchedTTLSeconds: int(usage.matchedTTL / time.Second), MatchedPrefixTokens: usage.matchedPrefixTokens, Ratio: usage.totalRatio, Budget: usage.CacheReadInputTokens + usage.CacheCreationInputTokens, Read: usage.CacheReadInputTokens, Write: usage.CacheCreationInputTokens, Ordinary: billedClaudeInputTokens(profile.TotalInputTokens, usage), Write5m: usage.CacheCreation5mInputTokens, Write1h: usage.CacheCreation1hInputTokens, Limitation: usage.limitation})
 	if len(t.diagnostics) > promptCacheDiagnosticCapacity {
 		t.diagnostics = append([]promptCacheDiagnostic(nil), t.diagnostics[len(t.diagnostics)-promptCacheDiagnosticCapacity:]...)
 	}

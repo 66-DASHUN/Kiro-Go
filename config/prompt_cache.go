@@ -15,11 +15,11 @@ func normalizePromptCacheConfig(c *Config, data []byte) error {
 		c.PromptCacheEmulationEnabled = true
 	}
 	if isMissingOrNull(fields["promptCacheEmulationMode"]) || c.PromptCacheEmulationMode == "" {
-		c.PromptCacheEmulationMode = PromptCacheModePrefixTotal
+		c.PromptCacheEmulationMode = PromptCacheModeSub2API
 	}
 	if isMissingOrNull(fields["promptCacheEmulationRatio"]) {
 		c.PromptCacheEmulationRatio = 1
-		if c.PromptCacheEmulationMode == PromptCacheModePrefix || c.PromptCacheEmulationMode == PromptCacheModePrefixTotal {
+		if c.PromptCacheEmulationMode == PromptCacheModeSub2API || c.PromptCacheEmulationMode == PromptCacheModePrefix || c.PromptCacheEmulationMode == PromptCacheModePrefixTotal {
 			c.PromptCacheEmulationRatio = .95
 		}
 	}
@@ -59,7 +59,7 @@ func EffectivePromptCacheSettings(apiKeyID string) PromptCacheSettings {
 		ReadRatio:     cfg.PromptCacheReadEmulationRatio,
 	}
 	if settings.Mode == "" {
-		settings.Mode = PromptCacheModePrefixTotal
+		settings.Mode = PromptCacheModeSub2API
 	}
 	for i := range cfg.ApiKeys {
 		entry := &cfg.ApiKeys[i]
@@ -83,7 +83,7 @@ func EffectivePromptCacheSettings(apiKeyID string) PromptCacheSettings {
 		}
 		break
 	}
-	if settings.Mode == promptCacheModeUniform {
+	if settings.Mode == promptCacheModeUniform || settings.Mode == PromptCacheModeSub2API {
 		settings.CreationRatio = settings.Ratio
 		settings.ReadRatio = settings.Ratio
 	}
@@ -96,7 +96,7 @@ func EffectivePromptCacheSettings(apiKeyID string) PromptCacheSettings {
 }
 
 func defaultPromptCacheSettings() PromptCacheSettings {
-	return PromptCacheSettings{Enabled: true, Mode: PromptCacheModePrefixTotal, Ratio: .95, CreationRatio: 1, ReadRatio: .95}
+	return PromptCacheSettings{Enabled: true, Mode: PromptCacheModeSub2API, Ratio: .95, CreationRatio: .95, ReadRatio: .95}
 }
 
 // UpdatePromptCacheSettings updates and persists the global cache policy.

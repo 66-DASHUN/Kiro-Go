@@ -23,7 +23,7 @@
   let iamApiKeyId = '';
   let pendingApiKeyId = '';
   let accountModalGeneration = 0;
-  let promptCacheSettings = { enabled: true, mode: 'prefix_total', ratio: 0.95, creationRatio: 1, readRatio: 0.95 };
+  let promptCacheSettings = { enabled: true, mode: 'sub2api', ratio: 0.95, creationRatio: 1, readRatio: 0.95 };
   // Microsoft SSO: 'kiro' (portal callback) then 'microsoft' (Entra callback), then maybe a profile pick.
   let ms = { session: '', stage: 'kiro', authorizeUrl: '', selectionId: '', profiles: [], busy: false, generation: 0, apiKeyId: '' };
   let exportSelectedIds = new Set();
@@ -1692,8 +1692,8 @@
     return (clampRatio(value) * 100).toFixed(1).replace(/\.0$/, '');
   }
   function normalizePromptCacheSettings(source) {
-    const mode = ['prefix_total', 'prefix', 'uniform', 'independent'].includes(source.promptCacheEmulationMode) ? source.promptCacheEmulationMode : 'prefix_total';
-    const ratio = clampRatio(source.promptCacheEmulationRatio, (mode === 'prefix' || mode === 'prefix_total') ? 0.95 : 1);
+    const mode = ['sub2api', 'prefix_total', 'prefix', 'uniform', 'independent'].includes(source.promptCacheEmulationMode) ? source.promptCacheEmulationMode : 'sub2api';
+    const ratio = clampRatio(source.promptCacheEmulationRatio, (mode === 'sub2api' || mode === 'prefix' || mode === 'prefix_total') ? 0.95 : 1);
     return {
       enabled: source.promptCacheEmulationEnabled !== false, mode, ratio,
       creationRatio: clampRatio(source.promptCacheCreationEmulationRatio),
@@ -1707,7 +1707,7 @@
   }
   function rawApiKeyCacheSettings(entry) {
     const inherited = promptCacheSettings;
-    const mode = entry && ['prefix_total', 'prefix', 'uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
+    const mode = entry && ['sub2api', 'prefix_total', 'prefix', 'uniform', 'independent'].includes(entry.promptCacheEmulationMode) ? entry.promptCacheEmulationMode : inherited.mode;
     const ratio = clampRatio(entry && entry.promptCacheEmulationRatio, inherited.ratio);
     return {
       enabled: entry && entry.promptCacheEmulationEnabled != null ? entry.promptCacheEmulationEnabled : inherited.enabled,
@@ -1718,7 +1718,7 @@
   }
   function effectiveApiKeyCacheSettings(entry) {
     const settings = rawApiKeyCacheSettings(entry);
-    if (settings.mode === 'uniform') {
+    if (settings.mode === 'uniform' || settings.mode === 'sub2api') {
       settings.creationRatio = settings.ratio;
       settings.readRatio = settings.ratio;
     }
@@ -1733,7 +1733,7 @@
     const scope = t(hasApiKeyCacheOverride(entry) ? 'apiKeys.cacheIndependent' : 'apiKeys.cacheInherited');
     const policy = !effective.enabled ? t('apiKeys.cacheDisabled') : effective.mode === 'prefix_total'
       ? t('apiKeys.cacheTotal', ratioToPercent(effective.ratio)) : effective.mode === 'prefix'
-      ? t('apiKeys.cachePrefix', ratioToPercent(effective.ratio)) : effective.mode === 'uniform'
+      ? t('apiKeys.cachePrefix', ratioToPercent(effective.ratio)) : (effective.mode === 'uniform' || effective.mode === 'sub2api')
       ? t('apiKeys.cacheUniform', ratioToPercent(effective.ratio))
       : t('apiKeys.cacheIndependentRatios', ratioToPercent(effective.creationRatio), ratioToPercent(effective.readRatio));
     return scope + ' · ' + policy;
@@ -1748,9 +1748,9 @@
   }
   function syncCacheForm(prefix, inherited) {
     const independent = $(prefix + 'Mode').value === 'independent';
-    const totalMode = $(prefix + 'Mode').value === 'prefix_total';
+    const totalMode = ['prefix_total', 'sub2api'].includes($(prefix + 'Mode').value);
     const ratioLabel = document.querySelector('label[for="' + prefix + 'Ratio"]');
-    ratioLabel.dataset.i18n = totalMode ? 'settings.totalCacheRatio' : 'settings.promptCacheRatio';
+    ratioLabel.dataset.i18n = $(prefix + 'Mode').value === 'sub2api' ? 'settings.sub2apiCacheRatio' : totalMode ? 'settings.totalCacheRatio' : 'settings.promptCacheRatio';
     ratioLabel.textContent = t(ratioLabel.dataset.i18n);
     $(prefix + 'CreationRatio').closest('.form-group').hidden = totalMode;
     $(prefix + 'ReadRatio').closest('.form-group').hidden = totalMode;
@@ -1763,7 +1763,7 @@
   }
   function cacheFormValues(prefix) {
     const selected = $(prefix + 'Mode').value;
-    const mode = ['prefix_total', 'prefix', 'uniform', 'independent'].includes(selected) ? selected : 'prefix_total';
+    const mode = ['sub2api', 'prefix_total', 'prefix', 'uniform', 'independent'].includes(selected) ? selected : 'sub2api';
     const readRatio = field => {
       const raw = $(prefix + field).value.trim();
       const percent = Number(raw);

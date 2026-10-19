@@ -26,6 +26,7 @@ const (
 )
 
 type promptCacheUsage struct {
+	referenceMode  bool
 	totalCacheRate bool
 	totalRatio     float64
 	// The positive-rate lookup must remain valid when a varied write threshold is zero.
@@ -61,6 +62,7 @@ type promptCacheBreakpoint struct {
 }
 
 type promptCacheProfile struct {
+	referenceMode    bool
 	Breakpoints      []promptCacheBreakpoint
 	LookupCandidates []promptCacheBreakpoint
 	TotalInputTokens int
@@ -107,20 +109,21 @@ func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
 }
 
 func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
-	return t.buildClaudeProfile(req, totalInputTokens, false, false)
+	return t.buildClaudeProfile(req, totalInputTokens, false, false, false)
 }
 
 func (t *promptCacheTracker) BuildClaudeProfileWithSettings(req *ClaudeRequest, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
 	totalMode := settings.Mode == config.PromptCacheModePrefixTotal
-	if totalMode && req != nil {
+	referenceMode := settings.Mode == config.PromptCacheModeSub2API
+	if (totalMode || referenceMode) && req != nil {
 		cacheReq := *req
 		cacheReq.Model = totalCacheModelIdentity(req.Model)
 		req = &cacheReq
 	}
-	return t.buildClaudeProfile(req, totalInputTokens, settings.Mode == config.PromptCacheModePrefix || totalMode, totalMode)
+	return t.buildClaudeProfile(req, totalInputTokens, settings.Mode == config.PromptCacheModePrefix || totalMode, totalMode, referenceMode)
 }
 
-func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTokens int, strictBreakpoints, totalCacheRate bool) *promptCacheProfile {
+func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTokens int, strictBreakpoints, totalCacheRate, referenceMode bool) *promptCacheProfile {
 	if t == nil || req == nil {
 		return nil
 	}
@@ -144,7 +147,7 @@ func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTo
 		}
 	}
 
-	for _, block := range blocks {
+	for blockIndex, block := range blocks {
 		canonical := canonicalizeCacheValue(block.Value)
 		writeHashChunk(hasher, canonical)
 		cumulativeTokens += block.Tokens
@@ -171,7 +174,9 @@ func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTo
 		if !hasExplicitBreakpoint {
 			// Local emulation retains earlier block boundaries so growing
 			// conversations can reuse a prefix without explicit cache_control.
-			breakpointTTL = defaultPromptCacheTTL
+			if !referenceMode || block.IsMessageEnd || blockIndex == len(blocks)-1 {
+				breakpointTTL = defaultPromptCacheTTL
+			}
 		} else if block.TTL > 0 {
 			breakpointTTL = block.TTL
 			activeTTL = block.TTL
@@ -201,6 +206,9 @@ func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTo
 	// token space. Fingerprint metadata must not inflate the caller's count.
 	if len(breakpoints) > 0 {
 		normalizationBase := semanticTotal
+		if referenceMode {
+			normalizationBase = breakpoints[len(breakpoints)-1].CumulativeTokens
+		}
 		if normalizationBase > 0 && totalInputTokens != normalizationBase {
 			for i := range breakpoints {
 				n := int(math.Round(float64(breakpoints[i].CumulativeTokens) * float64(totalInputTokens) / float64(normalizationBase)))
@@ -225,6 +233,7 @@ func (t *promptCacheTracker) buildClaudeProfile(req *ClaudeRequest, totalInputTo
 	var inputFingerprint [32]byte
 	copy(inputFingerprint[:], hasher.Sum(nil))
 	return &promptCacheProfile{
+		referenceMode:    referenceMode,
 		Breakpoints:      breakpoints,
 		LookupCandidates: candidates,
 		TotalInputTokens: totalInputTokens,
@@ -242,7 +251,11 @@ func (t *promptCacheTracker) BuildOpenAIProfile(payload *KiroPayload, totalInput
 }
 
 func (t *promptCacheTracker) BuildOpenAIProfileWithSettings(payload *KiroPayload, totalInputTokens int, settings config.PromptCacheSettings) *promptCacheProfile {
-	return t.buildOpenAIProfile(payload, totalInputTokens, settings.Mode == config.PromptCacheModePrefixTotal)
+	profile := t.buildOpenAIProfile(payload, totalInputTokens, settings.Mode == config.PromptCacheModePrefixTotal || settings.Mode == config.PromptCacheModeSub2API)
+	if profile != nil {
+		profile.referenceMode = settings.Mode == config.PromptCacheModeSub2API
+	}
+	return profile
 }
 
 func (t *promptCacheTracker) buildOpenAIProfile(payload *KiroPayload, totalInputTokens int, includeShortProfile bool) *promptCacheProfile {
@@ -340,6 +353,9 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 }
 
 func (t *promptCacheTracker) ComputeWithSettings(accountID string, profile *promptCacheProfile, settings config.PromptCacheSettings) promptCacheUsage {
+	if settings.Mode == config.PromptCacheModeSub2API {
+		return t.computeSub2APICacheUsage(accountID, profile, settings)
+	}
 	if settings.Mode == config.PromptCacheModePrefixTotal {
 		return t.computeTotalCacheUsage(accountID, profile, settings)
 	}
@@ -476,6 +492,9 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 	}
 
 	minTokens := minCacheableTokensForModel(profile.Model)
+	if profile.referenceMode {
+		minTokens = 1
+	}
 	now := time.Now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -931,6 +950,9 @@ func maxInt(a, b int) int {
 
 // Completion scales the dispatch snapshot without querying cache entries again.
 func scalePromptCacheUsage(usage promptCacheUsage, profile *promptCacheProfile, inputTokens int) promptCacheUsage {
+	if usage.referenceMode {
+		return scaleSub2APICacheUsage(usage, profile, inputTokens)
+	}
 	if usage.totalCacheRate && inputTokens <= 0 && profile != nil {
 		zero := *profile
 		zero.TotalInputTokens = 0

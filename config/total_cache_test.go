@@ -7,7 +7,7 @@ func TestTotalCacheDefaultAndExplicitLegacyPersistence(t *testing.T) {
 	if err := Init(path); err != nil {
 		t.Fatal(err)
 	}
-	if got := EffectivePromptCacheSettings(""); got.Mode != "prefix_total" || got.Ratio != .95 {
+	if got := EffectivePromptCacheSettings(""); got.Mode != "sub2api" || got.Ratio != .95 {
 		t.Fatalf("new default must control total cache rate: %+v", got)
 	}
 	for _, mode := range []string{"prefix_total", "prefix", "uniform", "independent"} {

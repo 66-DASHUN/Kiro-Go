@@ -665,6 +665,16 @@ func TestTotalCacheParallelToolRunsAndMatchedRenewal(t *testing.T) {
 }
 
 func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
+	testCacheProtocolJSONAndSSE(t, "prefix_total", 1)
+}
+
+func TestSub2APICacheProtocolJSONAndSSE(t *testing.T) {
+	for _, ratio := range []float64{.9, 1} {
+		t.Run(fmt.Sprint(ratio), func(t *testing.T) { testCacheProtocolJSONAndSSE(t, "sub2api", ratio) })
+	}
+}
+
+func testCacheProtocolJSONAndSSE(t *testing.T, policyMode string, initialRatio float64) {
 	for _, model := range []string{"claude-sonnet-4.5", "claude-sonnet-4.6", "claude-opus-5.5", "claude-haiku-4.5"} {
 		for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 			for _, stream := range []bool{false, true} {
@@ -676,7 +686,7 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 					if err := config.UpdateModelMappings([]config.ModelMappingRule{{Key: "client-model", Value: model}}); err != nil {
 						t.Fatal(err)
 					}
-					enabled, mode, ratio := true, "prefix_total", 1.0
+					enabled, mode, ratio := true, policyMode, initialRatio
 					key, err := config.AddApiKey(config.ApiKeyEntry{ID: "total-mode", Key: "sk-total-mode-fixture", Enabled: true, PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode, PromptCacheEmulationRatio: &ratio})
 					if err != nil {
 						t.Fatal(err)
@@ -748,6 +758,9 @@ func TestTotalCacheProtocolJSONAndSSE(t *testing.T) {
 						if path == "/v1/messages" {
 							expectedTotal = float64(semanticInput + 2*len(messages) + 2)
 							expectedCacheable = expectedTotal - 2
+						}
+						if policyMode == "sub2api" {
+							expectedCacheable = math.Round(expectedTotal * initialRatio)
 						}
 						if total != expectedTotal || output != 137 || read+write > total || (round == 0 && (read != 0 || write != expectedCacheable)) || (round > 0 && round < 4 && read < previousCache) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
 							t.Fatalf("round %d: %v", round, usage)
