@@ -1406,11 +1406,14 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 			if thinking && thinkingOutput == "" && extractedReasoning != "" {
 				thinkingOutput = extractedReasoning
 			}
+			// Native reasoning can arrive even when the caller did not request its
+			// display. Preserve observed generation for usage before hiding it.
+			usageThinkingOutput := thinkingOutput
 			if !thinking {
 				thinkingOutput = ""
 			}
 			nativeInputTokens, nativeOutputTokens := inputTokens, outputTokens
-			estimatedOutputTokens := estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
+			estimatedOutputTokens := estimateClaudeOutputTokens(outputContent, usageThinkingOutput, toolUses)
 			providerInputTokens, providerOutputTokens := finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
 			inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
 			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
@@ -1426,8 +1429,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				diagnostic.OutputTokenSource = usageTokenSource(nativeOutputTokens)
 				diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 				diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
-				diagnostic.EstimatedReturnedOutputTokens = estimatedOutputTokens
-				diagnostic.ReturnedOutputBytes = claudeOutputByteLength(outputContent, thinkingOutput, toolUses)
+				diagnostic.setClaudeOutputEstimates(outputContent, usageThinkingOutput, thinking && !thinkingOpts.OmitDisplay, toolUses)
 				diagnostic.ObservedKiroStopReason = streamDiag.ObservedKiroStopReason
 				diagnostic.ResponseStopReason = stopReason
 				diagnostic.LocalOutputBudgetLimit = streamDiag.OutputBudgetLimit
@@ -1647,12 +1649,13 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 			if thinking && rawThinkingContent == "" && extractedReasoning != "" {
 				rawThinkingContent = extractedReasoning
 			}
+			usageThinkingContent := rawThinkingContent
 			if !thinking {
 				rawThinkingContent = ""
 			}
 
 			nativeInputTokens, nativeOutputTokens := inputTokens, outputTokens
-			estimatedOutputTokens := estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
+			estimatedOutputTokens := estimateClaudeOutputTokens(finalContent, usageThinkingContent, toolUses)
 			providerInputTokens, providerOutputTokens := finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimatedOutputTokens)
 			inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
 			cacheUsage = scalePromptCacheUsage(cacheUsage, cacheProfile, inputTokens)
@@ -1668,8 +1671,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 				diagnostic.OutputTokenSource = usageTokenSource(nativeOutputTokens)
 				diagnostic.CacheReadInputTokens = cacheUsage.CacheReadInputTokens
 				diagnostic.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
-				diagnostic.EstimatedReturnedOutputTokens = estimatedOutputTokens
-				diagnostic.ReturnedOutputBytes = claudeOutputByteLength(finalContent, rawThinkingContent, toolUses)
+				diagnostic.setClaudeOutputEstimates(finalContent, usageThinkingContent, thinking && !thinkingOpts.OmitDisplay, toolUses)
 				diagnostic.ObservedKiroStopReason = streamDiag.ObservedKiroStopReason
 				diagnostic.ResponseStopReason = stopReason
 				diagnostic.LocalOutputBudgetLimit = streamDiag.OutputBudgetLimit

@@ -28,6 +28,9 @@ type usageDiagnostic struct {
 	CacheUsageSource               string `json:"cache_usage_source"`
 	CacheUsageEnabled              bool   `json:"cache_usage_enabled"`
 	EstimatedReturnedOutputTokens  int    `json:"estimated_returned_output_tokens"`
+	EstimatedGeneratedOutputTokens int    `json:"estimated_generated_output_tokens"`
+	ObservedReasoningTokens        int    `json:"observed_reasoning_tokens"`
+	SuppressedReasoningTokens      int    `json:"suppressed_reasoning_tokens"`
 	ReturnedOutputBytes            int    `json:"returned_output_bytes"`
 	RequestedMaxOutputTokens       int    `json:"requested_max_output_tokens"`
 	ForwardedMaxOutputTokens       int    `json:"forwarded_max_output_tokens"`
@@ -41,6 +44,21 @@ type usageDiagnostic struct {
 	SystemPromptBytesBeforeFilter  int    `json:"system_prompt_bytes_before_filter"`
 	SystemPromptBytesAfterFilter   int    `json:"system_prompt_bytes_after_filter"`
 	PromptFilterChangedSystem      bool   `json:"prompt_filter_changed_system"`
+}
+
+// Keep accounting and presentation separate. These are local estimates of
+// observed content only; signatures and unavailable hidden reasoning are never
+// converted into chargeable tokens.
+func (d *usageDiagnostic) setClaudeOutputEstimates(text, reasoning string, showReasoning bool, tools []KiroToolUse) {
+	d.EstimatedGeneratedOutputTokens = estimateClaudeOutputTokens(text, reasoning, tools)
+	d.ObservedReasoningTokens = estimateApproxTokens(reasoning)
+	d.SuppressedReasoningTokens = 0
+	if !showReasoning {
+		d.SuppressedReasoningTokens = d.ObservedReasoningTokens
+		reasoning = ""
+	}
+	d.EstimatedReturnedOutputTokens = estimateClaudeOutputTokens(text, reasoning, tools)
+	d.ReturnedOutputBytes = claudeOutputByteLength(text, reasoning, tools)
 }
 
 type streamDiagnostic struct {

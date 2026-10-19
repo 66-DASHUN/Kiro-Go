@@ -687,20 +687,29 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 		return nil, err
 	}
 	text, extracted := extractThinkingFromContent(text)
+	usageReasoning := reasoning
 	if reasoning == "" {
 		reasoning = extracted
+		if thinking {
+			usageReasoning = extracted
+		}
 	}
 	if !thinking {
 		reasoning = ""
 	}
 	nativeInputTokens, nativeOutputTokens := inputTokens, outputTokens
-	providerInputTokens, providerOutputTokens := finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimateClaudeOutputTokens(text, reasoning, toolUses))
+	providerInputTokens, providerOutputTokens := finalizeUsageTokens(inputTokens, outputTokens, estimatedInputTokens, estimateClaudeOutputTokens(text, usageReasoning, toolUses))
 	inputTokens, outputTokens = publicClaudeUsageTokens(estimatedInputTokens, providerInputTokens, providerOutputTokens)
 	updateRequestUsageDiagnostic(ctx, func(diagnostic *usageDiagnostic) {
 		diagnostic.TranslatedInputEstimate += estimateKiroPayloadInputTokens(payload)
 		diagnostic.KiroRounds++
 		diagnostic.NativeInputTokens += nativeInputTokens
 		diagnostic.NativeOutputTokens += nativeOutputTokens
+		diagnostic.EstimatedGeneratedOutputTokens += estimateClaudeOutputTokens(text, usageReasoning, toolUses)
+		diagnostic.ObservedReasoningTokens += estimateApproxTokens(usageReasoning)
+		if !thinking {
+			diagnostic.SuppressedReasoningTokens += estimateApproxTokens(usageReasoning)
+		}
 		diagnostic.InputTokenSource = usageTokenSource(diagnostic.NativeInputTokens)
 		diagnostic.OutputTokenSource = usageTokenSource(diagnostic.NativeOutputTokens)
 		diagnostic.ForwardedMaxOutputTokens = 0
