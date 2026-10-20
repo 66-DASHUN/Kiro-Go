@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -100,5 +101,79 @@ func TestClaudeSystemMessageReachesUpstream(t *testing.T) {
 				t.Fatalf("code=%d calls=%d body=%s", rec.Code, calls, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestClaudeResponsesPreservePublicDashModelAlias(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(map[bool]string{false: "nonstream", true: "stream"}[stream], func(t *testing.T) {
+			h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+				writeKiroTextResponse(t, w, "seven")
+			})
+			body := `{"model":"claude-opus-5-5","max_tokens":128,"stream":` + fmt.Sprint(stream) + `,"messages":[{"role":"user","content":"Reply seven."}]}`
+			rec := postClaudeMessages(t, h, body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), `"model":"claude-opus-5-5"`) {
+				t.Fatalf("response did not preserve public model alias: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestClaudeModelAliasAcrossResponsePaths(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, route := range []string{"plain", "structured", "search_loop", "search_direct"} {
+			for _, publicModel := range []string{"claude-opus-5-5", "claude-opus-5.5"} {
+				t.Run(fmt.Sprintf("stream=%v/%s/%s", stream, route, publicModel), func(t *testing.T) {
+					calls := 0
+					h := newStreamTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+						calls++
+						var payload KiroPayload
+						if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+							t.Error(err)
+						}
+						if got := payload.ConversationState.CurrentMessage.UserInputMessage.ModelID; got != "claude-opus-5.5" {
+							t.Errorf("upstream model=%q, want canonical model", got)
+						}
+						writeKiroTextResponse(t, w, `{"answer":42}`)
+					})
+					h.pool.SetModelList("only", []string{"claude-opus-5.5"})
+					t.Cleanup(func() { h.pool.SetModelList("only", nil) })
+					request := map[string]interface{}{
+						"model": publicModel, "max_tokens": 2048, "stream": stream,
+						"messages": []ClaudeMessage{{Role: "user", Content: "Reply with the answer."}},
+					}
+					if route == "structured" {
+						request["output_config"] = map[string]interface{}{"format": map[string]interface{}{
+							"type": "json_schema", "schema": map[string]interface{}{"type": "object"},
+						}}
+					}
+					if strings.HasPrefix(route, "search_") {
+						request["tools"] = []ClaudeTool{nativeWebSearchTool()}
+					}
+					if route == "search_direct" {
+						stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
+						request["messages"] = []ClaudeMessage{{Role: "user", Content: "Perform a web search for the query: go release"}}
+					}
+					body, _ := json.Marshal(request)
+					rec := postClaudeMessages(t, h, string(body))
+					if rec.Code != http.StatusOK {
+						t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+					}
+					if !strings.Contains(rec.Body.String(), `"model":"`+publicModel+`"`) {
+						t.Fatalf("public model changed: %s", rec.Body.String())
+					}
+					wantCalls := 1
+					if route == "search_direct" {
+						wantCalls = 0
+					}
+					if calls != wantCalls {
+						t.Fatalf("model calls=%d, want %d", calls, wantCalls)
+					}
+				})
+			}
+		}
 	}
 }

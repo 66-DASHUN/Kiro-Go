@@ -154,6 +154,7 @@ type KiroPayload struct {
 	lifecycleRequest  *ClaudeRequest     // Stable public input meter; never serialized.
 	exactMeter        *exactRequestMeter // Reference usage observer; never serialized.
 	usageRequest      *ClaudeRequest     // Public semantic request for hosted-round metering; never serialized.
+	responseModel     string             // Client-facing model spelling; never serialized.
 	outputBudget      *outputBudget
 	structuredOutput  *claudeStructuredOutput
 	HostedSearchTools map[string]bool `json:"-"`

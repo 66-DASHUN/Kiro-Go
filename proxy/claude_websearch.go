@@ -493,8 +493,11 @@ func (h *Handler) runWebSearches(ctx context.Context, model string, toolUses []K
 	return outcomes
 }
 
-func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Request, model, query string, estimatedInputTokens int, apiKeyReservation *apiKeyUsageReservation, stream bool, maxTokens int) {
+func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Request, model, responseModel, query string, estimatedInputTokens int, apiKeyReservation *apiKeyUsageReservation, stream bool, maxTokens int) {
 	defer apiKeyReservation.release()
+	if responseModel == "" {
+		responseModel = model
+	}
 	settings := config.EffectivePromptCacheSettings(apiKeyReservation.apiKeyID())
 	meter, _ := r.Context().Value(exactHostedSearchMeterContextKey{}).(*exactRequestMeter)
 	cacheUsage := promptCacheUsage{}
@@ -607,7 +610,7 @@ func (h *Handler) handleClaudeDirectWebSearch(w http.ResponseWriter, r *http.Req
 	if meter != nil {
 		exactState = &exactHostedSearchState{meter: meter, direct: true, startUsage: cacheUsage}
 	}
-	h.writeClaudeWebSearchResponse(w, stream, model, content, stopReason, inputTokens, outputTokens, 1, cacheUsage, settings.Enabled, exactState)
+	h.writeClaudeWebSearchResponse(w, stream, responseModel, content, stopReason, inputTokens, outputTokens, 1, cacheUsage, settings.Enabled, exactState)
 }
 
 func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request, req *ClaudeRequest, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, apiKeyReservation *apiKeyUsageReservation) {
@@ -812,7 +815,11 @@ func (h *Handler) runClaudeWebSearchLoop(w http.ResponseWriter, r *http.Request,
 		h.recordSuccessForApiKey(apiKeyReservation, inputTokens, outputTokens, credits)
 		recordFinalRequestForApiKey(r.Context(), apiKeyReservation, lastAccount, req.Model, inputTokens, outputTokens, credits, true, 200, "")
 
-		h.writeClaudeWebSearchResponse(w, req.Stream, req.Model, content, stopReason, inputTokens, outputTokens, searches, cacheUsage, cacheSettings.Enabled, exactSearch)
+		responseModel := req.responseModel
+		if responseModel == "" {
+			responseModel = req.Model
+		}
+		h.writeClaudeWebSearchResponse(w, req.Stream, responseModel, content, stopReason, inputTokens, outputTokens, searches, cacheUsage, cacheSettings.Enabled, exactSearch)
 		return
 	}
 }

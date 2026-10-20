@@ -100,6 +100,9 @@ type ClaudeRequest struct {
 	Tools            []ClaudeTool        `json:"tools,omitempty"`
 	ToolChoice       interface{}         `json:"tool_choice,omitempty"`
 	structuredOutput *claudeStructuredOutput
+	// responseModel preserves the client's public spelling while Model carries
+	// the canonical model identity used for routing and metering.
+	responseModel string
 }
 
 type ClaudeThinkingConfig struct {
@@ -323,6 +326,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	}
 
 	payload := &KiroPayload{}
+	payload.responseModel = req.responseModel
 	payload.ToolNameMap = toolNameMap
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.AgentTaskType = "vibe"

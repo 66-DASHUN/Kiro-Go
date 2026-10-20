@@ -827,6 +827,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
+	req.responseModel = req.Model
 	if msg := validateClaudeThinkingConfig(req.Thinking, req.MaxTokens); msg != "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
@@ -882,6 +883,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON: "+err.Error())
 		return
 	}
+	req.responseModel = req.Model
 	if msg := validateClaudeRequestShape(&req); msg != "" {
 		recordFinalRequestWithAPIKey(r.Context(), apiKeyID, apiKeyValue, nil, req.Model, 0, 0, 0, false, http.StatusBadRequest, msg)
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
@@ -950,7 +952,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		updateRequestUsageDiagnostic(r.Context(), func(diagnostic *usageDiagnostic) {
 			diagnostic.Route = "websearch_direct"
 		})
-		h.handleClaudeDirectWebSearch(w, r, req.Model, query, estimatedInputTokens, apiKeyReservation, req.Stream, req.MaxTokens)
+		h.handleClaudeDirectWebSearch(w, r, req.Model, req.responseModel, query, estimatedInputTokens, apiKeyReservation, req.Stream, req.MaxTokens)
 		return
 	case claudeWebSearchLoop:
 		updateRequestUsageDiagnostic(r.Context(), func(diagnostic *usageDiagnostic) {
@@ -997,6 +999,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 	}
 
 	thinkingFormat := thinkingOpts.Format
+	responseModel := model
+	if payload.responseModel != "" {
+		responseModel = payload.responseModel
+	}
 
 	msgID := "msg_" + uuid.New().String()
 	startInputTokens := estimatedInputTokens
@@ -1017,7 +1023,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				"type":          "message",
 				"role":          "assistant",
 				"content":       []interface{}{},
-				"model":         model,
+				"model":         responseModel,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
 				"usage":         exactOrLegacyStartUsage(payload, startInputTokens, messageStartUsage, cacheSettings.Enabled),
@@ -1578,6 +1584,10 @@ func recordFinalRequestWithAPIKey(ctx context.Context, apiKeyID, apiKey string, 
 }
 
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyReservation *apiKeyUsageReservation) {
+	responseModel := model
+	if payload.responseModel != "" {
+		responseModel = payload.responseModel
+	}
 	excluded := make(map[string]bool)
 	var lastErr error
 	var lastAccount *config.Account
@@ -1756,7 +1766,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 				}
 			}
 
-			resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
+			resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, responseModel)
 			if thinking && thinkingFormat == "thinking" {
 				resp.Content = replaceClaudeThinkingBlocks(resp.Content, nativeThinking.responseBlocks(thinkingOpts.OmitDisplay))
 			}
