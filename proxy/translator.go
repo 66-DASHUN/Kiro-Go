@@ -1041,7 +1041,7 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 			Type:  "tool_use",
 			ID:    tu.ToolUseID,
 			Name:  tu.Name,
-			Input: tu.Input,
+			Input: normalizeClaudeToolInput(tu.Input),
 		})
 	}
 
@@ -1062,6 +1062,19 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 			OutputTokens: outputTokens,
 		},
 	}
+}
+
+// normalizeClaudeToolInput keeps every Anthropic tool_use block JSON-shaped.
+// Kiro can omit an input object for a no-argument call; Anthropic clients
+// expect input:{} rather than a missing or null input field.
+func normalizeClaudeToolInput(input interface{}) interface{} {
+	if input == nil {
+		return map[string]interface{}{}
+	}
+	if object, ok := input.(map[string]interface{}); ok && object == nil {
+		return map[string]interface{}{}
+	}
+	return input
 }
 
 type OpenAIRequest struct {
@@ -2097,7 +2110,7 @@ func KiroToOpenAIResponse(content string, toolUses []KiroToolUse, inputTokens, o
 		msg.Content = nil
 		msg.ToolCalls = make([]ToolCall, len(toolUses))
 		for i, tu := range toolUses {
-			args, _ := json.Marshal(tu.Input)
+			args, _ := json.Marshal(normalizeClaudeToolInput(tu.Input))
 			msg.ToolCalls[i] = ToolCall{
 				ID:   tu.ToolUseID,
 				Type: "function",
@@ -2163,7 +2176,7 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 		message["content"] = nil
 		toolCalls := make([]map[string]interface{}, len(toolUses))
 		for i, tu := range toolUses {
-			args, _ := json.Marshal(tu.Input)
+			args, _ := json.Marshal(normalizeClaudeToolInput(tu.Input))
 			toolCalls[i] = map[string]interface{}{
 				"id":   tu.ToolUseID,
 				"type": "function",

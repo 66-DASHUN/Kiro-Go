@@ -324,6 +324,20 @@ func TestKiroToClaudeResponseCanEmitEmptyThinkingBlock(t *testing.T) {
 	}
 }
 
+func TestKiroToClaudeResponseNormalizesEmptyToolInput(t *testing.T) {
+	resp := KiroToClaudeResponse("", "", false, []KiroToolUse{{ToolUseID: "toolu_empty", Name: "lookup", Input: nil}}, 10, 2, "claude-sonnet-4.5")
+	if len(resp.Content) != 1 || resp.Content[0].Type != "tool_use" {
+		t.Fatalf("expected one tool_use block, got %#v", resp.Content)
+	}
+	input, ok := resp.Content[0].Input.(map[string]interface{})
+	if !ok || input == nil {
+		t.Fatalf("tool_use input must be an object, got %#v", resp.Content[0].Input)
+	}
+	if raw, err := json.Marshal(resp); err != nil || !strings.Contains(string(raw), `"input":{}`) {
+		t.Fatalf("serialized tool_use input must be an empty object: err=%v raw=%s", err, raw)
+	}
+}
+
 func TestToolResultsContinuationIncludesInstructionPrefix(t *testing.T) {
 	req := &OpenAIRequest{
 		Model: "claude-sonnet-4.5",
@@ -553,8 +567,8 @@ func TestParseModelAndThinkingUsesConfiguredMappings(t *testing.T) {
 	}
 }
 
-//! Guards the Claude Code (/v1/messages) path: the top-level composition flattener must
-//! leave ordinary tool schemas, and any nested oneOf/anyOf/allOf, completely untouched.
+// ! Guards the Claude Code (/v1/messages) path: the top-level composition flattener must
+// ! leave ordinary tool schemas, and any nested oneOf/anyOf/allOf, completely untouched.
 func TestEnsureObjectSchemaLeavesClaudeCodeToolSchemasIntact(t *testing.T) {
 	const schemas = `[
 	{"type":"object","properties":{"file_path":{"type":"string"},"limit":{"type":"integer"},"offset":{"type":"integer"}},"required":["file_path"]},
@@ -596,8 +610,8 @@ func TestEnsureObjectSchemaLeavesClaudeCodeToolSchemasIntact(t *testing.T) {
 	}
 }
 
-//! A schema with no root composition keyword keeps whatever type it declared; only a
-//! flattened schema is forced back to "object".
+// ! A schema with no root composition keyword keeps whatever type it declared; only a
+// ! flattened schema is forced back to "object".
 func TestEnsureObjectSchemaKeepsDeclaredTypeWithoutComposition(t *testing.T) {
 	got := ensureObjectSchema(map[string]interface{}{
 		"type":       "string",

@@ -56,6 +56,28 @@ func TestApplyReasoningEffortSkipsUnsupportedModelSchema(t *testing.T) {
 	}
 }
 
+func TestReasoningEffortUsesSameModelAliasesAsNativeThinking(t *testing.T) {
+	for _, tc := range []struct{ metadata, request string }{
+		{"claude-opus-5-5", "claude-opus-5.5"},
+		{"claude-opus-5.5", "claude-opus-5-5"},
+		{"claude-opus-5.5", "anthropic.claude-opus-5-5"},
+	} {
+		t.Run(tc.metadata+"/"+tc.request, func(t *testing.T) {
+			model := nativeOptionsModel()
+			model.ModelId = tc.metadata
+			h := &Handler{cachedModels: []ModelInfo{model}}
+			req := &ClaudeRequest{Model: tc.request, Thinking: &ClaudeThinkingConfig{Type: "adaptive"}, OutputConfig: &ClaudeOutputConfig{Effort: "max"}}
+			payload := &KiroPayload{}
+			h.applyClaudeInferenceOptions(payload, req, true)
+			thought, _ := payload.AdditionalModelRequestFields["thinking"].(map[string]interface{})
+			output, _ := payload.AdditionalModelRequestFields["output_config"].(map[string]interface{})
+			if thought["type"] != "adaptive" || output["effort"] != "max" {
+				t.Fatalf("native options disagree on model identity: %#v", payload.AdditionalModelRequestFields)
+			}
+		})
+	}
+}
+
 func effortSchemaModel(id string, levels ...interface{}) ModelInfo {
 	return ModelInfo{
 		ModelId: id,

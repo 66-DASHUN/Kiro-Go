@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const lifecycleCacheRuleVersion = "prefix-lifecycle-v3"
+const lifecycleCacheRuleVersion = "prefix-lifecycle-v4"
 
 // Independent content/scope/attempt samples vary the cold admission probability
 // and decide whether to store the whole prefix. A fresh attempt permits retries;
@@ -57,6 +57,10 @@ func buildLifecycleProfile(req *ClaudeRequest) *promptCacheProfile {
 	}
 	copyReq := *req
 	copyReq.Model = totalCacheModelIdentity(req.Model)
+	// Tool choice affects messages, not the earlier tool/system prefix. Other
+	// inference settings remain conservative whole-prefix invalidators because
+	// their placement varies by model.
+	copyReq.ToolChoice = nil
 	blocks := flattenClaudeCacheBlocks(&copyReq)
 	// Count the public tool definition in the same serialized form used by
 	// the reference cache profiler. Semantic fields alone omit the outer keys
@@ -83,7 +87,14 @@ func buildLifecycleProfile(req *ClaudeRequest) *promptCacheProfile {
 		}
 	}
 	h := sha256.New()
+	messageOptionsHashed := false
 	for _, b := range blocks {
+		if wrapper, ok := b.Value.(map[string]interface{}); ok && wrapper["kind"] == "message" && !messageOptionsHashed {
+			writeHashChunk(h, canonicalizeCacheValue(map[string]interface{}{
+				"kind": "message_options", "tool_choice": req.ToolChoice,
+			}))
+			messageOptionsHashed = true
+		}
 		writeHashChunk(h, canonicalizeCacheValue(b.Value))
 		// Anthropic meters the public block envelope as part of the prompt.
 		// Legacy cache modes intentionally retain their historical semantic-only

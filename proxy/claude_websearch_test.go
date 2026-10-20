@@ -20,11 +20,21 @@ func bashClaudeTool() ClaudeTool {
 }
 
 func TestNativeWebSearchToolNeedsServerToolType(t *testing.T) {
-	if !isNativeWebSearchTool(nativeWebSearchTool()) {
-		t.Fatal("typed web_search tool must be native")
+	for _, tool := range []ClaudeTool{
+		nativeWebSearchTool(),
+		{Type: "web_search_20250305"},
+		{Type: "web_search"},
+		{Type: "web_search_preview_2025_03_11", Name: "web_search"},
+	} {
+		if !isNativeWebSearchTool(tool) {
+			t.Fatalf("typed web_search tool must be native: %+v", tool)
+		}
 	}
 	if isNativeWebSearchTool(ClaudeTool{Name: webSearchToolName, Description: "client search"}) {
 		t.Fatal("client tool merely named web_search must not be native")
+	}
+	if isNativeWebSearchTool(ClaudeTool{Type: "function", Name: webSearchToolName}) {
+		t.Fatal("function tool named web_search must remain a client tool")
 	}
 	if hasNativeWebSearchTool(nil) {
 		t.Fatal("no tools must not report native web_search")
@@ -474,6 +484,27 @@ func TestClaudeWebSearchLoopReturnsClientToolUse(t *testing.T) {
 	}
 	if msg["stop_reason"] != "tool_use" || stub.calls.Load() != 0 {
 		t.Fatalf("stop_reason=%v MCP calls=%d", msg["stop_reason"], stub.calls.Load())
+	}
+}
+
+func TestClaudeStreamToolUseNormalizesEmptyInput(t *testing.T) {
+	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeFrames(w,
+			awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+				"toolUseId": "toolu_empty",
+				"name":      "lookup",
+				"stop":      true,
+			}),
+			meteringFrame(t),
+		)
+	})
+	body := `{"model":"claude-sonnet-4.5","stream":true,"max_tokens":64,"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"Call lookup."}]}`
+	rec := postClaudeMessages(t, h, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"partial_json":"{}"`) || strings.Contains(rec.Body.String(), `"partial_json":"null"`) {
+		t.Fatalf("empty tool input was not serialized as an object: %s", rec.Body.String())
 	}
 }
 

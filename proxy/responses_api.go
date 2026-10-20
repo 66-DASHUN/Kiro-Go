@@ -798,7 +798,7 @@ func buildResponsesReasoningOutputItemWithID(id, reasoning string) map[string]in
 }
 
 func buildResponsesToolOutputItem(tu KiroToolUse) map[string]interface{} {
-	args, _ := json.Marshal(tu.Input)
+	args, _ := json.Marshal(normalizeClaudeToolInput(tu.Input))
 	return map[string]interface{}{
 		"id":        tu.ToolUseID,
 		"type":      "function_call",
@@ -819,7 +819,7 @@ func responsesAssistantMessage(content string, toolUses []KiroToolUse) OpenAIMes
 	}
 	msg.ToolCalls = make([]ToolCall, len(toolUses))
 	for i, tu := range toolUses {
-		args, _ := json.Marshal(tu.Input)
+		args, _ := json.Marshal(normalizeClaudeToolInput(tu.Input))
 		msg.ToolCalls[i] = ToolCall{ID: tu.ToolUseID, Type: "function"}
 		msg.ToolCalls[i].Function.Name = tu.Name
 		msg.ToolCalls[i].Function.Arguments = string(args)

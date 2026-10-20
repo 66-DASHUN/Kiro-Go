@@ -187,9 +187,16 @@ type webSearchOutcome struct {
 }
 
 func isNativeWebSearchTool(tool ClaudeTool) bool {
-	//! Only the typed server tool counts; a client tool that is merely named web_search stays a client tool.
-	return strings.TrimSpace(tool.Name) == webSearchToolName &&
-		strings.HasPrefix(strings.ToLower(strings.TrimSpace(tool.Type)), "web_search_")
+	//! Only a recognized server-tool type counts; a client tool that is merely
+	//! named web_search stays a client tool. Some Anthropic-compatible clients
+	//! omit the redundant name or use the short/preview type spelling.
+	typ := strings.ToLower(strings.TrimSpace(tool.Type))
+	if typ != "web_search" && typ != "web_search_preview" &&
+		!strings.HasPrefix(typ, "web_search_") {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(tool.Name))
+	return name == "" || name == webSearchToolName
 }
 
 func hasNativeWebSearchTool(tools []ClaudeTool) bool {

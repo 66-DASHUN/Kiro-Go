@@ -1360,7 +1360,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 						},
 					})
 
-					inputJSON, _ := json.Marshal(tu.Input)
+					inputJSON, _ := json.Marshal(normalizeClaudeToolInput(tu.Input))
 					h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
 						"type":  "content_block_delta",
 						"index": idx,
@@ -2156,7 +2156,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, r *http.Request, pay
 				OnToolUse: func(tu KiroToolUse) {
 					processText("", false, true)
 
-					args, _ := json.Marshal(tu.Input)
+					args, _ := json.Marshal(normalizeClaudeToolInput(tu.Input))
 					tc := ToolCall{ID: tu.ToolUseID, Type: "function"}
 					tc.Function.Name = tu.Name
 					tc.Function.Arguments = string(args)

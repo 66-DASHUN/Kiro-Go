@@ -71,18 +71,9 @@ func (h *Handler) applyReasoningEffort(payload *KiroPayload, model, rawEffort st
 }
 
 func (h *Handler) effortLevelsForModel(model string) []string {
-	model = strings.ToLower(strings.TrimSpace(model))
-	if model == "" {
-		return nil
-	}
-	h.modelsCacheMu.RLock()
-	defer h.modelsCacheMu.RUnlock()
-	for _, m := range h.cachedModels {
-		if strings.EqualFold(strings.TrimSpace(m.ModelId), model) {
-			return effortLevelsFromSchema(m.AdditionalModelRequestFieldsSchema)
-		}
-	}
-	return nil
+	// Thinking, max_tokens and effort must consult the same canonical model.
+	// An alias must not preserve native thinking while silently dropping effort.
+	return effortLevelsFromSchema(h.modelRequestSchema(model))
 }
 
 func effortLevelsFromSchema(schema map[string]interface{}) []string {
