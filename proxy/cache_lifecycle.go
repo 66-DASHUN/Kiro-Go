@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const lifecycleCacheRuleVersion = "prefix-lifecycle-v2"
+const lifecycleCacheRuleVersion = "prefix-lifecycle-v3"
 
 // Independent content/scope/attempt samples vary the cold admission probability
 // and decide whether to store the whole prefix. A fresh attempt permits retries;
@@ -58,6 +58,22 @@ func buildLifecycleProfile(req *ClaudeRequest) *promptCacheProfile {
 	copyReq := *req
 	copyReq.Model = totalCacheModelIdentity(req.Model)
 	blocks := flattenClaudeCacheBlocks(&copyReq)
+	// Count the public tool definition in the same serialized form used by
+	// the reference cache profiler. Semantic fields alone omit the outer keys
+	// and JSON structure. Keep legacy modes' metering unchanged, and exclude
+	// cache markers plus our internal fingerprint wrapper from token content.
+	for i, tool := range copyReq.Tools {
+		wireTool := map[string]interface{}{
+			"name": tool.Name, "description": tool.Description, "input_schema": tool.InputSchema,
+		}
+		if tool.Type != "" {
+			wireTool["type"] = tool.Type
+		}
+		if tool.MaxUses != 0 {
+			wireTool["max_uses"] = tool.MaxUses
+		}
+		blocks[i+1].Tokens = estimateApproxTokens(canonicalizeCacheValue(wireTool))
+	}
 	p := &promptCacheProfile{lifecycle: true, Model: copyReq.Model}
 	explicit := false
 	for _, b := range blocks {
@@ -69,7 +85,36 @@ func buildLifecycleProfile(req *ClaudeRequest) *promptCacheProfile {
 	h := sha256.New()
 	for _, b := range blocks {
 		writeHashChunk(h, canonicalizeCacheValue(b.Value))
+		// Anthropic meters the public block envelope as part of the prompt.
+		// Legacy cache modes intentionally retain their historical semantic-only
+		// accounting; lifecycle mode uses the complete stable JSON structure so
+		// read/write values do not systematically undercount tool and message
+		// prefixes. Cache-control and internal position markers are removed by
+		// canonicalizeCacheValue before counting.
+		if wrapper, ok := b.Value.(map[string]interface{}); ok {
+			switch wrapper["kind"] {
+			case "system", "message":
+				if block, exists := wrapper["block"]; exists {
+					b.Tokens = estimateApproxTokens(canonicalizeCacheValue(block))
+					if wrapper["kind"] == "message" && b.Tokens > 0 {
+						// Keep the message role framing already accounted by
+						// appendMessageCacheBlocks.
+						b.Tokens += claudeMessageFramingTokens
+					}
+				}
+			}
+		}
 		p.TotalInputTokens += b.Tokens
+		if wrapper, ok := b.Value.(map[string]interface{}); ok {
+			switch wrapper["kind"] {
+			case "tool":
+				p.LifecycleToolTokens += b.Tokens
+			case "system":
+				p.LifecycleSystemTokens += b.Tokens
+			case "message":
+				p.LifecycleMessageTokens += b.Tokens
+			}
+		}
 		if b.IsMetadata || p.TotalInputTokens <= 0 {
 			continue
 		}

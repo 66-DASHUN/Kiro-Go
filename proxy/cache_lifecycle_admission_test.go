@@ -117,7 +117,7 @@ func TestLifecycleAdmissionDiagnostic(t *testing.T) {
 	u := tracker.ComputeWithSettings("a", p, s)
 	tracker.UpdateWithSettings("a", p, s, u)
 	d := tracker.diagnostics[len(tracker.diagnostics)-1]
-	if d.Rule != "prefix-lifecycle-v2" || !d.AdmissionChecked || d.WriteAdmitted || d.Limitation != "cache_admission_miss" || d.Ordinary != p.TotalInputTokens {
+	if d.Rule != lifecycleCacheRuleVersion || !d.AdmissionChecked || d.WriteAdmitted || d.Limitation != "cache_admission_miss" || d.Ordinary != p.TotalInputTokens {
 		t.Fatalf("rejected cold diagnostic is misleading: %+v", d)
 	}
 	s.Ratio = 1

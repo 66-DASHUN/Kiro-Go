@@ -30,6 +30,10 @@ type usageDiagnostic struct {
 	EstimatedReturnedOutputTokens  int    `json:"estimated_returned_output_tokens"`
 	EstimatedGeneratedOutputTokens int    `json:"estimated_generated_output_tokens"`
 	ObservedReasoningTokens        int    `json:"observed_reasoning_tokens"`
+	ObservedTextTokens             int    `json:"observed_text_tokens"`
+	ObservedToolArgumentTokens     int    `json:"observed_tool_argument_tokens"`
+	ObservedToolCalls              int    `json:"observed_tool_calls"`
+	LocalOutputEstimator           string `json:"local_output_estimator,omitempty"`
 	SuppressedReasoningTokens      int    `json:"suppressed_reasoning_tokens"`
 	ReturnedOutputBytes            int    `json:"returned_output_bytes"`
 	RequestedMaxOutputTokens       int    `json:"requested_max_output_tokens"`
@@ -51,6 +55,17 @@ type usageDiagnostic struct {
 // converted into chargeable tokens.
 func (d *usageDiagnostic) setClaudeOutputEstimates(text, reasoning string, showReasoning bool, tools []KiroToolUse) {
 	d.EstimatedGeneratedOutputTokens = estimateClaudeOutputTokens(text, reasoning, tools)
+	d.ObservedTextTokens = estimateApproxTokens(text)
+	d.ObservedToolArgumentTokens = 0
+	d.ObservedToolCalls = len(tools)
+	d.LocalOutputEstimator = "anthropic_legacy_approximation"
+	// These independent channel counts aid diagnosis; BPE boundaries mean their
+	// sum need not equal the joined-buffer estimate used for public usage.
+	for _, tool := range tools {
+		if raw, err := json.Marshal(tool.Input); err == nil {
+			d.ObservedToolArgumentTokens += estimateApproxTokens(string(raw))
+		}
+	}
 	d.ObservedReasoningTokens = estimateApproxTokens(reasoning)
 	d.SuppressedReasoningTokens = 0
 	if !showReasoning {

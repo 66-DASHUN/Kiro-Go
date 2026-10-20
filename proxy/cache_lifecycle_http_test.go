@@ -11,6 +11,43 @@ import (
 	"testing"
 )
 
+func TestLifecycleHTTPToolSchemaReadMatchesCountTokens(t *testing.T) {
+	h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) { writeKiroTextResponse(t, w, "ok") })
+	mode, enabled, ratio := "prefix_lifecycle", true, 1.0
+	key, err := config.AddApiKey(config.ApiKeyEntry{ID: "serialized-tools", Key: "sk-lifecycle-serialized-tools", Enabled: true, PromptCacheEmulationEnabled: &enabled, PromptCacheEmulationMode: &mode, PromptCacheEmulationRatio: &ratio})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.pool.Reload()
+	if err := config.UpdatePromptCacheSettings(true, mode, ratio, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]interface{}{
+		"model": "claude-opus-5.5", "max_tokens": 256,
+		"tools": []interface{}{map[string]interface{}{
+			"name": "read_file", "description": "Read a file from the workspace and return its contents.",
+			"input_schema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"path": map[string]interface{}{"type": "string", "description": "Workspace-relative path"}}, "required": []interface{}{"path"}},
+		}},
+		"messages": []interface{}{map[string]interface{}{"role": "user", "content": "Use the tool."}},
+	}
+	count := localUsageJSONRequest(t, h, "/v1/messages/count_tokens", body, &key)
+	var estimated struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(count.Body.Bytes(), &estimated); err != nil {
+		t.Fatal(err)
+	}
+	first := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, "/v1/messages", body, &key), false)
+	second := runtimeProtocolUsage(t, localUsageJSONRequest(t, h, "/v1/messages", body, &key), false)
+	written := first["cache_creation_input_tokens"].(float64)
+	if first["input_tokens"] != float64(2) || first["cache_read_input_tokens"] != float64(0) || written <= 0 {
+		t.Fatalf("cold tool usage: %v", first)
+	}
+	if second["input_tokens"] != float64(2) || second["cache_creation_input_tokens"] != float64(0) || second["cache_read_input_tokens"] != written || float64(estimated.InputTokens) != written+2 {
+		t.Fatalf("warm tool usage=%v, cold=%v, count=%d", second, first, estimated.InputTokens)
+	}
+}
+
 func TestLifecycleHTTPProtocols(t *testing.T) {
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 		for _, stream := range []bool{false, true} {

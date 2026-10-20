@@ -71,6 +71,34 @@ func TestUsageTokenSourceDistinguishesNativeUsageFromFallback(t *testing.T) {
 	}
 }
 
+func TestClaudeOutputDiagnosticIncludesObservedContentBreakdown(t *testing.T) {
+	tools := []KiroToolUse{{Name: "read_file", Input: map[string]interface{}{"path": "main.go"}}}
+	d := usageDiagnostic{}
+	d.setClaudeOutputEstimates("Visible answer.", "Observed reasoning.", false, tools)
+	raw := formatUsageDiagnostic(d)
+	var fields map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]int{
+		"observed_text_tokens":          estimateApproxTokens("Visible answer."),
+		"observed_tool_argument_tokens": estimateApproxTokens(`{"path":"main.go"}`),
+		"observed_tool_calls":           1,
+	} {
+		if got := fields[name]; got != float64(want) {
+			t.Errorf("%s=%v want %d", name, got, want)
+		}
+	}
+	if fields["local_output_estimator"] != "anthropic_legacy_approximation" {
+		t.Errorf("diagnostic must name the actual estimator: %s", raw)
+	}
+	for _, secret := range []string{"Visible answer.", "Observed reasoning.", "main.go", "read_file"} {
+		if strings.Contains(raw, secret) {
+			t.Fatalf("content leaked into diagnostic: %s", raw)
+		}
+	}
+}
+
 func TestClaudeStreamDiagnosticSeparatesLocalOutputBudgetFromUpstreamStop(t *testing.T) {
 	budget := newOutputBudget(4)
 	var got streamDiagnostic

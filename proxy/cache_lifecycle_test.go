@@ -8,6 +8,92 @@ import (
 	"time"
 )
 
+func TestLifecycleToolCacheBlockCountsSerializedStructure(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-opus-5.5",
+		Tools: []ClaudeTool{{
+			Name:        "read_file",
+			Description: "Read a file from the workspace and return its contents.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string", "description": "Workspace-relative path"},
+				},
+				"required": []interface{}{"path"},
+			},
+		}},
+		Messages: []ClaudeMessage{{Role: "user", Content: "Use the tool."}},
+	}
+
+	wireTool := map[string]interface{}{
+		"name":         req.Tools[0].Name,
+		"description":  req.Tools[0].Description,
+		"input_schema": req.Tools[0].InputSchema,
+	}
+	want := estimateApproxTokens(canonicalizeCacheValue(wireTool))
+	profile := buildLifecycleProfile(req)
+	if profile.LifecycleToolTokens != want || profile.LifecycleSystemTokens != 0 || profile.LifecycleMessageTokens <= 0 {
+		t.Fatalf("lifecycle token breakdown is inaccurate: tool=%d system=%d message=%d", profile.LifecycleToolTokens, profile.LifecycleSystemTokens, profile.LifecycleMessageTokens)
+	}
+	if profile.LifecycleToolTokens+profile.LifecycleSystemTokens+profile.LifecycleMessageTokens+claudeGenerationPrefixTokens != profile.TotalInputTokens {
+		t.Fatalf("lifecycle token breakdown does not conserve total: %+v", profile)
+	}
+	if len(profile.Breakpoints) < 2 {
+		t.Fatal("tool and message cache breakpoints were not created")
+	}
+	got := profile.Breakpoints[0].CumulativeTokens
+	if got != want {
+		t.Fatalf("tool cache block must count serialized structure: got %d want %d", got, want)
+	}
+	semanticOnly := estimateClaudeToolTokens(req.Tools[0])
+	if got <= semanticOnly {
+		t.Fatalf("serialized tool count did not include structural overhead: serialized=%d semantic=%d", got, semanticOnly)
+	}
+	tracker := newPromptCacheTracker(time.Hour)
+	policy := lifecyclePolicy()
+	cold := tracker.ComputeWithSettings("account", profile, policy)
+	if billedClaudeInputTokens(profile.TotalInputTokens, cold) != 2 || cold.CacheReadInputTokens != 0 {
+		t.Fatalf("serialized counting changed cold framing or created a phantom read: %+v", cold)
+	}
+	tracker.UpdateWithSettings("account", profile, policy, cold)
+	warm := tracker.ComputeWithSettings("account", profile, policy)
+	if warm.CacheReadInputTokens != cold.CacheCreationInputTokens || warm.CacheCreationInputTokens != 0 || billedClaudeInputTokens(profile.TotalInputTokens, warm) != 2 {
+		t.Fatalf("serialized counting changed the write/read lifecycle: cold=%+v warm=%+v", cold, warm)
+	}
+	t.Logf("tool tokens: semantic=%d serialized=%d; cold input=2 create=%d; warm input=2 read=%d", semanticOnly, got, cold.CacheCreationInputTokens, warm.CacheReadInputTokens)
+}
+
+func TestLifecycleMessageCacheBlockCountsSerializedStructure(t *testing.T) {
+	message := map[string]interface{}{"type": "text", "text": "stable prefix", "cache_control": map[string]interface{}{"type": "ephemeral", "ttl": "5m"}}
+	req := &ClaudeRequest{Model: "claude-sonnet-4.5", Messages: []ClaudeMessage{{Role: "user", Content: []interface{}{message}}}}
+	profile := buildLifecycleProfile(req)
+	serialized := estimateApproxTokens(canonicalizeCacheValue(map[string]interface{}{"type": "text", "text": "stable prefix"})) + claudeMessageFramingTokens
+	semantic := estimateClaudeValueTokens(message) + claudeMessageFramingTokens
+	if profile.LifecycleMessageTokens != serialized || profile.LifecycleMessageTokens <= semantic {
+		t.Fatalf("message structure was not counted: got=%d serialized=%d semantic=%d", profile.LifecycleMessageTokens, serialized, semantic)
+	}
+	if profile.TotalInputTokens != profile.LifecycleMessageTokens+claudeGenerationPrefixTokens {
+		t.Fatalf("message token breakdown does not conserve total: %+v", profile)
+	}
+}
+
+func TestLifecycleToolCountExcludesCacheMarkersAndIncludesServerToolOptions(t *testing.T) {
+	req := &ClaudeRequest{Model: "claude-opus-5.5", Tools: []ClaudeTool{{Type: "web_search_20250305", Name: "web_search", MaxUses: 3}}}
+	plain := buildLifecycleProfile(req)
+	raw, err := json.Marshal(req.Tools[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := plain.Breakpoints[0].CumulativeTokens, estimateJSONTokens(req.Tools[0]); got != want {
+		t.Fatalf("server tool options missing: got=%d want=%d wire=%s", got, want, raw)
+	}
+	req.Tools[0].CacheControl = map[string]interface{}{"type": "ephemeral", "ttl": "1h"}
+	marked := buildLifecycleProfile(req)
+	if marked.TotalInputTokens != plain.TotalInputTokens || marked.InputFingerprint != plain.InputFingerprint || marked.Breakpoints[0].TTL != time.Hour {
+		t.Fatal("cache markers must change TTL without changing token content or prefix identity")
+	}
+}
+
 func TestLifecycleOpenAIPreservesExplicitBoundaries(t *testing.T) {
 	for _, role := range []string{"system", "user"} {
 		t.Run(role, func(t *testing.T) {
@@ -95,7 +181,8 @@ func TestLifecycleShortExplicitTailAndExpiry(t *testing.T) {
 	req := &ClaudeRequest{Model: "new-model-9.9", System: []interface{}{prefix}, Messages: []ClaudeMessage{{Role: "user", Content: strings.Repeat("uncached tail ", 30)}}}
 	p := tracker.BuildClaudeProfileWithSettings(req, 1, policy)
 	u := tracker.ComputeWithSettings("a", p, policy)
-	if u.CacheCreationInputTokens != estimateApproxTokens("short") || u.CacheCreation1hInputTokens != u.CacheCreationInputTokens || billedClaudeInputTokens(p.TotalInputTokens, u) <= 2 {
+	wantPrefixTokens := estimateApproxTokens(canonicalizeCacheValue(map[string]interface{}{"type": "text", "text": "short"}))
+	if u.CacheCreationInputTokens != wantPrefixTokens || u.CacheCreation1hInputTokens != u.CacheCreationInputTokens || billedClaudeInputTokens(p.TotalInputTokens, u) <= 2 {
 		t.Fatalf("short explicit prefix and ordinary tail: %+v total=%d", u, p.TotalInputTokens)
 	}
 	tracker.UpdateWithSettings("a", p, policy, u)

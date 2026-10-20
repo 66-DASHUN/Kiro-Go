@@ -73,6 +73,12 @@ type promptCacheProfile struct {
 	Breakpoints      []promptCacheBreakpoint
 	LookupCandidates []promptCacheBreakpoint
 	TotalInputTokens int
+	// Lifecycle-only content breakdown used by diagnostics and regression tests.
+	// These values are in the same token space as TotalInputTokens and do not
+	// alter cache admission or billing.
+	LifecycleToolTokens    int
+	LifecycleSystemTokens  int
+	LifecycleMessageTokens int
 	Model            string
 	InputFingerprint [32]byte
 }
