@@ -315,7 +315,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	if choice == "tool" {
 		tools = nil
 		for _, tool := range req.Tools {
-			if tool.Name == name {
+			if claudeToolMatchesChoice(tool, name) {
 				tools = append(tools, tool)
 			}
 		}

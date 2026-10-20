@@ -27,6 +27,12 @@ func claudeToolChoice(value interface{}) (string, string) {
 	return strings.ToLower(strings.TrimSpace(choice.Type)), strings.TrimSpace(choice.Name)
 }
 
+// Server search types have an implicit web_search name even when clients omit it.
+// Use the same matching rule for validation and upstream tool selection.
+func claudeToolMatchesChoice(tool ClaudeTool, name string) bool {
+	return name != "" && (tool.Name == name || (name == webSearchToolName && isNativeWebSearchTool(tool)))
+}
+
 func validateClaudeToolChoice(req *ClaudeRequest) string {
 	kind, name := claudeToolChoice(req.ToolChoice)
 	switch kind {
@@ -39,7 +45,7 @@ func validateClaudeToolChoice(req *ClaudeRequest) string {
 		return "tool_choice any requires tools"
 	case "tool":
 		for _, tool := range req.Tools {
-			if name != "" && tool.Name == name {
+			if claudeToolMatchesChoice(tool, name) {
 				return ""
 			}
 		}

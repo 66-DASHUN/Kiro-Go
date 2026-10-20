@@ -100,6 +100,31 @@ func TestValidateOpenAIToolChoice(t *testing.T) {
 	}
 }
 
+func TestValidateClaudeToolChoiceServerSearchName(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tool   ClaudeTool
+		choice string
+		valid  bool
+	}{
+		{"implicit server name", ClaudeTool{Type: "web_search_20250305"}, "web_search", true},
+		{"short server type", ClaudeTool{Type: "web_search"}, "web_search", true},
+		{"explicit server name", nativeWebSearchTool(), "web_search", true},
+		{"client tool", ClaudeTool{Name: "lookup"}, "lookup", true},
+		{"undeclared name", nativeWebSearchTool(), "lookup", false},
+		{"unnamed client tool", ClaudeTool{Type: "function"}, "web_search", false},
+		{"unrecognized server type", ClaudeTool{Type: "web_fetch_20250910"}, "web_search", false},
+		{"missing choice name", nativeWebSearchTool(), "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &ClaudeRequest{Tools: []ClaudeTool{tc.tool}, ToolChoice: map[string]interface{}{"type": "tool", "name": tc.choice}}
+			if got := validateClaudeToolChoice(req); (got == "") != tc.valid {
+				t.Fatalf("validation = %q, want valid=%v", got, tc.valid)
+			}
+		})
+	}
+}
+
 // Live: tool_choice none on a turn answering a tool call got HTTP 400
 // TOOL_CONFIG_MISSING, because the tool list was dropped while the structured
 // toolUse/toolResult blocks stayed.

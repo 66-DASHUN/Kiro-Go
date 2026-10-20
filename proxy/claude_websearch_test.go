@@ -425,6 +425,17 @@ func TestClaudeDirectWebSearchStreamsServerToolBlocks(t *testing.T) {
 }
 
 func TestClaudeWebSearchLoopFeedsResultsBackToModel(t *testing.T) {
+	for _, toolConfig := range []string{
+		`"tools":[{"type":"web_search_20250305","name":"web_search"}]`,
+		`"tools":[{"type":"web_search_20250305"}],"tool_choice":{"type":"tool","name":"web_search"}`,
+	} {
+		t.Run(toolConfig, func(t *testing.T) {
+			testClaudeWebSearchLoopFeedsResultsBackToModel(t, toolConfig)
+		})
+	}
+}
+
+func testClaudeWebSearchLoopFeedsResultsBackToModel(t *testing.T, toolConfig string) {
 	var upstreamCalls atomic.Int32
 	h := newLegacyMeteringTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		var payload KiroPayload
@@ -450,7 +461,7 @@ func TestClaudeWebSearchLoopFeedsResultsBackToModel(t *testing.T) {
 	stub := stubMCPWebSearch(t, http.StatusOK, mcpOneResult)
 
 	msg := decodeClaudeMessage(t, postClaudeMessages(t, h, `{"model":"claude-sonnet-4.5","max_tokens":64,
-		"tools":[{"type":"web_search_20250305","name":"web_search"}],
+		`+toolConfig+`,
 		"messages":[{"role":"user","content":"What is the latest Go?"}]}`))
 
 	if got := strings.Join(contentTypes(msg), ","); got != "server_tool_use,web_search_tool_result,text" {
