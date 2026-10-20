@@ -37,6 +37,8 @@ type promptCacheUsage struct {
 	// The positive-rate lookup must remain valid when a varied write threshold is zero.
 	cacheAdmissionChecked      bool
 	cacheWriteAdmitted         bool
+	lifecycleReadChecked       bool
+	lifecycleReadHit           bool
 	startedAt                  time.Time
 	matchedFingerprint         [32]byte
 	matchedTTL                 time.Duration
@@ -79,8 +81,8 @@ type promptCacheProfile struct {
 	LifecycleToolTokens    int
 	LifecycleSystemTokens  int
 	LifecycleMessageTokens int
-	Model            string
-	InputFingerprint [32]byte
+	Model                  string
+	InputFingerprint       [32]byte
 }
 
 func minCacheableTokensForModel(model string) int {
@@ -109,7 +111,7 @@ type promptCacheTracker struct {
 	maxSupportedTTL       time.Duration
 	diagnostics           []promptCacheDiagnostic
 	diagnosticSeq         uint64
-	lifecycleAdmissionSeq uint64 // guarded by mu; one decision per cold dispatch
+	lifecycleReadCheckSeq uint64 // guarded by mu; one read decision per warm dispatch
 }
 
 func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {

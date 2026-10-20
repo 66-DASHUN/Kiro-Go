@@ -159,13 +159,15 @@ func TestLifecycleColdRepeatAppendAndStableCount(t *testing.T) {
 		t.Fatal("completion changed lifecycle counting space")
 	}
 	settings.Ratio = 0
-	if got := tracker.ComputeWithSettings("account", next, settings); got.CacheReadInputTokens != appended.CacheReadInputTokens || got.CacheCreationInputTokens != appended.CacheCreationInputTokens {
-		t.Fatal("cold admission target changed an existing read/suffix lifecycle")
+	miss := tracker.ComputeWithSettings("account", next, settings)
+	if miss.CacheReadInputTokens != 0 || miss.CacheCreationInputTokens != next.TotalInputTokens-claudeGenerationPrefixTokens || billedClaudeInputTokens(next.TotalInputTokens, miss) != claudeGenerationPrefixTokens {
+		t.Fatalf("0%% read target must rewrite the full prefix without inflating input: %+v", miss)
 	}
 	tracker.UpdateWithSettings("account", next, settings, appended)
-	if got := tracker.ComputeWithSettings("account", next, settings); got.CacheReadInputTokens != appended.CacheReadInputTokens+appended.CacheCreationInputTokens || got.CacheCreationInputTokens != 0 {
-		t.Fatalf("second append repeat: %+v", got)
+	if got := tracker.ComputeWithSettings("account", next, settings); got.CacheReadInputTokens != 0 || got.CacheCreationInputTokens != next.TotalInputTokens-claudeGenerationPrefixTokens {
+		t.Fatalf("0%% read target should continue to re-create the prefix: %+v", got)
 	}
+	settings.Ratio = 1
 	req.Messages[0].Content = "changed hello"
 	edited := tracker.BuildClaudeProfileWithSettings(req, 1, settings)
 	got := tracker.ComputeWithSettings("account", edited, settings)

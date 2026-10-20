@@ -9,12 +9,11 @@ import (
 	"time"
 )
 
-const lifecycleCacheRuleVersion = "prefix-lifecycle-v4"
+const lifecycleCacheRuleVersion = "prefix-lifecycle-v5"
 
-// Independent content/scope/attempt samples vary the cold admission probability
-// and decide whether to store the whole prefix. A fresh attempt permits retries;
-// the threshold never scales token buckets or applies to an existing read.
-func lifecycleAdmission(ratio float64, scope string, fingerprint [32]byte, attempt uint64) (float64, bool) {
+// A cache target controls whether an existing prefix is read or treated as
+// evicted and rewritten. Cold prefixes are always created after success.
+func lifecycleReadHit(ratio float64, scope string, fingerprint [32]byte, attempt uint64) (float64, bool) {
 	if ratio <= 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
 		return 0, false
 	}
@@ -34,8 +33,8 @@ func lifecycleAdmission(ratio float64, scope string, fingerprint [32]byte, attem
 	}
 	lower := math.Max(0, ratio-promptCacheRatioVariation)
 	upper := math.Min(1, ratio+promptCacheRatioVariation)
-	effective := lower + (upper-lower)*sample("lifecycle-admission-threshold-v1")
-	return effective, sample("lifecycle-admission-choice-v1") < effective
+	effective := lower + (upper-lower)*sample("lifecycle-read-target-v1")
+	return effective, sample("lifecycle-read-outcome-v1") < effective
 }
 
 type lifecycleReadCheckpoint struct {
@@ -281,18 +280,24 @@ func (t *promptCacheTracker) computeLifecycleUsage(account string, p *promptCach
 		u.matchedFingerprint, u.matchedTTL = bp.Fingerprint, e.TTL
 		u.lifecycleReads.checkpoints = append(u.lifecycleReads.checkpoints, lifecycleReadCheckpoint{bp.Fingerprint, e.PrefixTokens, e.TTL})
 	}
-	if u.finalMatched == 0 {
-		t.lifecycleAdmissionSeq++
-		u.cacheAdmissionChecked = true
-		last := p.Breakpoints[len(p.Breakpoints)-1]
-		u.totalRatio, u.cacheWriteAdmitted = lifecycleAdmission(s.Ratio, scope, last.Fingerprint, t.lifecycleAdmissionSeq)
+	if u.finalMatched > 0 {
+		t.lifecycleReadCheckSeq++
+		u.lifecycleReadChecked = true
+		u.totalRatio, u.lifecycleReadHit = lifecycleReadHit(s.Ratio, scope, u.matchedFingerprint, t.lifecycleReadCheckSeq)
+		if !u.lifecycleReadHit {
+			// A simulated eviction rewrites the full eligible prefix so the miss
+			// does not turn the entire cached conversation into ordinary input.
+			u.finalMatched = 0
+			u.matchedFingerprint = [32]byte{}
+			u.matchedTTL = 0
+			u.matchedPrefixTokens = 0
+			u.matchedCachedTokens = 0
+			u.lifecycleReads.checkpoints = nil
+			u.limitation = "cache_read_miss"
+		}
 	}
 	t.mu.Unlock()
 	u.CacheReadInputTokens = u.finalMatched
-	if u.cacheAdmissionChecked && !u.cacheWriteAdmitted {
-		u.limitation = "cache_admission_miss"
-		return u
-	}
 	u.CacheCreationInputTokens = u.finalCacheable - u.finalMatched
 	u.CacheCreation5mInputTokens, u.CacheCreation1hInputTokens = computePromptCacheTTLBreakdownLimited(p, u.finalMatched, u.CacheCreationInputTokens)
 	return u

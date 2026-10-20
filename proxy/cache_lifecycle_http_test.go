@@ -139,7 +139,7 @@ func TestLifecycleHTTPProtocols(t *testing.T) {
 					if round < 4 && total-read-write != claudeGenerationPrefixTokens {
 						t.Fatalf("unexpected ordinary tail: %v", u)
 					}
-					if (round == 0 && (read != 0 || write <= 0)) || (round > 0 && round < 4 && read != previous) || ((round == 1 || round == 3) && write != 0) || (round == 2 && write <= 0) || (round == 4 && read+write != 0) {
+					if (round == 0 && (read != 0 || write <= 0)) || (round == 1 && (read != previous || write != 0)) || (round == 2 && (read != previous || write <= 0)) || (round == 3 && (read != 0 || write <= 0)) || (round == 4 && read+write != 0) {
 						t.Fatalf("round %d previous=%v usage=%v", round, previous, u)
 					}
 					previous = read + write
@@ -150,7 +150,7 @@ func TestLifecycleHTTPProtocols(t *testing.T) {
 	}
 }
 
-func TestLifecycleHTTPColdAdmissionSettings(t *testing.T) {
+func TestLifecycleHTTPReadHitSettings(t *testing.T) {
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 		for _, stream := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/stream=%v", path, stream), func(t *testing.T) {
@@ -158,13 +158,12 @@ func TestLifecycleHTTPColdAdmissionSettings(t *testing.T) {
 					writeFrames(w, awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}), awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn", "inputTokens": 99999, "outputTokens": 137}))
 				})
 				body := map[string]interface{}{"model": "claude-sonnet-4.5", "max_tokens": 256, "stream": stream, "store": false}
-				messages := []map[string]interface{}{{"role": "user", "content": "short prefix for admission"}}
+				messages := []map[string]interface{}{{"role": "user", "content": "short prefix for read-hit testing"}}
 				if path == "/v1/responses" {
 					body["input"] = messages
 				} else {
 					body["messages"] = messages
 				}
-				previous := 0
 				for _, ratio := range []float64{0, 1, .9} {
 					if err := config.UpdatePromptCacheSettings(true, "prefix_lifecycle", ratio, 1, 1); err != nil {
 						t.Fatal(err)
@@ -176,17 +175,16 @@ func TestLifecycleHTTPColdAdmissionSettings(t *testing.T) {
 					}
 					switch ratio {
 					case 0:
-						if read != 0 || write != 0 {
-							t.Fatalf("0%% cold admission did not reach %s: %v", path, u)
+						if read != 0 || write != total-claudeGenerationPrefixTokens {
+							t.Fatalf("cold prefix was not created at 0%% read target for %s: %v", path, u)
 						}
 					case 1:
-						if read != 0 || write != total-claudeGenerationPrefixTokens {
-							t.Fatalf("whole cold write: %v", u)
+						if read != total-claudeGenerationPrefixTokens || write != 0 {
+							t.Fatalf("100%% warm read target: %v", u)
 						}
-						previous = write
 					case .9:
-						if read != previous || write != 0 {
-							t.Fatalf("90%% scaled a genuine warm read: %v", u)
+						if read+write != total-claudeGenerationPrefixTokens || (read == 0 && write == 0) || (read > 0 && write > 0) {
+							t.Fatalf("90%% read target changed prefix accounting: %v", u)
 						}
 					}
 				}

@@ -1,5 +1,7 @@
 # Lifecycle Admission Implementation Plan
 
+> Superseded ratio semantics: this plan's cold-prefix admission behavior was the source of first-request ordinary-input spikes. The current lifecycle read-target rule is documented in `docs/superpowers/specs/2026-10-20-prefix-lifecycle-design.md` and implemented as `prefix-lifecycle-v5`.
+
 > **For agentic workers:** Execute inline with superpowers:executing-plans; request a focused code review before release.
 
 **Goal:** Preserve prefix read/write lifecycles while allowing global and per-Key cold-prefix admission targets, including 90% with ±5 percentage points, and deploy only Kiro.
