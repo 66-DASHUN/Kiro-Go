@@ -28,6 +28,34 @@ func TestClaudeStructuredSchemaCompatibility(t *testing.T) {
 	}
 }
 
+func TestClaudeStructuredOutputValidatesIncompleteAndToolResponses(t *testing.T) {
+	req := &ClaudeRequest{OutputConfig: &ClaudeOutputConfig{Format: &ClaudeOutputFormat{
+		Type: "json_schema", Schema: json.RawMessage(`{"type":"object","properties":{"answer":{"type":"integer"}},"required":["answer"],"additionalProperties":false}`),
+	}}}
+	if msg := prepareClaudeStructuredOutput(req); msg != "" {
+		t.Fatal(msg)
+	}
+	for _, tc := range []struct {
+		name       string
+		text       string
+		toolCount  int
+		stopReason string
+		wantErr    bool
+	}{
+		{name: "invalid final text after tool", text: `not json`, toolCount: 1, stopReason: "end_turn", wantErr: true},
+		{name: "tool turn may continue", text: `not json`, toolCount: 1, stopReason: "tool_use"},
+		{name: "truncated response may continue", text: `{"answer":`, stopReason: "max_tokens"},
+		{name: "valid final JSON at token limit", text: `{"answer":42}`, stopReason: "max_tokens"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := req.structuredOutput.validate(tc.text, tc.toolCount, tc.stopReason)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestClaudeStructuredPatternTimeoutFailsClosedUnderNot(t *testing.T) {
 	req := &ClaudeRequest{OutputConfig: &ClaudeOutputConfig{Format: &ClaudeOutputFormat{Type: "json_schema", Schema: json.RawMessage(`{"type":"string","not":{"pattern":"^(a+)+$"}}`)}}}
 	if msg := prepareClaudeStructuredOutput(req); msg != "" {

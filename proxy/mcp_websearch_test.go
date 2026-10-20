@@ -61,3 +61,23 @@ func TestFormatWebSearchResultsCapsAndIncludesSourceFields(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeWebSearchResultsPreservesOpaqueEncryptedContent(t *testing.T) {
+	results, ok, err := decodeWebSearchResults([]byte(`{"results":[{"title":"One","url":"https://one.example","snippet":"readable snippet","encrypted_content":"opaque-provider-payload"}]}`))
+	if err != nil || !ok || len(results) != 1 {
+		t.Fatalf("decode results: ok=%v err=%v results=%+v", ok, err, results)
+	}
+	blocks := webSearchResultBlocks(results)
+	if got := blocks[0]["encrypted_content"]; got != "opaque-provider-payload" {
+		t.Fatalf("encrypted_content = %#v, want unchanged provider value", got)
+	}
+}
+
+func TestWebSearchSnippetIsNotEncryptedContent(t *testing.T) {
+	blocks := webSearchResultBlocks([]WebSearchResult{{
+		Title: "One", URL: "https://one.example", Snippet: "readable snippet",
+	}})
+	if got, ok := blocks[0]["encrypted_content"]; ok {
+		t.Fatalf("plain snippet was mislabeled as encrypted_content: %#v", got)
+	}
+}

@@ -124,8 +124,8 @@ func prepareClaudeStructuredOutput(req *ClaudeRequest) string {
 }
 
 func (format *claudeStructuredOutput) validate(text string, toolCount int, stopReason string) error {
-	// Tools and deliberately incomplete answers can precede a final JSON answer.
-	if format == nil || toolCount > 0 || stopReason == "max_tokens" || stopReason == "refusal" {
+	// A tool turn or token-limited response may continue before the final JSON answer.
+	if format == nil || (toolCount > 0 && stopReason == "tool_use") || stopReason == "max_tokens" || stopReason == "refusal" {
 		return nil
 	}
 	text = normalizeClaudeStructuredJSONText(text)

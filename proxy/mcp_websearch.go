@@ -23,10 +23,11 @@ const (
 )
 
 type WebSearchResult struct {
-	Title         string `json:"title"`
-	URL           string `json:"url"`
-	Snippet       string `json:"snippet"`
-	PublishedDate string `json:"publishedDate,omitempty"`
+	Title            string `json:"title"`
+	URL              string `json:"url"`
+	Snippet          string `json:"snippet"`
+	PublishedDate    string `json:"publishedDate,omitempty"`
+	EncryptedContent string `json:"encrypted_content,omitempty"`
 }
 
 func (r *WebSearchResult) UnmarshalJSON(data []byte) error {
@@ -38,6 +39,7 @@ func (r *WebSearchResult) UnmarshalJSON(data []byte) error {
 	r.URL = scalarString(firstExisting(raw, "url", "link"))
 	r.Snippet = scalarString(firstExisting(raw, "snippet", "description", "text"))
 	r.PublishedDate = scalarString(firstExisting(raw, "publishedDate", "published_date", "date"))
+	r.EncryptedContent = scalarString(firstExisting(raw, "encrypted_content", "encryptedContent"))
 	return nil
 }
 

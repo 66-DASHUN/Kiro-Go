@@ -328,13 +328,17 @@ func webSearchPageAge(published string) interface{} {
 func webSearchResultBlocks(results []WebSearchResult) []map[string]interface{} {
 	blocks := make([]map[string]interface{}, 0, len(results))
 	for _, result := range results {
-		blocks = append(blocks, map[string]interface{}{
-			"type":              "web_search_result",
-			"title":             result.Title,
-			"url":               result.URL,
-			"encrypted_content": result.Snippet,
-			"page_age":          webSearchPageAge(result.PublishedDate),
-		})
+		block := map[string]interface{}{
+			"type":     "web_search_result",
+			"title":    result.Title,
+			"url":      result.URL,
+			"page_age": webSearchPageAge(result.PublishedDate),
+		}
+		// Search snippets are readable text, not Anthropic's opaque replay token.
+		if result.EncryptedContent != "" {
+			block["encrypted_content"] = result.EncryptedContent
+		}
+		blocks = append(blocks, block)
 	}
 	return blocks
 }
