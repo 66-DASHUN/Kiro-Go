@@ -41,5 +41,5 @@
 ### Task 3: Review and release only Kiro
 
 - [x] Inspect the final diff against the lifecycle design and protocol regressions; do not alter Sub2API or other services. The focused independent review found no actionable cache-lifecycle issues.
-- [x] Run the Kiro-only release preflight and verify the public health endpoint, container/data paths, and current global/per-Key cache settings. Deployment verification remains pending; preserve account/config data and `.codex-release/`.
-- [ ] Report CCTest protocol checks as unverified unless a new real CCTest run provides evidence; do not claim that aggregate-score changes prove protocol compatibility.
+- [x] Deploy only Kiro as `kiro-go:cache-v5-d93a0d4`; preserve the original config and SQLite database, validate SQLite integrity, verify the public health endpoint and effective cache settings, and confirm every non-Kiro container ID/status is unchanged. Compose also removed three stopped legacy Kiro candidate containers.
+- [x] Record CCTest protocol checks as unverified because no new real CCTest run/report was available; do not claim protocol compatibility from local tests or an aggregate score.
