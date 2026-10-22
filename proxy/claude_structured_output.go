@@ -200,7 +200,7 @@ func (h *Handler) writeClaudeBufferedResponse(w http.ResponseWriter, response *C
 		_ = json.Unmarshal(encoded, &deltaUsage)
 	}
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
-		"type": "message_delta", "delta": map[string]interface{}{"stop_reason": response.StopReason, "stop_sequence": response.StopSequence}, "usage": deltaUsage,
+		"type": "message_delta", "delta": map[string]interface{}{"stop_reason": response.StopReason, "stop_sequence": response.StopSequence, "stop_details": response.StopDetails}, "usage": deltaUsage,
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 }

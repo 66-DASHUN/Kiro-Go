@@ -170,3 +170,76 @@ func TestClaudeKeepsSeparatelySignedThinkingBlocks(t *testing.T) {
 		})
 	}
 }
+
+// An answer between native reasoning events ends the first reasoning block,
+// even when that first block has no signature. Signing the merged text changes
+// the text authenticated by the later upstream signature.
+func TestClaudeSignatureDoesNotCoverEarlierUnsignedReasoning(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, mode := range []string{"normal", "search", "structured", "tool"} {
+			t.Run(fmt.Sprintf("stream=%v/%s", stream, mode), func(t *testing.T) {
+				h := newStreamTestHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+					answer := "answer"
+					if mode == "structured" {
+						answer = `{"answer":42}`
+					}
+					boundary := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": answer})
+					if mode == "tool" {
+						boundary = awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "read-id", "name": "read", "input": `{}`, "stop": true})
+					}
+					writeFrames(w,
+						awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "earlier unsigned"}),
+						boundary,
+						awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "later signed"}),
+						awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"signature": "opaque+/signature=="}),
+						meteringFrame(t))
+				})
+				h.cachedModels = []ModelInfo{nativeOptionsModel()}
+				extra := ""
+				if mode == "search" {
+					extra = `,"tools":[{"type":"web_search_20250305","name":"web_search"}]`
+				} else if mode == "structured" {
+					extra = `,` + structuredFixture
+				} else if mode == "tool" {
+					extra = `,"tools":[{"name":"read","input_schema":{"type":"object"}}]`
+				}
+				r := postClaudeMessages(t, h, fmt.Sprintf(`{"model":"claude-opus-5.5","max_tokens":2048,"stream":%v,"thinking":{"type":"adaptive"}%s,"messages":[{"role":"user","content":"hello"}]}`, stream, extra))
+				if r.Code != 200 {
+					t.Fatalf("request failed: %d %s", r.Code, r.Body.String())
+				}
+				var blocks []ClaudeContentBlock
+				if !stream {
+					var response ClaudeResponse
+					if err := json.Unmarshal(r.Body.Bytes(), &response); err != nil {
+						t.Fatal(err)
+					}
+					for _, block := range response.Content {
+						if block.Type == "thinking" {
+							blocks = append(blocks, block)
+						}
+					}
+				} else {
+					for _, frame := range parseResponsesSSE(t, r.Body.String()) {
+						if frame.Name == "content_block_start" {
+							block := frame.Data["content_block"].(map[string]interface{})
+							if block["type"] == "thinking" {
+								blocks = append(blocks, ClaudeContentBlock{Type: "thinking"})
+							}
+						} else if frame.Name == "content_block_delta" && len(blocks) > 0 {
+							delta := frame.Data["delta"].(map[string]interface{})
+							if delta["type"] == "thinking_delta" {
+								blocks[len(blocks)-1].Thinking += delta["thinking"].(string)
+							}
+							if delta["type"] == "signature_delta" {
+								blocks[len(blocks)-1].Signature += delta["signature"].(string)
+							}
+						}
+					}
+				}
+				if len(blocks) != 2 || blocks[0].Thinking != "earlier unsigned" || blocks[0].Signature != "" || blocks[1].Thinking != "later signed" || blocks[1].Signature != "opaque+/signature==" {
+					t.Fatalf("signature attached to different reasoning: %#v", blocks)
+				}
+			})
+		}
+	}
+}

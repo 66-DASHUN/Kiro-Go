@@ -3,22 +3,34 @@ package proxy
 // Each upstream signature belongs to the preceding native thinking block.
 // Keep block boundaries: concatenating separately signed blocks invalidates
 // their association. Signatures remain opaque and are never generated here.
-type claudeThinkingCollector struct{ blocks []ClaudeContentBlock }
+type claudeThinkingCollector struct {
+	blocks []ClaudeContentBlock
+	closed bool
+}
 
 func (c *claudeThinkingCollector) text(text string) {
-	if len(c.blocks) == 0 || c.blocks[len(c.blocks)-1].Signature != "" {
+	if text == "" {
+		return
+	}
+	if c.closed || len(c.blocks) == 0 || c.blocks[len(c.blocks)-1].Signature != "" {
 		c.blocks = append(c.blocks, ClaudeContentBlock{Type: "thinking"})
 	}
+	c.closed = false
 	c.blocks[len(c.blocks)-1].Thinking += text
 }
+
+// Ordinary output and tool calls end native thinking just as they do in the
+// live SSE writer. Never merge later reasoning into an earlier unsigned block.
+func (c *claudeThinkingCollector) endBlock() { c.closed = true }
 
 func (c *claudeThinkingCollector) signature(signature string) {
 	if signature == "" {
 		return
 	}
-	if len(c.blocks) == 0 {
+	if c.closed || len(c.blocks) == 0 {
 		c.blocks = append(c.blocks, ClaudeContentBlock{Type: "thinking"})
 	}
+	c.closed = false
 	c.blocks[len(c.blocks)-1].Signature = signature
 }
 

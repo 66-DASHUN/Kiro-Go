@@ -957,9 +957,15 @@ func (h *Handler) callClaudeRound(ctx context.Context, account *config.Account, 
 				nativeThinking.text(t)
 			} else {
 				text += t
+				if t != "" {
+					nativeThinking.endBlock()
+				}
 			}
 		},
-		OnToolUse:    func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+		OnToolUse: func(tu KiroToolUse) {
+			nativeThinking.endBlock()
+			toolUses = append(toolUses, tu)
+		},
 		OnComplete:   func(inTok, outTok int) { inputTokens, outputTokens = inTok, outTok },
 		OnCredits:    func(c float64) { credits = c },
 		OnStopReason: func(reason string) { stopReason = reason },
@@ -1104,6 +1110,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 			"model":         model,
 			"content":       content,
 			"stop_reason":   stopReason,
+			"stop_details":  nil,
 			"stop_sequence": nil,
 			"usage":         responseUsage,
 		})
@@ -1167,6 +1174,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 			"model":         model,
 			"content":       []interface{}{},
 			"stop_reason":   nil,
+			"stop_details":  nil,
 			"stop_sequence": nil,
 			"usage":         startUsage,
 		},
@@ -1176,7 +1184,7 @@ func (h *Handler) writeClaudeWebSearchResponse(w http.ResponseWriter, stream boo
 	}
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
-		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
+		"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil, "stop_details": nil},
 		"usage": deltaUsage,
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})

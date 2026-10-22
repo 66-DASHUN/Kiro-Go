@@ -177,7 +177,9 @@ type ClaudeResponse struct {
 	Model        string               `json:"model"`
 	StopReason   string               `json:"stop_reason"`
 	StopSequence *string              `json:"stop_sequence"`
-	Usage        ClaudeUsage          `json:"usage"`
+	// Kiro provides no structured stop details; expose the documented null.
+	StopDetails interface{} `json:"stop_details"`
+	Usage       ClaudeUsage `json:"usage"`
 }
 
 type ClaudeCacheCreationUsage struct {

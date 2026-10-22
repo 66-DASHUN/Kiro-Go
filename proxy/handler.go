@@ -1025,6 +1025,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				"content":       []interface{}{},
 				"model":         responseModel,
 				"stop_reason":   nil,
+				"stop_details":  nil,
 				"stop_sequence": nil,
 				"usage":         exactOrLegacyStartUsage(payload, startInputTokens, messageStartUsage, cacheSettings.Enabled),
 			},
@@ -1489,6 +1490,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, r *http.Request, pay
 				"delta": map[string]interface{}{
 					"stop_reason":   stopReason,
 					"stop_sequence": nil,
+					"stop_details":  nil,
 				},
 				"usage": exactClaudeDeltaUsage(payload, inputTokens, outputTokens, cacheUsage),
 			})
@@ -1641,9 +1643,13 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, r *http.Request, 
 						nativeThinking.text(text)
 					} else {
 						content += text
+						if text != "" {
+							nativeThinking.endBlock()
+						}
 					}
 				},
 				OnToolUse: func(tu KiroToolUse) {
+					nativeThinking.endBlock()
 					toolUses = append(toolUses, tu)
 				},
 				OnComplete: func(inTok, outTok int) {
