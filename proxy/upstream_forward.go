@@ -32,13 +32,20 @@ func upstreamAPIPath(path string) string {
 	return path
 }
 
-func sendDedicatedUpstreamConfigError(h *Handler, w http.ResponseWriter, r *http.Request, message string) {
-	switch r.URL.Path {
+func isDedicatedClaudePath(path string) bool {
+	switch path {
 	case "/v1/messages", "/messages", "/anthropic/v1/messages", "/v1/messages/count_tokens", "/messages/count_tokens":
-		h.sendClaudeError(w, http.StatusBadGateway, "api_error", message)
-	default:
-		h.sendOpenAIError(w, http.StatusBadGateway, "api_error", message)
+		return true
 	}
+	return false
+}
+
+func sendDedicatedUpstreamConfigError(h *Handler, w http.ResponseWriter, r *http.Request, message string) {
+	if isDedicatedClaudePath(r.URL.Path) {
+		h.sendClaudeError(w, http.StatusBadGateway, "api_error", message)
+		return
+	}
+	h.sendOpenAIError(w, http.StatusBadGateway, "api_error", message)
 }
 
 // forwardDedicatedUpstream runs before local decoding, mapping, cache emulation,
@@ -112,8 +119,10 @@ func (h *Handler) forwardDedicatedUpstream(w http.ResponseWriter, r *http.Reques
 		FlushInterval: -1,
 		// Transport errors can contain the URL; do not send or log secrets.
 		ErrorLog: log.New(io.Discard, "", 0),
-		ErrorHandler: func(w http.ResponseWriter, upstreamReq *http.Request, _ error) {
-			if strings.Contains(upstreamReq.URL.Path, "/messages") {
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			// Use the incoming endpoint: the configured upstream base path may
+			// itself contain "messages" even when this is an OpenAI request.
+			if isDedicatedClaudePath(r.URL.Path) {
 				h.sendClaudeError(w, http.StatusBadGateway, "api_error", "Dedicated upstream connection failed")
 			} else {
 				h.sendOpenAIError(w, http.StatusBadGateway, "api_error", "Dedicated upstream connection failed")

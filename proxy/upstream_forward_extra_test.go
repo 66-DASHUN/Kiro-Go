@@ -197,3 +197,37 @@ func TestDedicatedUpstreamTransportFailureUsesRouteErrorShape(t *testing.T) {
 		}
 	}
 }
+
+func TestDedicatedUpstreamTransportFailureUsesIncomingProtocolPath(t *testing.T) {
+	h := newAdminAuthTestHandler(t, "admin")
+	required := true
+	if err := config.UpdateSettingsPatch(&required, ""); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	entry, err := config.AddApiKey(config.ApiKeyEntry{
+		Key: "sk-error-openai-messages-upstream-path", Enabled: true,
+		UpstreamForward: &config.UpstreamForwardConfig{Enabled: true, BaseURL: server.URL + "/messages", APIKey: "secret"},
+	})
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	server.Close()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("X-Api-Key", entry.Key)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var envelope struct {
+		Type  string `json:"type"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("transport failure returned invalid JSON: %v", err)
+	}
+	if rec.Code != http.StatusBadGateway || envelope.Type != "" || envelope.Error.Message == "" {
+		t.Fatalf("OpenAI transport failure used wrong error envelope: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
