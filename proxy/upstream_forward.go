@@ -32,6 +32,15 @@ func upstreamAPIPath(path string) string {
 	return path
 }
 
+func sendDedicatedUpstreamConfigError(h *Handler, w http.ResponseWriter, r *http.Request, message string) {
+	switch r.URL.Path {
+	case "/v1/messages", "/messages", "/anthropic/v1/messages", "/v1/messages/count_tokens", "/messages/count_tokens":
+		h.sendClaudeError(w, http.StatusBadGateway, "api_error", message)
+	default:
+		h.sendOpenAIError(w, http.StatusBadGateway, "api_error", message)
+	}
+}
+
 // forwardDedicatedUpstream runs before local decoding, mapping, cache emulation,
 // and account reservations. This is a route per key, never a detector heuristic.
 func (h *Handler) forwardDedicatedUpstream(w http.ResponseWriter, r *http.Request) bool {
@@ -41,14 +50,14 @@ func (h *Handler) forwardDedicatedUpstream(w http.ResponseWriter, r *http.Reques
 	}
 	c := entry.UpstreamForward
 	if err := config.ValidateUpstreamForward(c); err != nil {
-		h.sendClaudeError(w, http.StatusBadGateway, "api_error", "Invalid dedicated upstream configuration")
+		sendDedicatedUpstreamConfigError(h, w, r, "Invalid dedicated upstream configuration")
 		return true
 	}
 	target, _ := url.Parse(c.BaseURL)
 	// Also catches a loop through the public reverse proxy for this request host.
 	inHost := r.Host
 	if u, err := url.Parse("https://" + inHost); err == nil && strings.EqualFold(strings.TrimSuffix(u.Host, ":443"), strings.TrimSuffix(target.Host, ":443")) {
-		h.sendClaudeError(w, http.StatusBadGateway, "api_error", "Dedicated upstream must not point to this Kiro service")
+		sendDedicatedUpstreamConfigError(h, w, r, "Dedicated upstream must not point to this Kiro service")
 		return true
 	}
 	path := upstreamAPIPath(r.URL.Path)

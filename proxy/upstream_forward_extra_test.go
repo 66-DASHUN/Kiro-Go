@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -66,8 +67,40 @@ func TestDedicatedUpstreamLoopGuardUsesOpenAIErrorEnvelope(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+entry.Key)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), `"error":{"message"`) {
+	var envelope struct {
+		Type  string `json:"type"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("loop guard returned invalid JSON: %v", err)
+	}
+	if rec.Code != http.StatusBadGateway || envelope.Type != "" || envelope.Error.Message == "" {
 		t.Fatalf("loop guard returned non-OpenAI error envelope: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDedicatedUpstreamLoopGuardUsesClaudeErrorEnvelope(t *testing.T) {
+	h := newAdminAuthTestHandler(t, "admin")
+	required := true
+	if err := config.UpdateSettingsPatch(&required, ""); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := config.AddApiKey(config.ApiKeyEntry{
+		Key: "sk-forward-loop-claude", Enabled: true,
+		UpstreamForward: &config.UpstreamForwardConfig{Enabled: true, BaseURL: "https://kiro.example", APIKey: "secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m"}`))
+	req.Host = "kiro.example"
+	req.Header.Set("X-Api-Key", entry.Key)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), `"type":"error"`) {
+		t.Fatalf("loop guard returned non-Claude error envelope: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
