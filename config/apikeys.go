@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -52,6 +53,9 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	entry.Key = strings.TrimSpace(entry.Key)
 	if entry.Key == "" {
 		return ApiKeyEntry{}, errors.New("api key value must not be empty")
+	}
+	if err := ValidateUpstreamForward(entry.UpstreamForward); err != nil {
+		return ApiKeyEntry{}, err
 	}
 	if err := validateApiKeyPromptCacheOverrides(entry); err != nil {
 		return ApiKeyEntry{}, err
@@ -154,6 +158,9 @@ func updateApiKey(id string, mutate func(idx int, candidate *ApiKeyEntry) error,
 	if err := mutate(idx, &candidate); err != nil {
 		return err
 	}
+	if err := ValidateUpstreamForward(candidate.UpstreamForward); err != nil {
+		return err
+	}
 	if err := validateApiKeyPromptCacheOverrides(candidate); err != nil {
 		return err
 	}
@@ -191,6 +198,10 @@ func ClearPromptCacheOverrides(id string) error {
 }
 
 func applyApiKeyPatchLocked(idx int, patch ApiKeyEntry, candidate *ApiKeyEntry) error {
+	if patch.UpstreamForward != nil {
+		forward := *patch.UpstreamForward
+		candidate.UpstreamForward = &forward
+	}
 	if patch.Name != "" {
 		candidate.Name = patch.Name
 	}
@@ -245,6 +256,10 @@ func clearPromptCacheOverrides(entry *ApiKeyEntry) {
 }
 
 func cloneApiKeyEntry(entry ApiKeyEntry) ApiKeyEntry {
+	if entry.UpstreamForward != nil {
+		forward := *entry.UpstreamForward
+		entry.UpstreamForward = &forward
+	}
 	if entry.PromptCacheEmulationEnabled != nil {
 		value := *entry.PromptCacheEmulationEnabled
 		entry.PromptCacheEmulationEnabled = &value
@@ -266,6 +281,27 @@ func cloneApiKeyEntry(entry ApiKeyEntry) ApiKeyEntry {
 		entry.PromptCacheReadEmulationRatio = &value
 	}
 	return entry
+}
+
+// ValidateUpstreamForward does not include supplied values in errors because
+// URLs and credentials may contain secrets.
+func ValidateUpstreamForward(c *UpstreamForwardConfig) error {
+	if c == nil {
+		return nil
+	}
+	if strings.ContainsAny(c.APIKey, "\r\n") {
+		return errors.New("invalid upstream API key")
+	}
+	if c.BaseURL != "" {
+		u, err := url.Parse(c.BaseURL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(c.BaseURL, "\r\n") {
+			return errors.New("upstream base URL must be HTTPS without credentials, query or fragment")
+		}
+	}
+	if c.Enabled && (c.BaseURL == "" || strings.TrimSpace(c.APIKey) == "") {
+		return errors.New("enabled upstream requires base URL and API key")
+	}
+	return nil
 }
 
 func validateApiKeyPromptCacheOverrides(entry ApiKeyEntry) error {
@@ -378,6 +414,38 @@ func RecordApiKeyUsage(id string, tokens int64, credits float64) error {
 			cfg.ApiKeys[i].LastUsedAt = time.Now().Unix()
 			return saveLocked()
 		}
+	}
+	return errors.New("api key not found")
+}
+
+// RecordApiKeyForwardedUsage applies the actual usage reported by a dedicated
+// upstream route. It has no Kiro-credit estimate and applies token limits to
+// subsequent calls after this response is accounted for.
+func RecordApiKeyForwardedUsage(id string, tokens int64) error {
+	if tokens < 0 {
+		return errors.New("upstream token usage must be zero or positive")
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	for i := range cfg.ApiKeys {
+		if cfg.ApiKeys[i].ID != id {
+			continue
+		}
+		old := cloneApiKeyEntry(cfg.ApiKeys[i])
+		cfg.ApiKeys[i].TokensUsed += tokens
+		cfg.ApiKeys[i].RequestsCount++
+		cfg.ApiKeys[i].LastUsedAt = time.Now().Unix()
+		if cfg.ApiKeys[i].TokenLimit > 0 && cfg.ApiKeys[i].TokensUsed >= cfg.ApiKeys[i].TokenLimit {
+			cfg.ApiKeys[i].Enabled = false
+		}
+		if err := saveLocked(); err != nil {
+			cfg.ApiKeys[i] = old
+			return err
+		}
+		return nil
 	}
 	return errors.New("api key not found")
 }

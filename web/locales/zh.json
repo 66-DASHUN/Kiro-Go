@@ -1,4 +1,15 @@
 {
+  "apiKeys.upstreamEnabled": "此 Key 转发到上游",
+  "apiKeys.upstreamHint": "使用此 Key 的所有 API 请求统一转发到指定上游，保留原始响应、流、签名及用量。此路径不应用本地模型映射和缓存模拟，不计 Kiro Credits；仍会产生上游费用。",
+  "apiKeys.upstreamURL": "上游基础地址（HTTPS）",
+  "apiKeys.upstreamSecret": "上游 API Key",
+  "apiKeys.upstreamSecretHint": "留空保留已保存的密钥",
+  "apiKeys.upstreamClearSecret": "清除已保存的上游密钥（请先关闭转发）",
+  "apiKeys.upstreamSecretSaved": "密钥已保存在服务器，不会回传到此页面",
+  "apiKeys.upstreamSecretMissing": "尚未保存上游密钥",
+  "apiKeys.upstreamActive": "上游转发 · 上游原始用量",
+  "apiKeys.upstreamInvalid": "请使用不含认证信息、查询参数或片段的 HTTPS 基础地址，开启前必须配置上游密钥。",
+
   "login.title": "登录",
   "login.subtitle": "请输入管理密码以继续",
   "login.firstRunPassword": "首次运行管理员密码：",

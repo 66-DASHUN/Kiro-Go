@@ -1678,7 +1678,10 @@
     $('sessionAffinity').checked = d.sessionAffinity !== false;
     promptCacheSettings = normalizePromptCacheSettings(d);
     setCacheForm('promptCache', promptCacheSettings);
-    if (!editingApiKeyId) resetApiKeyCacheEditor();
+    if (!editingApiKeyId) {
+      resetApiKeyCacheEditor();
+      resetApiKeyUpstreamEditor();
+    }
     await Promise.all([loadApiKeys(), loadThinkingConfig(), loadModelMappings(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadCacheDiagnostics()]);
     syncApiKeyManagementVisibility();
     refreshCustomSelects();
@@ -2080,7 +2083,7 @@
       return '<tr>' +
         '<td><strong>' + escapeHtml(k.name || t('settings.unnamedApiKey')) + '</strong>' +
         '<small class="api-key-policy-summary">' + escapeHtml(t('apiKeys.boundAccounts', accountsData.filter(a => a.apiKeyId === k.id).length)) + '</small>' +
-        '<small class="api-key-policy-summary">' + escapeHtml(apiKeyCacheSummary(k)) + '</small></td>' +
+        '<small class="api-key-policy-summary">' + escapeHtml(k.upstreamForward?.enabled ? t('apiKeys.upstreamActive') : apiKeyCacheSummary(k)) + '</small></td>' +
         '<td>' + keyCell + '</td>' +
         '<td><span class="api-key-status ' + statusClass + '" title="' + escapeAttr(statusLabel) + '" aria-label="' + escapeAttr(statusLabel) + '"><i class="fa-solid ' + statusIcon + '" aria-hidden="true"></i></span></td>' +
         '<td>' + usage + '</td>' +
@@ -2139,6 +2142,33 @@
     const cancelBtn = $('cancelApiKeyEditBtn');
     if (cancelBtn) cancelBtn.classList.toggle('hidden', !editingApiKeyId);
   }
+  function resetApiKeyUpstreamEditor(entry) {
+    const upstream = entry?.upstreamForward;
+    $('apiKeyUpstreamEnabled').checked = !!upstream?.enabled;
+    $('apiKeyUpstreamURL').value = upstream?.baseUrl || '';
+    $('apiKeyUpstreamSecret').value = '';
+    $('apiKeyUpstreamClearSecret').checked = false;
+    $('apiKeyUpstreamSecretStatus').textContent = t(upstream?.apiKeyConfigured ? 'apiKeys.upstreamSecretSaved' : 'apiKeys.upstreamSecretMissing');
+  }
+  function getApiKeyUpstreamEditorValues() {
+    const enabled = $('apiKeyUpstreamEnabled').checked;
+    const baseUrl = $('apiKeyUpstreamURL').value.trim();
+    const apiKey = $('apiKeyUpstreamSecret').value.trim();
+    const clearApiKey = $('apiKeyUpstreamClearSecret').checked;
+    const existing = apiKeysCache.find(k => k.id === editingApiKeyId)?.upstreamForward;
+    let validURL = !baseUrl;
+    try {
+      if (baseUrl) {
+        const url = new URL(baseUrl);
+        validURL = url.protocol === 'https:' && !!url.hostname && !url.username && !url.password && !url.search && !url.hash;
+      }
+    } catch (_) { validURL = false; }
+    if (!validURL || (enabled && (!baseUrl || (!apiKey && (clearApiKey || !existing?.apiKeyConfigured))))) {
+      toast(t('apiKeys.upstreamInvalid'), 'warning');
+      return null;
+    }
+    return { enabled, baseUrl, apiKey, clearApiKey };
+  }
   function clearApiKeyEditor() {
     setApiKeyEditorMode('');
     $('newApiKeyName').value = '';
@@ -2146,6 +2176,7 @@
     $('newApiKeyTokenLimit').value = '0';
     $('newApiKeyCreditLimit').value = '0';
     resetApiKeyCacheEditor();
+    resetApiKeyUpstreamEditor();
     $('createdApiKeyPanel').classList.add('hidden');
     renderApiKeys();
   }
@@ -2161,17 +2192,21 @@
     }
     const cacheValues = getApiKeyCacheEditorValues();
     if (!cacheValues) return null;
+    const upstreamForward = getApiKeyUpstreamEditorValues();
+    if (!upstreamForward) return null;
     return {
       name: $('newApiKeyName').value.trim(),
       key: customKey,
       tokenLimit,
       creditLimit,
+      upstreamForward,
       ...cacheValues,
     };
   }
   function beginEditApiKey(id) {
     const key = apiKeysCache.find(k => k.id === id);
     if (!key) return;
+    resetApiKeyUpstreamEditor(key);
     $('newApiKeyName').value = key.name || '';
     $('newApiKeyValue').value = '';
     $('newApiKeyTokenLimit').value = String(key.tokenLimit || 0);
@@ -2203,6 +2238,7 @@
         $('newApiKeyTokenLimit').value = '0';
         $('newApiKeyCreditLimit').value = '0';
         resetApiKeyCacheEditor();
+        resetApiKeyUpstreamEditor();
         await loadApiKeys();
         return;
       }
@@ -2219,6 +2255,7 @@
       $('newApiKeyTokenLimit').value = '0';
       $('newApiKeyCreditLimit').value = '0';
       resetApiKeyCacheEditor();
+      resetApiKeyUpstreamEditor();
       if (d.key) {
         $('createdApiKeyPanel').classList.remove('hidden');
         $('createdApiKeyValue').textContent = d.key;

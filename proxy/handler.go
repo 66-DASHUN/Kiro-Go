@@ -28,6 +28,7 @@ import (
 const tokenRefreshSkewSeconds int64 = 120
 
 type Handler struct {
+	upstreamClient     *http.Client
 	adminGuesses       adminGuessLimiter
 	credentialImportMu sync.Mutex
 	pool               *pool.AccountPool
@@ -318,7 +319,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !isAdminPath {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, OpenAI-Beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch")
 		w.Header().Set("Access-Control-Expose-Headers", "x-request-id, request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens")
 	}
 
@@ -356,10 +357,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ar == nil {
 			return
 		}
+		if h.forwardDedicatedUpstream(w, ar) {
+			return
+		}
 		h.handleClaudeMessages(w, ar)
 	case path == "/v1/messages/count_tokens" || path == "/messages/count_tokens":
 		ar := h.authenticateForClaude(w, r)
 		if ar == nil {
+			return
+		}
+		if h.forwardDedicatedUpstream(w, ar) {
 			return
 		}
 		h.handleCountTokens(w, ar)
@@ -368,16 +375,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ar == nil {
 			return
 		}
+		if h.forwardDedicatedUpstream(w, ar) {
+			return
+		}
 		h.handleOpenAIChat(w, ar)
 	case path == "/v1/responses" || path == "/responses":
 		ar := h.authenticateForOpenAIRequest(w, r)
 		if ar == nil {
 			return
 		}
+		if h.forwardDedicatedUpstream(w, ar) {
+			return
+		}
 		h.handleOpenAIResponses(w, ar)
 	case strings.HasPrefix(path, "/v1/responses/") || strings.HasPrefix(path, "/responses/"):
 		ar := h.authenticateForOpenAI(w, r)
 		if ar == nil {
+			return
+		}
+		if h.forwardDedicatedUpstream(w, ar) {
 			return
 		}
 		id := strings.TrimPrefix(strings.TrimPrefix(path, "/v1/responses/"), "/responses/")
@@ -394,10 +410,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ar == nil {
 			return
 		}
+		if h.forwardDedicatedUpstream(w, ar) {
+			return
+		}
 		h.handleModels(w, ar)
 	case path == "/v1/codex/models" || path == "/codex/models" || path == "/v1/codex-models":
 		ar := h.authenticateForOpenAI(w, r)
 		if ar == nil {
+			return
+		}
+		if h.forwardDedicatedUpstream(w, ar) {
 			return
 		}
 		h.handleCodexModels(w, ar)

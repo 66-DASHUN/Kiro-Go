@@ -478,6 +478,29 @@
               </div>
               <p id="apiKeyCacheHelp" class="help-block" data-i18n="apiKeys.cacheRatioHint"></p>
             </div>
+            <div class="api-key-cache-settings">
+              <div class="form-group">
+                <label class="flex items-center gap-2">
+                  <span class="switch"><input type="checkbox" id="apiKeyUpstreamEnabled" /><span class="slider"></span></span>
+                  <span data-i18n="apiKeys.upstreamEnabled"></span>
+                </label>
+                <small data-i18n="apiKeys.upstreamHint"></small>
+              </div>
+              <div class="cache-policy-grid">
+                <div class="form-group">
+                  <label for="apiKeyUpstreamURL" data-i18n="apiKeys.upstreamURL"></label>
+                  <input type="url" id="apiKeyUpstreamURL" placeholder="https://api.example.com" autocomplete="off" />
+                </div>
+                <div class="form-group">
+                  <label for="apiKeyUpstreamSecret" data-i18n="apiKeys.upstreamSecret"></label>
+                  <input type="password" id="apiKeyUpstreamSecret" autocomplete="new-password" spellcheck="false" data-i18n-placeholder="apiKeys.upstreamSecretHint" />
+                  <small id="apiKeyUpstreamSecretStatus"></small>
+                </div>
+                <div class="form-group">
+                  <label><input type="checkbox" id="apiKeyUpstreamClearSecret" /> <span data-i18n="apiKeys.upstreamClearSecret"></span></label>
+                </div>
+              </div>
+            </div>
             <div class="api-key-editor-actions">
               <button class="btn btn-primary" id="createApiKeyBtn" type="button" data-i18n="settings.createApiKey"></button>
               <button class="btn btn-outline hidden" id="cancelApiKeyEditBtn" type="button" data-i18n="common.cancel"></button>

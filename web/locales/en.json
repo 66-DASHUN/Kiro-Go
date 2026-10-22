@@ -1,4 +1,15 @@
 {
+  "apiKeys.upstreamEnabled": "Forward this key to an upstream",
+  "apiKeys.upstreamHint": "All API requests using this key go to the configured upstream. Original responses, streams, signatures and usage are retained. Local model mapping and cache simulation are bypassed. No Kiro Credits are charged; upstream fees still apply.",
+  "apiKeys.upstreamURL": "Upstream base URL (HTTPS)",
+  "apiKeys.upstreamSecret": "Upstream API key",
+  "apiKeys.upstreamSecretHint": "Leave blank to keep the saved key",
+  "apiKeys.upstreamClearSecret": "Clear saved upstream key (disable forwarding first)",
+  "apiKeys.upstreamSecretSaved": "Key saved on server; not returned to this page",
+  "apiKeys.upstreamSecretMissing": "No upstream key saved",
+  "apiKeys.upstreamActive": "Upstream forwarding · original upstream usage",
+  "apiKeys.upstreamInvalid": "Use an HTTPS base URL without credentials/query/fragment and supply an upstream key before enabling forwarding.",
+
   "login.title": "Sign in",
   "login.subtitle": "Enter admin password to continue",
   "login.firstRunPassword": "First-run admin password:",

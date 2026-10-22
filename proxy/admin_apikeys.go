@@ -8,24 +8,25 @@ import (
 )
 
 type apiKeyView struct {
-	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled"`
-	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode"`
-	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio"`
-	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio"`
-	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio"`
-	AccountCount                      int      `json:"accountCount"`
-	ID                                string   `json:"id"`
-	Name                              string   `json:"name,omitempty"`
-	Key                               string   `json:"key,omitempty"`
-	KeyMasked                         string   `json:"keyMasked"`
-	Enabled                           bool     `json:"enabled"`
-	CreatedAt                         int64    `json:"createdAt"`
-	LastUsedAt                        int64    `json:"lastUsedAt,omitempty"`
-	TokenLimit                        int64    `json:"tokenLimit,omitempty"`
-	CreditLimit                       float64  `json:"creditLimit,omitempty"`
-	TokensUsed                        int64    `json:"tokensUsed"`
-	CreditsUsed                       float64  `json:"creditsUsed"`
-	RequestsCount                     int64    `json:"requestsCount"`
+	UpstreamForward                   *apiKeyUpstreamView `json:"upstreamForward,omitempty"`
+	PromptCacheEmulationEnabled       *bool               `json:"promptCacheEmulationEnabled"`
+	PromptCacheEmulationMode          *string             `json:"promptCacheEmulationMode"`
+	PromptCacheEmulationRatio         *float64            `json:"promptCacheEmulationRatio"`
+	PromptCacheCreationEmulationRatio *float64            `json:"promptCacheCreationEmulationRatio"`
+	PromptCacheReadEmulationRatio     *float64            `json:"promptCacheReadEmulationRatio"`
+	AccountCount                      int                 `json:"accountCount"`
+	ID                                string              `json:"id"`
+	Name                              string              `json:"name,omitempty"`
+	Key                               string              `json:"key,omitempty"`
+	KeyMasked                         string              `json:"keyMasked"`
+	Enabled                           bool                `json:"enabled"`
+	CreatedAt                         int64               `json:"createdAt"`
+	LastUsedAt                        int64               `json:"lastUsedAt,omitempty"`
+	TokenLimit                        int64               `json:"tokenLimit,omitempty"`
+	CreditLimit                       float64             `json:"creditLimit,omitempty"`
+	TokensUsed                        int64               `json:"tokensUsed"`
+	CreditsUsed                       float64             `json:"creditsUsed"`
+	RequestsCount                     int64               `json:"requestsCount"`
 }
 
 func toApiKeyView(entry config.ApiKeyEntry) apiKeyView {
@@ -36,6 +37,7 @@ func toApiKeyView(entry config.ApiKeyEntry) apiKeyView {
 		}
 	}
 	return apiKeyView{
+		UpstreamForward:                   upstreamView(entry.UpstreamForward),
 		AccountCount:                      count,
 		PromptCacheEmulationEnabled:       entry.PromptCacheEmulationEnabled,
 		PromptCacheEmulationMode:          entry.PromptCacheEmulationMode,
@@ -83,11 +85,12 @@ func (h *Handler) apiGetApiKey(w http.ResponseWriter, _ *http.Request, id string
 }
 
 type apiKeyCreateRequest struct {
-	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled"`
-	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode"`
-	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio"`
-	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio"`
-	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio"`
+	UpstreamForward                   *apiKeyUpstreamRequest `json:"upstreamForward,omitempty"`
+	PromptCacheEmulationEnabled       *bool                  `json:"promptCacheEmulationEnabled"`
+	PromptCacheEmulationMode          *string                `json:"promptCacheEmulationMode"`
+	PromptCacheEmulationRatio         *float64               `json:"promptCacheEmulationRatio"`
+	PromptCacheCreationEmulationRatio *float64               `json:"promptCacheCreationEmulationRatio"`
+	PromptCacheReadEmulationRatio     *float64               `json:"promptCacheReadEmulationRatio"`
 
 	Name        string  `json:"name,omitempty"`
 	Key         string  `json:"key,omitempty"`
@@ -120,11 +123,12 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 		PromptCacheCreationEmulationRatio: req.PromptCacheCreationEmulationRatio,
 		PromptCacheReadEmulationRatio:     req.PromptCacheReadEmulationRatio,
 
-		Name:        req.Name,
-		Key:         keyValue,
-		Enabled:     enabled,
-		TokenLimit:  req.TokenLimit,
-		CreditLimit: req.CreditLimit,
+		Name:            req.Name,
+		UpstreamForward: mergeUpstreamConfig(nil, req.UpstreamForward),
+		Key:             keyValue,
+		Enabled:         enabled,
+		TokenLimit:      req.TokenLimit,
+		CreditLimit:     req.CreditLimit,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -142,12 +146,13 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 type apiKeyUpdateRequest struct {
-	ClearPromptCacheOverrides         bool     `json:"clearPromptCacheOverrides,omitempty"`
-	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled"`
-	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode"`
-	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio"`
-	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio"`
-	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio"`
+	UpstreamForward                   *apiKeyUpstreamRequest `json:"upstreamForward,omitempty"`
+	ClearPromptCacheOverrides         bool                   `json:"clearPromptCacheOverrides,omitempty"`
+	PromptCacheEmulationEnabled       *bool                  `json:"promptCacheEmulationEnabled"`
+	PromptCacheEmulationMode          *string                `json:"promptCacheEmulationMode"`
+	PromptCacheEmulationRatio         *float64               `json:"promptCacheEmulationRatio"`
+	PromptCacheCreationEmulationRatio *float64               `json:"promptCacheCreationEmulationRatio"`
+	PromptCacheReadEmulationRatio     *float64               `json:"promptCacheReadEmulationRatio"`
 
 	Name        *string  `json:"name,omitempty"`
 	Key         *string  `json:"key,omitempty"`
@@ -172,6 +177,9 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	patch := *existing
+	if req.UpstreamForward != nil {
+		patch.UpstreamForward = mergeUpstreamConfig(existing.UpstreamForward, req.UpstreamForward)
+	}
 	if req.Name != nil {
 		patch.Name = *req.Name
 	}

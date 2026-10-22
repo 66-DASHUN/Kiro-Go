@@ -64,6 +64,14 @@ func (h *Handler) authenticate(r *http.Request) (*config.ApiKeyEntry, error) {
 	if !entry.Enabled {
 		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key disabled")
 	}
+	if entry.UpstreamForward != nil && entry.UpstreamForward.Enabled {
+		if overToken, _ := config.ApiKeyOverLimit(*entry); overToken {
+			return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "token limit exceeded")
+		}
+		// Forwarded calls do not charge Kiro Credits, so a historical local
+		// credit counter must not block the upstream route.
+		return entry, nil
+	}
 	if overToken, overCredit := config.ApiKeyOverLimit(*entry); overToken || overCredit {
 		if overToken {
 			return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "token limit exceeded")
