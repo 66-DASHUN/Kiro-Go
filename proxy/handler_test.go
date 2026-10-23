@@ -312,6 +312,52 @@ func TestUpdateSettingsReloadsPoolAfterAllowOverUsageChange(t *testing.T) {
 	}
 }
 
+func TestCCTestProxySettingsKeepAPIKeyServerSideAndSupportClear(t *testing.T) {
+	if err := config.Init(proxyTempDir(t) + "/kiro.db"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	h := &Handler{}
+
+	post := func(body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/admin/api/settings", strings.NewReader(body))
+		h.apiUpdateSettings(rec, req)
+		return rec
+	}
+	if rec := post(`{"cctestProxyBaseUrl":"https://proxy.example/v1","cctestProxyApiKey":"server-only-secret"}`); rec.Code != http.StatusOK {
+		t.Fatalf("save CCTest proxy settings: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := httptest.NewRecorder()
+	h.apiGetSettings(rec, httptest.NewRequest(http.MethodGet, "/admin/api/settings", nil))
+	if strings.Contains(rec.Body.String(), "server-only-secret") {
+		t.Fatal("settings response leaked the saved CCTest proxy API key")
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode settings response: %v", err)
+	}
+	if got["cctestProxyBaseUrl"] != "https://proxy.example/v1" || got["cctestProxyApiKeyConfigured"] != true {
+		t.Fatalf("unexpected CCTest proxy settings response: %#v", got)
+	}
+
+	if rec := post(`{"cctestProxyBaseUrl":"https://proxy2.example/v1"}`); rec.Code != http.StatusOK {
+		t.Fatalf("update CCTest proxy URL: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stored := config.Get()
+	if stored.CCTestProxyBaseURL != "https://proxy2.example/v1" || stored.CCTestProxyAPIKey != "server-only-secret" {
+		t.Fatal("updating the URL should preserve the saved API key")
+	}
+
+	if rec := post(`{"clearCctestProxyApiKey":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("clear CCTest proxy API key: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stored = config.Get()
+	if stored.CCTestProxyBaseURL != "https://proxy2.example/v1" || stored.CCTestProxyAPIKey != "" {
+		t.Fatal("clearing the key should retain the upstream URL")
+	}
+}
+
 func TestAdminModelMappingsSaveAndApply(t *testing.T) {
 	if err := config.Init(proxyTempDir(t) + "/kiro.db"); err != nil {
 		t.Fatalf("config.Init: %v", err)

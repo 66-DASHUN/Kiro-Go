@@ -501,12 +501,41 @@
                 </div>
               </div>
             </div>
+            <div class="api-key-cache-settings">
+              <div class="form-group">
+                <label class="flex items-center gap-2">
+                  <span class="switch"><input type="checkbox" id="apiKeyCCTestEnabled" /><span class="slider"></span></span>
+                  <span data-i18n="apiKeys.cctestEnabled"></span>
+                </label>
+                <small data-i18n="apiKeys.cctestHint"></small>
+              </div>
+            </div>
             <div class="api-key-editor-actions">
               <button class="btn btn-primary" id="createApiKeyBtn" type="button" data-i18n="settings.createApiKey"></button>
               <button class="btn btn-outline hidden" id="cancelApiKeyEditBtn" type="button" data-i18n="common.cancel"></button>
             </div>
             <div id="apiKeysList" class="table-wrap"></div>
           </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><span class="card-title" data-i18n="cctestProxy.title"></span></div>
+          <p class="help-block" data-i18n="cctestProxy.hint"></p>
+          <div class="cache-policy-grid">
+            <div class="form-group">
+              <label for="cctestProxyBaseURL" data-i18n="cctestProxy.baseURL"></label>
+              <input type="url" id="cctestProxyBaseURL" placeholder="https://api.example.com/v1" autocomplete="off" />
+            </div>
+            <div class="form-group">
+              <label for="cctestProxyAPIKey" data-i18n="cctestProxy.apiKey"></label>
+              <input type="password" id="cctestProxyAPIKey" autocomplete="new-password" spellcheck="false" data-i18n-placeholder="cctestProxy.apiKeyHint" />
+              <small id="cctestProxyAPIKeyStatus"></small>
+            </div>
+            <div class="form-group">
+              <label><input type="checkbox" id="clearCCTestProxyAPIKey" /> <span data-i18n="cctestProxy.clearApiKey"></span></label>
+            </div>
+          </div>
+          <button class="btn btn-primary" id="saveCCTestProxyBtn" type="button" data-i18n="cctestProxy.save"></button>
         </div>
 
         <div class="card">

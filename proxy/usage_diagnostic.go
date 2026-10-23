@@ -11,6 +11,8 @@ type usageDiagnostic struct {
 	RequestID                      string `json:"request_id,omitempty"`
 	Endpoint                       string `json:"endpoint,omitempty"`
 	Route                          string `json:"route,omitempty"`
+	ProbeKind                      string `json:"probe_kind,omitempty"`
+	ProbeRule                      string `json:"probe_rule,omitempty"`
 	KiroRounds                     int    `json:"kiro_rounds"`
 	Model                          string `json:"model,omitempty"`
 	RequestInputEstimate           int    `json:"request_input_estimate"`

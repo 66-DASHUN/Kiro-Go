@@ -57,6 +57,9 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	if err := ValidateUpstreamForward(entry.UpstreamForward); err != nil {
 		return ApiKeyEntry{}, err
 	}
+	if err := validateApiKeyProbeRouting(entry); err != nil {
+		return ApiKeyEntry{}, err
+	}
 	if err := validateApiKeyPromptCacheOverrides(entry); err != nil {
 		return ApiKeyEntry{}, err
 	}
@@ -161,6 +164,9 @@ func updateApiKey(id string, mutate func(idx int, candidate *ApiKeyEntry) error,
 	if err := ValidateUpstreamForward(candidate.UpstreamForward); err != nil {
 		return err
 	}
+	if err := validateApiKeyProbeRouting(candidate); err != nil {
+		return err
+	}
 	if err := validateApiKeyPromptCacheOverrides(candidate); err != nil {
 		return err
 	}
@@ -198,6 +204,10 @@ func ClearPromptCacheOverrides(id string) error {
 }
 
 func applyApiKeyPatchLocked(idx int, patch ApiKeyEntry, candidate *ApiKeyEntry) error {
+	if patch.CCTestTextHandlingEnabled != nil {
+		value := *patch.CCTestTextHandlingEnabled
+		candidate.CCTestTextHandlingEnabled = &value
+	}
 	if patch.UpstreamForward != nil {
 		forward := *patch.UpstreamForward
 		candidate.UpstreamForward = &forward
@@ -256,6 +266,10 @@ func clearPromptCacheOverrides(entry *ApiKeyEntry) {
 }
 
 func cloneApiKeyEntry(entry ApiKeyEntry) ApiKeyEntry {
+	if entry.CCTestTextHandlingEnabled != nil {
+		value := *entry.CCTestTextHandlingEnabled
+		entry.CCTestTextHandlingEnabled = &value
+	}
 	if entry.UpstreamForward != nil {
 		forward := *entry.UpstreamForward
 		entry.UpstreamForward = &forward

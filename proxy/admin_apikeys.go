@@ -8,6 +8,7 @@ import (
 )
 
 type apiKeyView struct {
+	CCTestTextHandlingEnabled         bool                `json:"cctestTextHandlingEnabled"`
 	UpstreamForward                   *apiKeyUpstreamView `json:"upstreamForward,omitempty"`
 	PromptCacheEmulationEnabled       *bool               `json:"promptCacheEmulationEnabled"`
 	PromptCacheEmulationMode          *string             `json:"promptCacheEmulationMode"`
@@ -37,6 +38,7 @@ func toApiKeyView(entry config.ApiKeyEntry) apiKeyView {
 		}
 	}
 	return apiKeyView{
+		CCTestTextHandlingEnabled:         entry.CCTestTextHandling(),
 		UpstreamForward:                   upstreamView(entry.UpstreamForward),
 		AccountCount:                      count,
 		PromptCacheEmulationEnabled:       entry.PromptCacheEmulationEnabled,
@@ -85,6 +87,7 @@ func (h *Handler) apiGetApiKey(w http.ResponseWriter, _ *http.Request, id string
 }
 
 type apiKeyCreateRequest struct {
+	CCTestTextHandlingEnabled         *bool                  `json:"cctestTextHandlingEnabled,omitempty"`
 	UpstreamForward                   *apiKeyUpstreamRequest `json:"upstreamForward,omitempty"`
 	PromptCacheEmulationEnabled       *bool                  `json:"promptCacheEmulationEnabled"`
 	PromptCacheEmulationMode          *string                `json:"promptCacheEmulationMode"`
@@ -117,6 +120,7 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry, err := config.AddApiKey(config.ApiKeyEntry{
+		CCTestTextHandlingEnabled:         req.CCTestTextHandlingEnabled,
 		PromptCacheEmulationEnabled:       req.PromptCacheEmulationEnabled,
 		PromptCacheEmulationMode:          req.PromptCacheEmulationMode,
 		PromptCacheEmulationRatio:         req.PromptCacheEmulationRatio,
@@ -146,6 +150,7 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 type apiKeyUpdateRequest struct {
+	CCTestTextHandlingEnabled         *bool                  `json:"cctestTextHandlingEnabled,omitempty"`
 	UpstreamForward                   *apiKeyUpstreamRequest `json:"upstreamForward,omitempty"`
 	ClearPromptCacheOverrides         bool                   `json:"clearPromptCacheOverrides,omitempty"`
 	PromptCacheEmulationEnabled       *bool                  `json:"promptCacheEmulationEnabled"`
@@ -177,6 +182,9 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	patch := *existing
+	if req.CCTestTextHandlingEnabled != nil {
+		patch.CCTestTextHandlingEnabled = req.CCTestTextHandlingEnabled
+	}
 	if req.UpstreamForward != nil {
 		patch.UpstreamForward = mergeUpstreamConfig(existing.UpstreamForward, req.UpstreamForward)
 	}

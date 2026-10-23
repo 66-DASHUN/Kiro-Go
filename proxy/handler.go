@@ -360,6 +360,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.forwardDedicatedUpstream(w, ar) {
 			return
 		}
+		if h.forwardCCTestProbe(w, ar) {
+			return
+		}
 		h.handleClaudeMessages(w, ar)
 	case path == "/v1/messages/count_tokens" || path == "/messages/count_tokens":
 		ar := h.authenticateForClaude(w, r)
@@ -3689,6 +3692,8 @@ func (h *Handler) apiGetSettings(w http.ResponseWriter, _ *http.Request) {
 	cache := config.PromptCacheSettings{Enabled: rawConfig.PromptCacheEmulationEnabled, Mode: rawConfig.PromptCacheEmulationMode, Ratio: rawConfig.PromptCacheEmulationRatio, CreationRatio: rawConfig.PromptCacheCreationEmulationRatio, ReadRatio: rawConfig.PromptCacheReadEmulationRatio}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"requireApiKey":                     config.IsApiKeyRequired(),
+		"cctestProxyBaseUrl":                rawConfig.CCTestProxyBaseURL,
+		"cctestProxyApiKeyConfigured":       rawConfig.CCTestProxyAPIKey != "",
 		"promptCacheEmulationEnabled":       cache.Enabled,
 		"promptCacheEmulationMode":          cache.Mode,
 		"promptCacheEmulationRatio":         cache.Ratio,
@@ -3777,11 +3782,14 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio"`
 		PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio"`
 
-		RequireApiKey          *bool  `json:"requireApiKey,omitempty"`
-		Password               string `json:"password,omitempty"`
-		AllowOverUsage         *bool  `json:"allowOverUsage,omitempty"`
-		LenientStreamIntegrity *bool  `json:"lenientStreamIntegrity,omitempty"`
-		SessionAffinity        *bool  `json:"sessionAffinity,omitempty"`
+		RequireApiKey          *bool   `json:"requireApiKey,omitempty"`
+		CCTestProxyBaseURL     *string `json:"cctestProxyBaseUrl,omitempty"`
+		CCTestProxyAPIKey      *string `json:"cctestProxyApiKey,omitempty"`
+		ClearCCTestProxyAPIKey bool    `json:"clearCctestProxyApiKey,omitempty"`
+		Password               string  `json:"password,omitempty"`
+		AllowOverUsage         *bool   `json:"allowOverUsage,omitempty"`
+		LenientStreamIntegrity *bool   `json:"lenientStreamIntegrity,omitempty"`
+		SessionAffinity        *bool   `json:"sessionAffinity,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3825,6 +3833,14 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Password must be at least %d characters", config.MinAdminPasswordLength)})
 		return
+	}
+
+	if req.CCTestProxyBaseURL != nil || req.CCTestProxyAPIKey != nil || req.ClearCCTestProxyAPIKey {
+		if err := config.UpdateCCTestProxyConfig(req.CCTestProxyBaseURL, req.CCTestProxyAPIKey, req.ClearCCTestProxyAPIKey); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	if err := config.UpdateSettingsPatch(req.RequireApiKey, req.Password); err != nil {

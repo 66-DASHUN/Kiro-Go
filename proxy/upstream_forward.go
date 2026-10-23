@@ -55,7 +55,20 @@ func (h *Handler) forwardDedicatedUpstream(w http.ResponseWriter, r *http.Reques
 	if entry == nil || entry.UpstreamForward == nil || !entry.UpstreamForward.Enabled {
 		return false
 	}
-	c := entry.UpstreamForward
+	if entry.CCTestTextHandling() {
+		sendDedicatedUpstreamConfigError(h, w, r, "Conflicting probe-only and full-key forwarding settings")
+		return true
+	}
+	return h.forwardConfiguredUpstream(w, r, entry, entry.UpstreamForward, "")
+}
+
+// Both forwarding policies share the same byte-preserving transport. A probe
+// match changes the route label, never the upstream response or usage values.
+func (h *Handler) forwardConfiguredUpstream(w http.ResponseWriter, r *http.Request, entry *config.ApiKeyEntry, c *config.UpstreamForwardConfig, probeKind string) bool {
+	route, label := "dedicated_upstream", "Dedicated upstream"
+	if probeKind != "" {
+		route, label = "cctest_upstream", "Probe upstream"
+	}
 	if err := config.ValidateUpstreamForward(c); err != nil {
 		sendDedicatedUpstreamConfigError(h, w, r, "Invalid dedicated upstream configuration")
 		return true
@@ -82,6 +95,14 @@ func (h *Handler) forwardDedicatedUpstream(w http.ResponseWriter, r *http.Reques
 	var usage *upstreamUsageReader
 	status := http.StatusBadGateway
 	if isUpstreamInference(r.URL.Path, r.Method) {
+		// Forwarding bypasses the local handlers that normally initialize and
+		// emit diagnostics. Create the trace before applying upstream usage.
+		diagnostic := usageDiagnostic{Route: route}
+		if probeKind != "" {
+			diagnostic.ProbeKind, diagnostic.ProbeRule = probeKind, cctestProbeRule
+		}
+		setRequestUsageDiagnostic(r.Context(), diagnostic)
+		defer emitRequestUsageDiagnostic(r.Context())
 		defer func() {
 			if usage == nil {
 				usage = &upstreamUsageReader{}
@@ -91,12 +112,12 @@ func (h *Handler) forwardDedicatedUpstream(w http.ResponseWriter, r *http.Reques
 				logger.Warnf("[Forward] Failed to persist upstream usage")
 			}
 			success := status >= 200 && status < 300 && !usage.readError && r.Context().Err() == nil
-			message := "Dedicated upstream"
+			message := label
 			if !success {
-				message = fmt.Sprintf("Dedicated upstream HTTP %d or interrupted response", status)
+				message = fmt.Sprintf("%s HTTP %d or interrupted response", label, status)
 			}
 			updateRequestUsageDiagnostic(r.Context(), func(d *usageDiagnostic) {
-				d.Route = "dedicated_upstream"
+				d.Route = route
 				d.Model = usage.model
 				d.ReportedInputTokens = int(usage.input)
 				d.ReportedOutputTokens = int(usage.output)
@@ -155,6 +176,10 @@ func (h *Handler) forwardDedicatedUpstream(w http.ResponseWriter, r *http.Reques
 				w.Header().Del(name)
 			}
 			res.Header.Del("Set-Cookie")
+			if probeKind != "" {
+				res.Header.Set("X-Kiro-Route", route)
+				res.Header.Set("X-Kiro-Probe-Rule", cctestProbeRule)
+			}
 			return nil
 		},
 	}

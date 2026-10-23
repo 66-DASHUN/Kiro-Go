@@ -1672,6 +1672,11 @@
     const res = await api('/settings');
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
+    $('cctestProxyBaseURL').value = d.cctestProxyBaseUrl || '';
+    $('cctestProxyAPIKey').value = '';
+    $('clearCCTestProxyAPIKey').checked = false;
+    $('cctestProxyAPIKeyStatus').dataset.configured = String(!!d.cctestProxyApiKeyConfigured);
+    $('cctestProxyAPIKeyStatus').textContent = t(d.cctestProxyApiKeyConfigured ? 'cctestProxy.apiKeySaved' : 'cctestProxy.apiKeyMissing');
     syncApiKeyManagementVisibility();
     $('allowOverUsage').checked = d.allowOverUsage || false;
     $('lenientStreamIntegrity').checked = d.lenientStreamIntegrity || false;
@@ -2023,6 +2028,40 @@
       toast((e && e.message) || t('common.saveFailed'), 'error');
     }
   }
+  async function saveCCTestProxySettings() {
+    const baseURL = $('cctestProxyBaseURL').value.trim();
+    const apiKey = $('cctestProxyAPIKey').value.trim();
+    const clearAPIKey = $('clearCCTestProxyAPIKey').checked;
+    if (clearAPIKey && apiKey) {
+      toast(t('cctestProxy.clearAndReplaceConflict'), 'warning');
+      return;
+    }
+    if (baseURL) {
+      try {
+        const url = new URL(baseURL);
+        if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.search || url.hash) throw new Error();
+      } catch (_) {
+        toast(t('cctestProxy.invalid'), 'warning');
+        return;
+      }
+    }
+    if (clearAPIKey) {
+      if (!await confirmAction(t('cctestProxy.confirmClear'), { title: t('cctestProxy.title'), confirmText: t('cctestProxy.clearApiKey') })) return;
+    }
+    try {
+      const res = await api('/settings', { method: 'POST', body: JSON.stringify({ cctestProxyBaseUrl: baseURL, ...(apiKey ? { cctestProxyApiKey: apiKey } : {}), clearCctestProxyApiKey: clearAPIKey }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(localizedError(d.error) || t('common.saveFailed'));
+      $('cctestProxyAPIKey').value = '';
+      $('clearCCTestProxyAPIKey').checked = false;
+      const configured = clearAPIKey ? false : !!apiKey || $('cctestProxyAPIKeyStatus').dataset.configured === 'true';
+      $('cctestProxyAPIKeyStatus').dataset.configured = String(configured);
+      $('cctestProxyAPIKeyStatus').textContent = t(configured ? 'cctestProxy.apiKeySaved' : 'cctestProxy.apiKeyMissing');
+      toast(t('cctestProxy.saved'), 'success');
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+    }
+  }
   function syncApiKeyManagementVisibility() {
     const enabled = !!$('requireApiKey').checked;
     const management = $('apiKeyManagement');
@@ -2083,7 +2122,7 @@
       return '<tr>' +
         '<td><strong>' + escapeHtml(k.name || t('settings.unnamedApiKey')) + '</strong>' +
         '<small class="api-key-policy-summary">' + escapeHtml(t('apiKeys.boundAccounts', accountsData.filter(a => a.apiKeyId === k.id).length)) + '</small>' +
-        '<small class="api-key-policy-summary">' + escapeHtml(k.upstreamForward?.enabled ? t('apiKeys.upstreamActive') : apiKeyCacheSummary(k)) + '</small></td>' +
+        '<small class="api-key-policy-summary">' + escapeHtml(k.upstreamForward?.enabled ? t('apiKeys.upstreamActive') : (k.cctestTextHandlingEnabled ? t('apiKeys.cctestActive') + ' · ' : '') + apiKeyCacheSummary(k)) + '</small></td>' +
         '<td>' + keyCell + '</td>' +
         '<td><span class="api-key-status ' + statusClass + '" title="' + escapeAttr(statusLabel) + '" aria-label="' + escapeAttr(statusLabel) + '"><i class="fa-solid ' + statusIcon + '" aria-hidden="true"></i></span></td>' +
         '<td>' + usage + '</td>' +
@@ -2143,6 +2182,7 @@
     if (cancelBtn) cancelBtn.classList.toggle('hidden', !editingApiKeyId);
   }
   function resetApiKeyUpstreamEditor(entry) {
+    $('apiKeyCCTestEnabled').checked = !!entry?.cctestTextHandlingEnabled;
     const upstream = entry?.upstreamForward;
     $('apiKeyUpstreamEnabled').checked = !!upstream?.enabled;
     $('apiKeyUpstreamURL').value = upstream?.baseUrl || '';
@@ -2194,12 +2234,18 @@
     if (!cacheValues) return null;
     const upstreamForward = getApiKeyUpstreamEditorValues();
     if (!upstreamForward) return null;
+    const cctestTextHandlingEnabled = $('apiKeyCCTestEnabled').checked;
+    if (cctestTextHandlingEnabled && upstreamForward.enabled) {
+      toast(t('apiKeys.cctestConflict'), 'warning');
+      return null;
+    }
     return {
       name: $('newApiKeyName').value.trim(),
       key: customKey,
       tokenLimit,
       creditLimit,
       upstreamForward,
+      cctestTextHandlingEnabled,
       ...cacheValues,
     };
   }
@@ -3776,6 +3822,7 @@
     });
     $('requireApiKey').addEventListener('change', syncApiKeyManagementVisibility);
     $('saveApiSettingsBtn').addEventListener('click', saveApiSettings);
+    $('saveCCTestProxyBtn').addEventListener('click', saveCCTestProxySettings);
     $('refreshApiKeysBtn').addEventListener('click', loadApiKeys);
     $('createApiKeyBtn').addEventListener('click', createApiKey);
     $('cancelApiKeyEditBtn').addEventListener('click', clearApiKeyEditor);

@@ -172,14 +172,15 @@ type UpstreamForwardConfig struct {
 }
 
 type ApiKeyEntry struct {
-	UpstreamForward *UpstreamForwardConfig `json:"upstreamForward,omitempty"`
-	ID              string                 `json:"id"`
-	Name            string                 `json:"name,omitempty"`
-	Key             string                 `json:"key"`
-	Enabled         bool                   `json:"enabled"`
-	Migrated        bool                   `json:"migrated,omitempty"`
-	CreatedAt       int64                  `json:"createdAt"`
-	LastUsedAt      int64                  `json:"lastUsedAt,omitempty"`
+	CCTestTextHandlingEnabled *bool                  `json:"cctestTextHandlingEnabled,omitempty"`
+	UpstreamForward           *UpstreamForwardConfig `json:"upstreamForward,omitempty"`
+	ID                        string                 `json:"id"`
+	Name                      string                 `json:"name,omitempty"`
+	Key                       string                 `json:"key"`
+	Enabled                   bool                   `json:"enabled"`
+	Migrated                  bool                   `json:"migrated,omitempty"`
+	CreatedAt                 int64                  `json:"createdAt"`
+	LastUsedAt                int64                  `json:"lastUsedAt,omitempty"`
 
 	TokenLimit  int64   `json:"tokenLimit,omitempty"`
 	CreditLimit float64 `json:"creditLimit,omitempty"`
@@ -201,6 +202,8 @@ type Config struct {
 	RequireApiKey                     bool          `json:"requireApiKey"`
 	ApiKey                            string        `json:"apiKey,omitempty"`
 	ApiKeys                           []ApiKeyEntry `json:"apiKeys,omitempty"`
+	CCTestProxyBaseURL                string        `json:"cctestProxyBaseUrl,omitempty"`
+	CCTestProxyAPIKey                 string        `json:"cctestProxyApiKey,omitempty"`
 	KiroVersion                       string        `json:"kiroVersion,omitempty"`
 	SystemVersion                     string        `json:"systemVersion,omitempty"`
 	NodeVersion                       string        `json:"nodeVersion,omitempty"`
