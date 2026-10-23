@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"net/url"
 	"strings"
 )
 
@@ -10,23 +11,39 @@ func (entry ApiKeyEntry) CCTestTextHandling() bool {
 	return entry.CCTestTextHandlingEnabled != nil && *entry.CCTestTextHandlingEnabled
 }
 
-func validateApiKeyProbeRouting(entry ApiKeyEntry) error {
-	if entry.CCTestTextHandling() && entry.UpstreamForward != nil && entry.UpstreamForward.Enabled {
-		return errors.New("probe-only forwarding and full-key forwarding cannot both be enabled")
-	}
-	return nil
+// CCTestProxyConfig is exclusively the global destination for matched probes.
+type CCTestProxyConfig struct {
+	BaseURL string
+	APIKey  string
 }
 
 // GetCCTestProxyConfig returns an atomic copy of the global upstream pair.
 // Callers validate completeness only after matching a probe: an incomplete
 // configuration must not break normal requests on the shared client key.
-func GetCCTestProxyConfig() UpstreamForwardConfig {
+func GetCCTestProxyConfig() CCTestProxyConfig {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	if cfg == nil {
-		return UpstreamForwardConfig{Enabled: true}
+		return CCTestProxyConfig{}
 	}
-	return UpstreamForwardConfig{Enabled: true, BaseURL: cfg.CCTestProxyBaseURL, APIKey: cfg.CCTestProxyAPIKey}
+	return CCTestProxyConfig{BaseURL: cfg.CCTestProxyBaseURL, APIKey: cfg.CCTestProxyAPIKey}
+}
+
+// ValidateCCTestProxyConfig never includes supplied values in errors.
+func ValidateCCTestProxyConfig(c CCTestProxyConfig, requireComplete bool) error {
+	if strings.ContainsAny(c.APIKey, "\r\n") {
+		return errors.New("invalid upstream API key")
+	}
+	if c.BaseURL != "" {
+		u, err := url.Parse(c.BaseURL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(c.BaseURL, "\r\n") {
+			return errors.New("upstream base URL must be HTTPS without credentials, query or fragment")
+		}
+	}
+	if requireComplete && (c.BaseURL == "" || strings.TrimSpace(c.APIKey) == "") {
+		return errors.New("probe upstream requires base URL and API key")
+	}
+	return nil
 }
 
 // UpdateCCTestProxyConfig saves the global upstream configuration used by the
@@ -49,7 +66,7 @@ func UpdateCCTestProxyConfig(baseURL, apiKey *string, clearAPIKey bool) error {
 		updatedKey = strings.TrimSpace(*apiKey)
 	}
 
-	if err := ValidateUpstreamForward(&UpstreamForwardConfig{BaseURL: updatedURL, APIKey: updatedKey}); err != nil {
+	if err := ValidateCCTestProxyConfig(CCTestProxyConfig{BaseURL: updatedURL, APIKey: updatedKey}, false); err != nil {
 		return err
 	}
 

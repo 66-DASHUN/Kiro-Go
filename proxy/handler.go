@@ -357,9 +357,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ar == nil {
 			return
 		}
-		if h.forwardDedicatedUpstream(w, ar) {
-			return
-		}
 		if h.forwardCCTestProbe(w, ar) {
 			return
 		}
@@ -369,16 +366,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ar == nil {
 			return
 		}
-		if h.forwardDedicatedUpstream(w, ar) {
-			return
-		}
 		h.handleCountTokens(w, ar)
 	case path == "/v1/chat/completions" || path == "/chat/completions":
 		ar := h.authenticateForOpenAIRequest(w, r)
 		if ar == nil {
-			return
-		}
-		if h.forwardDedicatedUpstream(w, ar) {
 			return
 		}
 		h.handleOpenAIChat(w, ar)
@@ -387,16 +378,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ar == nil {
 			return
 		}
-		if h.forwardDedicatedUpstream(w, ar) {
-			return
-		}
 		h.handleOpenAIResponses(w, ar)
 	case strings.HasPrefix(path, "/v1/responses/") || strings.HasPrefix(path, "/responses/"):
 		ar := h.authenticateForOpenAI(w, r)
 		if ar == nil {
-			return
-		}
-		if h.forwardDedicatedUpstream(w, ar) {
 			return
 		}
 		id := strings.TrimPrefix(strings.TrimPrefix(path, "/v1/responses/"), "/responses/")
@@ -413,16 +398,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if ar == nil {
 			return
 		}
-		if h.forwardDedicatedUpstream(w, ar) {
-			return
-		}
 		h.handleModels(w, ar)
 	case path == "/v1/codex/models" || path == "/codex/models" || path == "/v1/codex-models":
 		ar := h.authenticateForOpenAI(w, r)
 		if ar == nil {
-			return
-		}
-		if h.forwardDedicatedUpstream(w, ar) {
 			return
 		}
 		h.handleCodexModels(w, ar)

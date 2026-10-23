@@ -8,26 +8,25 @@ import (
 )
 
 type apiKeyView struct {
-	CCTestTextHandlingEnabled         bool                `json:"cctestTextHandlingEnabled"`
-	UpstreamForward                   *apiKeyUpstreamView `json:"upstreamForward,omitempty"`
-	PromptCacheEmulationEnabled       *bool               `json:"promptCacheEmulationEnabled"`
-	PromptCacheEmulationMode          *string             `json:"promptCacheEmulationMode"`
-	PromptCacheEmulationRatio         *float64            `json:"promptCacheEmulationRatio"`
-	PromptCacheCreationEmulationRatio *float64            `json:"promptCacheCreationEmulationRatio"`
-	PromptCacheReadEmulationRatio     *float64            `json:"promptCacheReadEmulationRatio"`
-	AccountCount                      int                 `json:"accountCount"`
-	ID                                string              `json:"id"`
-	Name                              string              `json:"name,omitempty"`
-	Key                               string              `json:"key,omitempty"`
-	KeyMasked                         string              `json:"keyMasked"`
-	Enabled                           bool                `json:"enabled"`
-	CreatedAt                         int64               `json:"createdAt"`
-	LastUsedAt                        int64               `json:"lastUsedAt,omitempty"`
-	TokenLimit                        int64               `json:"tokenLimit,omitempty"`
-	CreditLimit                       float64             `json:"creditLimit,omitempty"`
-	TokensUsed                        int64               `json:"tokensUsed"`
-	CreditsUsed                       float64             `json:"creditsUsed"`
-	RequestsCount                     int64               `json:"requestsCount"`
+	CCTestTextHandlingEnabled         bool     `json:"cctestTextHandlingEnabled"`
+	PromptCacheEmulationEnabled       *bool    `json:"promptCacheEmulationEnabled"`
+	PromptCacheEmulationMode          *string  `json:"promptCacheEmulationMode"`
+	PromptCacheEmulationRatio         *float64 `json:"promptCacheEmulationRatio"`
+	PromptCacheCreationEmulationRatio *float64 `json:"promptCacheCreationEmulationRatio"`
+	PromptCacheReadEmulationRatio     *float64 `json:"promptCacheReadEmulationRatio"`
+	AccountCount                      int      `json:"accountCount"`
+	ID                                string   `json:"id"`
+	Name                              string   `json:"name,omitempty"`
+	Key                               string   `json:"key,omitempty"`
+	KeyMasked                         string   `json:"keyMasked"`
+	Enabled                           bool     `json:"enabled"`
+	CreatedAt                         int64    `json:"createdAt"`
+	LastUsedAt                        int64    `json:"lastUsedAt,omitempty"`
+	TokenLimit                        int64    `json:"tokenLimit,omitempty"`
+	CreditLimit                       float64  `json:"creditLimit,omitempty"`
+	TokensUsed                        int64    `json:"tokensUsed"`
+	CreditsUsed                       float64  `json:"creditsUsed"`
+	RequestsCount                     int64    `json:"requestsCount"`
 }
 
 func toApiKeyView(entry config.ApiKeyEntry) apiKeyView {
@@ -39,7 +38,6 @@ func toApiKeyView(entry config.ApiKeyEntry) apiKeyView {
 	}
 	return apiKeyView{
 		CCTestTextHandlingEnabled:         entry.CCTestTextHandling(),
-		UpstreamForward:                   upstreamView(entry.UpstreamForward),
 		AccountCount:                      count,
 		PromptCacheEmulationEnabled:       entry.PromptCacheEmulationEnabled,
 		PromptCacheEmulationMode:          entry.PromptCacheEmulationMode,
@@ -87,13 +85,13 @@ func (h *Handler) apiGetApiKey(w http.ResponseWriter, _ *http.Request, id string
 }
 
 type apiKeyCreateRequest struct {
-	CCTestTextHandlingEnabled         *bool                  `json:"cctestTextHandlingEnabled,omitempty"`
-	UpstreamForward                   *apiKeyUpstreamRequest `json:"upstreamForward,omitempty"`
-	PromptCacheEmulationEnabled       *bool                  `json:"promptCacheEmulationEnabled"`
-	PromptCacheEmulationMode          *string                `json:"promptCacheEmulationMode"`
-	PromptCacheEmulationRatio         *float64               `json:"promptCacheEmulationRatio"`
-	PromptCacheCreationEmulationRatio *float64               `json:"promptCacheCreationEmulationRatio"`
-	PromptCacheReadEmulationRatio     *float64               `json:"promptCacheReadEmulationRatio"`
+	CCTestTextHandlingEnabled         *bool           `json:"cctestTextHandlingEnabled,omitempty"`
+	RemovedUpstreamForward            json.RawMessage `json:"upstreamForward,omitempty"`
+	PromptCacheEmulationEnabled       *bool           `json:"promptCacheEmulationEnabled"`
+	PromptCacheEmulationMode          *string         `json:"promptCacheEmulationMode"`
+	PromptCacheEmulationRatio         *float64        `json:"promptCacheEmulationRatio"`
+	PromptCacheCreationEmulationRatio *float64        `json:"promptCacheCreationEmulationRatio"`
+	PromptCacheReadEmulationRatio     *float64        `json:"promptCacheReadEmulationRatio"`
 
 	Name        string  `json:"name,omitempty"`
 	Key         string  `json:"key,omitempty"`
@@ -110,6 +108,11 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(req.RemovedUpstreamForward) != 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Full-key upstream forwarding has been removed; use known-probe forwarding"})
+		return
+	}
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
@@ -127,12 +130,11 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 		PromptCacheCreationEmulationRatio: req.PromptCacheCreationEmulationRatio,
 		PromptCacheReadEmulationRatio:     req.PromptCacheReadEmulationRatio,
 
-		Name:            req.Name,
-		UpstreamForward: mergeUpstreamConfig(nil, req.UpstreamForward),
-		Key:             keyValue,
-		Enabled:         enabled,
-		TokenLimit:      req.TokenLimit,
-		CreditLimit:     req.CreditLimit,
+		Name:        req.Name,
+		Key:         keyValue,
+		Enabled:     enabled,
+		TokenLimit:  req.TokenLimit,
+		CreditLimit: req.CreditLimit,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -150,14 +152,14 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 type apiKeyUpdateRequest struct {
-	CCTestTextHandlingEnabled         *bool                  `json:"cctestTextHandlingEnabled,omitempty"`
-	UpstreamForward                   *apiKeyUpstreamRequest `json:"upstreamForward,omitempty"`
-	ClearPromptCacheOverrides         bool                   `json:"clearPromptCacheOverrides,omitempty"`
-	PromptCacheEmulationEnabled       *bool                  `json:"promptCacheEmulationEnabled"`
-	PromptCacheEmulationMode          *string                `json:"promptCacheEmulationMode"`
-	PromptCacheEmulationRatio         *float64               `json:"promptCacheEmulationRatio"`
-	PromptCacheCreationEmulationRatio *float64               `json:"promptCacheCreationEmulationRatio"`
-	PromptCacheReadEmulationRatio     *float64               `json:"promptCacheReadEmulationRatio"`
+	CCTestTextHandlingEnabled         *bool           `json:"cctestTextHandlingEnabled,omitempty"`
+	RemovedUpstreamForward            json.RawMessage `json:"upstreamForward,omitempty"`
+	ClearPromptCacheOverrides         bool            `json:"clearPromptCacheOverrides,omitempty"`
+	PromptCacheEmulationEnabled       *bool           `json:"promptCacheEmulationEnabled"`
+	PromptCacheEmulationMode          *string         `json:"promptCacheEmulationMode"`
+	PromptCacheEmulationRatio         *float64        `json:"promptCacheEmulationRatio"`
+	PromptCacheCreationEmulationRatio *float64        `json:"promptCacheCreationEmulationRatio"`
+	PromptCacheReadEmulationRatio     *float64        `json:"promptCacheReadEmulationRatio"`
 
 	Name        *string  `json:"name,omitempty"`
 	Key         *string  `json:"key,omitempty"`
@@ -181,12 +183,14 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	if len(req.RemovedUpstreamForward) != 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Full-key upstream forwarding has been removed; use known-probe forwarding"})
+		return
+	}
 	patch := *existing
 	if req.CCTestTextHandlingEnabled != nil {
 		patch.CCTestTextHandlingEnabled = req.CCTestTextHandlingEnabled
-	}
-	if req.UpstreamForward != nil {
-		patch.UpstreamForward = mergeUpstreamConfig(existing.UpstreamForward, req.UpstreamForward)
 	}
 	if req.Name != nil {
 		patch.Name = *req.Name

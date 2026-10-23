@@ -163,24 +163,15 @@ func ValidatePromptCacheSettings(s PromptCacheSettings) error {
 	return nil
 }
 
-// UpstreamForwardConfig routes every inference request for one authenticated key
-// to the same real upstream. APIKey is persisted server-side, never in key views.
-type UpstreamForwardConfig struct {
-	Enabled bool   `json:"enabled"`
-	BaseURL string `json:"baseUrl"`
-	APIKey  string `json:"apiKey"`
-}
-
 type ApiKeyEntry struct {
-	CCTestTextHandlingEnabled *bool                  `json:"cctestTextHandlingEnabled,omitempty"`
-	UpstreamForward           *UpstreamForwardConfig `json:"upstreamForward,omitempty"`
-	ID                        string                 `json:"id"`
-	Name                      string                 `json:"name,omitempty"`
-	Key                       string                 `json:"key"`
-	Enabled                   bool                   `json:"enabled"`
-	Migrated                  bool                   `json:"migrated,omitempty"`
-	CreatedAt                 int64                  `json:"createdAt"`
-	LastUsedAt                int64                  `json:"lastUsedAt,omitempty"`
+	CCTestTextHandlingEnabled *bool  `json:"cctestTextHandlingEnabled,omitempty"`
+	ID                        string `json:"id"`
+	Name                      string `json:"name,omitempty"`
+	Key                       string `json:"key"`
+	Enabled                   bool   `json:"enabled"`
+	Migrated                  bool   `json:"migrated,omitempty"`
+	CreatedAt                 int64  `json:"createdAt"`
+	LastUsedAt                int64  `json:"lastUsedAt,omitempty"`
 
 	TokenLimit  int64   `json:"tokenLimit,omitempty"`
 	CreditLimit float64 `json:"creditLimit,omitempty"`

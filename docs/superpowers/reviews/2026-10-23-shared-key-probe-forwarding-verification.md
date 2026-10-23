@@ -2,6 +2,8 @@
 
 Date: 2026-10-23 (Asia/Shanghai). Integration branch: `integration/kiro-reverse-2.1.0`.
 
+Follow-up: the user subsequently requested removal of full-key forwarding. That mode and its controls no longer exist; the probe-only behavior remains. See `2026-10-23-remove-full-key-forwarding.md`. The original verification below describes the preceding implementation.
+
 ## Delivered behavior
 
 The existing client API key can opt in through `cctestTextHandlingEnabled`; no new client key is required. The administrator saves the global CCTest upstream URL and secret in Settings. The secret is not returned by settings/key-view APIs. Omitted flag updates preserve the value, explicit false disables it, and legacy keys default to off.

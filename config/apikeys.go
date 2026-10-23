@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -53,12 +52,6 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	entry.Key = strings.TrimSpace(entry.Key)
 	if entry.Key == "" {
 		return ApiKeyEntry{}, errors.New("api key value must not be empty")
-	}
-	if err := ValidateUpstreamForward(entry.UpstreamForward); err != nil {
-		return ApiKeyEntry{}, err
-	}
-	if err := validateApiKeyProbeRouting(entry); err != nil {
-		return ApiKeyEntry{}, err
 	}
 	if err := validateApiKeyPromptCacheOverrides(entry); err != nil {
 		return ApiKeyEntry{}, err
@@ -161,12 +154,6 @@ func updateApiKey(id string, mutate func(idx int, candidate *ApiKeyEntry) error,
 	if err := mutate(idx, &candidate); err != nil {
 		return err
 	}
-	if err := ValidateUpstreamForward(candidate.UpstreamForward); err != nil {
-		return err
-	}
-	if err := validateApiKeyProbeRouting(candidate); err != nil {
-		return err
-	}
 	if err := validateApiKeyPromptCacheOverrides(candidate); err != nil {
 		return err
 	}
@@ -207,10 +194,6 @@ func applyApiKeyPatchLocked(idx int, patch ApiKeyEntry, candidate *ApiKeyEntry) 
 	if patch.CCTestTextHandlingEnabled != nil {
 		value := *patch.CCTestTextHandlingEnabled
 		candidate.CCTestTextHandlingEnabled = &value
-	}
-	if patch.UpstreamForward != nil {
-		forward := *patch.UpstreamForward
-		candidate.UpstreamForward = &forward
 	}
 	if patch.Name != "" {
 		candidate.Name = patch.Name
@@ -270,10 +253,6 @@ func cloneApiKeyEntry(entry ApiKeyEntry) ApiKeyEntry {
 		value := *entry.CCTestTextHandlingEnabled
 		entry.CCTestTextHandlingEnabled = &value
 	}
-	if entry.UpstreamForward != nil {
-		forward := *entry.UpstreamForward
-		entry.UpstreamForward = &forward
-	}
 	if entry.PromptCacheEmulationEnabled != nil {
 		value := *entry.PromptCacheEmulationEnabled
 		entry.PromptCacheEmulationEnabled = &value
@@ -295,27 +274,6 @@ func cloneApiKeyEntry(entry ApiKeyEntry) ApiKeyEntry {
 		entry.PromptCacheReadEmulationRatio = &value
 	}
 	return entry
-}
-
-// ValidateUpstreamForward does not include supplied values in errors because
-// URLs and credentials may contain secrets.
-func ValidateUpstreamForward(c *UpstreamForwardConfig) error {
-	if c == nil {
-		return nil
-	}
-	if strings.ContainsAny(c.APIKey, "\r\n") {
-		return errors.New("invalid upstream API key")
-	}
-	if c.BaseURL != "" {
-		u, err := url.Parse(c.BaseURL)
-		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(c.BaseURL, "\r\n") {
-			return errors.New("upstream base URL must be HTTPS without credentials, query or fragment")
-		}
-	}
-	if c.Enabled && (c.BaseURL == "" || strings.TrimSpace(c.APIKey) == "") {
-		return errors.New("enabled upstream requires base URL and API key")
-	}
-	return nil
 }
 
 func validateApiKeyPromptCacheOverrides(entry ApiKeyEntry) error {

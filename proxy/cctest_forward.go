@@ -33,5 +33,5 @@ func (h *Handler) forwardCCTestProbe(w http.ResponseWriter, r *http.Request) boo
 		return false
 	}
 	c := config.GetCCTestProxyConfig()
-	return h.forwardConfiguredUpstream(w, r, entry, &c, kind)
+	return h.forwardProbeUpstream(w, r, entry, c, kind)
 }
